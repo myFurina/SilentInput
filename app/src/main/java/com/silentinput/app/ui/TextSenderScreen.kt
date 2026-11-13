@@ -158,7 +158,7 @@ fun TextSenderScreen(
                     onClick = { onTargetModeChange("terminal") }
                 )
                 TargetModeChip(
-                    label = "应用 (Ctrl+V)",
+                    label = "应用",
                     selected = targetMode == "gui",
                     onClick = { onTargetModeChange("gui") }
                 )

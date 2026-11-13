@@ -5,6 +5,8 @@ SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 BIN_DIR="$HOME/.local/bin"
 APP_DIR="$HOME/.local/share/applications"
 ICON_FILE="$HOME/.local/share/icons/hicolor/scalable/apps/com.silentinput.controlcenter.svg"
+ICON_PNG_FILE="$HOME/.local/share/icons/hicolor/128x128/apps/com.silentinput.controlcenter.png"
+ICON_BASE_DIR="$HOME/.local/share/icons/hicolor"
 DATA_DIR="$HOME/.local/share/silentinput"
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 CONFIG_DIR="$HOME/.config/silentinput"
@@ -35,9 +37,11 @@ fi
 if [ -f "$SYSTEMD_USER_DIR/silentinput.service" ]; then
     rm -f "$SYSTEMD_USER_DIR/silentinput.service"
     echo "🗑️ 已移除 systemd 服务文件: $SYSTEMD_USER_DIR/silentinput.service"
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl --user daemon-reload 2>/dev/null || true
-    fi
+fi
+rm -f "$SYSTEMD_USER_DIR/default.target.wants/silentinput.service"
+rm -f "$HOME/.config/autostart/com.silentinput.daemon.desktop"
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload 2>/dev/null || true
 fi
 
 # 3. 移除 CLI 命令与本地 venv/在线源码缓存
@@ -62,9 +66,16 @@ for desktop_file in \
     fi
 done
 
-if [ -f "$ICON_FILE" ]; then
-    rm -f "$ICON_FILE"
-    echo "🗑️ 已移除图标: $ICON_FILE"
+for icon_file in "$ICON_FILE" "$ICON_PNG_FILE"; do
+    if [ -f "$icon_file" ]; then
+        rm -f "$icon_file"
+        echo "🗑️ 已移除图标: $icon_file"
+    fi
+done
+
+if [ -d "$ICON_BASE_DIR" ]; then
+    command -v gtk4-update-icon-cache >/dev/null 2>&1 && gtk4-update-icon-cache -f -t "$ICON_BASE_DIR" >/dev/null 2>&1 || true
+    command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t "$ICON_BASE_DIR" >/dev/null 2>&1 || true
 fi
 
 if command -v update-desktop-database >/dev/null 2>&1; then

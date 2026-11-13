@@ -1,9 +1,12 @@
 package com.silentinput.app
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -43,7 +46,13 @@ class MainActivity : ComponentActivity() {
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ ->
-        viewModel.updateBluetoothPermission(hasBluetoothPermission())
+        viewModel.refreshBluetoothState(hasBluetoothPermission())
+    }
+
+    private val btSettingsLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        viewModel.refreshBluetoothState(hasBluetoothPermission())
     }
 
     private fun hasBluetoothPermission(): Boolean {
@@ -71,7 +80,8 @@ class MainActivity : ComponentActivity() {
             SilentInputTheme(darkTheme = isDarkMode) {
                 MainAppScaffold(
                     viewModel = viewModel,
-                    onRequestBtPermission = { requestBluetoothPermission() }
+                    onRequestBtPermission = { requestBluetoothPermission() },
+                    onToggleBluetoothSystem = { enable -> toggleBluetoothSystem(enable) }
                 )
             }
         }
@@ -80,6 +90,11 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.onResume(hasBluetoothPermission())
+    }
+
+    override fun onPause() {
+        super.onPause()
+        viewModel.setLeftMouseHold(false)
     }
 
     private fun requestBluetoothPermission() {
@@ -96,13 +111,30 @@ class MainActivity : ComponentActivity() {
             permissionLauncher.launch(permissions.toTypedArray())
         }
     }
+
+    private fun toggleBluetoothSystem(enable: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !hasBluetoothPermission()) {
+            requestBluetoothPermission()
+            return
+        }
+        if (viewModel.tryLegacySetBluetoothEnabled(enable)) {
+            return
+        }
+        val intent = if (enable) {
+            Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+        } else {
+            Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
+        }
+        btSettingsLauncher.launch(intent)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainAppScaffold(
     viewModel: MainViewModel,
-    onRequestBtPermission: () -> Unit
+    onRequestBtPermission: () -> Unit,
+    onToggleBluetoothSystem: (Boolean) -> Unit
 ) {
     val view = LocalView.current
     DisposableEffect(view) {
@@ -122,6 +154,7 @@ fun MainAppScaffold(
 
     val isNetConnected by viewModel.isNetConnected.collectAsState()
     val isNetAuthenticated by viewModel.isNetAuthenticated.collectAsState()
+    val isNetConnecting by viewModel.isNetConnecting.collectAsState()
     val isNetReconnecting by viewModel.isNetReconnecting.collectAsState()
     val isNetEncrypted by viewModel.isNetEncrypted.collectAsState()
     val connectionError by viewModel.netConnectionError.collectAsState()
@@ -129,6 +162,7 @@ fun MainAppScaffold(
 
     val isHapticEnabled by viewModel.isHapticEnabled.collectAsState()
     val trackpadSensitivity by viewModel.trackpadSensitivity.collectAsState()
+    val isLeftMouseHeld by viewModel.isLeftMouseHeld.collectAsState()
     val showInlineTrackpadInText by viewModel.showInlineTrackpadInText.collectAsState()
     val snippets by viewModel.snippets.collectAsState()
     val longTextInput by viewModel.longTextInput.collectAsState()
@@ -147,6 +181,7 @@ fun MainAppScaffold(
         btLatencyMs = btLatency,
         isNetConnected = isNetConnected,
         isNetAuthenticated = isNetAuthenticated,
+        isNetConnecting = isNetConnecting,
         isNetReconnecting = isNetReconnecting,
         isNetEncrypted = isNetEncrypted,
         netConnectionError = connectionError,
@@ -247,9 +282,13 @@ fun MainAppScaffold(
                         sensitivity = trackpadSensitivity,
                         onSensitivityChange = { viewModel.updateTrackpadSensitivity(it) },
                         isHapticEnabled = isHapticEnabled,
+                        isConnected = isAnyConnected,
+                        isLeftHeld = isLeftMouseHeld,
                         onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },
                         onMouseClick = { viewModel.sendMouseClick(it) },
-                        onMouseScroll = { viewModel.sendMouseScroll(it) }
+                        onMouseScroll = { viewModel.sendMouseScroll(it) },
+                        onLeftMouseHoldChange = { viewModel.setLeftMouseHold(it) },
+                        onSendKey = { viewModel.sendKey(it) }
                     )
                     2 -> TextSenderScreen(
                         isConnected = isAnyConnected,
@@ -280,6 +319,7 @@ fun MainAppScaffold(
             UnifiedConnectionDialog(
                 viewModel = viewModel,
                 onRequestBtPermission = onRequestBtPermission,
+                onToggleBluetoothSystem = onToggleBluetoothSystem,
                 onDismiss = { showConfigDialog = false }
             )
         }

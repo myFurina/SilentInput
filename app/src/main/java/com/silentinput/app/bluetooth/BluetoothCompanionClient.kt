@@ -9,6 +9,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -53,6 +54,12 @@ class BluetoothCompanionClient(private val context: Context) {
     private val _statusMessage = MutableStateFlow<String?>("未连接")
     val statusMessage = _statusMessage.asStateFlow()
 
+    private val _isBluetoothEnabled = MutableStateFlow(bluetoothAdapter?.isEnabled == true)
+    val isBluetoothEnabledFlow = _isBluetoothEnabled.asStateFlow()
+
+    @Volatile
+    var onAdapterStateChanged: ((Boolean) -> Unit)? = null
+
     private val stateLock = Any()
     @Volatile
     private var socket: BluetoothSocket? = null
@@ -86,10 +93,21 @@ class BluetoothCompanionClient(private val context: Context) {
             when (intent?.action) {
                 BluetoothAdapter.ACTION_STATE_CHANGED -> {
                     val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
-                    if (state == BluetoothAdapter.STATE_OFF || state == BluetoothAdapter.STATE_TURNING_OFF) {
-                        Log.d(TAG, "Bluetooth adapter turned off, closing connection")
-                        onConnectionLost()
+                    when (state) {
+                        BluetoothAdapter.STATE_ON -> {
+                            _isBluetoothEnabled.value = true
+                            onAdapterStateChanged?.invoke(true)
+                        }
+                        BluetoothAdapter.STATE_OFF, BluetoothAdapter.STATE_TURNING_OFF -> {
+                            Log.d(TAG, "Bluetooth adapter turned off, closing connection")
+                            _isBluetoothEnabled.value = false
+                            onConnectionLost()
+                            onAdapterStateChanged?.invoke(false)
+                        }
                     }
+                }
+                BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
+                    onAdapterStateChanged?.invoke(bluetoothAdapter?.isEnabled == true)
                 }
                 BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
                     @Suppress("DEPRECATION")
@@ -109,6 +127,7 @@ class BluetoothCompanionClient(private val context: Context) {
             val filter = IntentFilter().apply {
                 addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
                 addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+                addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
             }
             ContextCompat.registerReceiver(context, btStateReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
             receiverRegistered = true
@@ -119,6 +138,30 @@ class BluetoothCompanionClient(private val context: Context) {
 
     fun isBluetoothSupported(): Boolean = bluetoothAdapter != null
     fun isBluetoothEnabled(): Boolean = bluetoothAdapter?.isEnabled == true
+
+    fun refreshBluetoothEnabled(): Boolean {
+        val enabled = bluetoothAdapter?.isEnabled == true
+        _isBluetoothEnabled.value = enabled
+        return enabled
+    }
+
+    @Suppress("DEPRECATION")
+    fun setBluetoothEnabled(enable: Boolean): Boolean {
+        val adapter = bluetoothAdapter ?: return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return false
+        }
+        return try {
+            val ok = if (enable) adapter.enable() else adapter.disable()
+            if (ok) {
+                _isBluetoothEnabled.value = enable
+            }
+            ok
+        } catch (e: Exception) {
+            Log.w(TAG, "setBluetoothEnabled($enable) failed: ${e.message}")
+            false
+        }
+    }
 
     fun getBondedDevices(): List<BluetoothDevice> {
         return try {

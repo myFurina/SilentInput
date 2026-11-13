@@ -156,6 +156,9 @@ fun KeyboardScreen(
             QuickActionButton("Win", Modifier.weight(1f)) {
                 sendKey("super")
             }
+            QuickActionButton("截屏\nPrtSc", Modifier.weight(1f)) {
+                sendKey("prtsc")
+            }
         }
 
         Spacer(modifier = Modifier.height(4.dp))

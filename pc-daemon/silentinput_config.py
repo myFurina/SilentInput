@@ -424,6 +424,117 @@ def has_active_systemd() -> bool:
     except Exception:
         return False
 
+
+def _user_wants_override_link() -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / "default.target.wants" / SYSTEMD_SERVICE_NAME
+
+
+def _global_wants_link() -> Path:
+    return Path("/etc/systemd/user/default.target.wants") / SYSTEMD_SERVICE_NAME
+
+
+def _xdg_autostart_file() -> Path:
+    return Path.home() / ".config" / "autostart" / "com.silentinput.daemon.desktop"
+
+
+def is_autostart_enabled() -> bool:
+    """Return True when SilentInput daemon is configured to start automatically on login."""
+    if has_active_systemd():
+        override_link = _user_wants_override_link()
+        if override_link.is_symlink():
+            try:
+                if os.readlink(override_link) == "/dev/null":
+                    return False
+            except OSError:
+                pass
+        try:
+            res = subprocess.run(
+                ["systemctl", "--user", "is-enabled", SYSTEMD_SERVICE_NAME],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=2,
+            )
+            return res.returncode == 0 and res.stdout.strip() in (
+                "enabled", "enabled-runtime", "static", "indirect"
+            )
+        except Exception:
+            return False
+    return _xdg_autostart_file().exists()
+
+
+def set_autostart_enabled(enabled: bool) -> tuple[bool, str]:
+    """Enable or disable automatic startup at login (via systemd --user or XDG autostart fallback)."""
+    if has_active_systemd():
+        override_link = _user_wants_override_link()
+        if enabled:
+            if override_link.is_symlink():
+                try:
+                    if os.readlink(override_link) == "/dev/null":
+                        override_link.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            subprocess.run(
+                ["systemctl", "--user", "unmask", SYSTEMD_SERVICE_NAME],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            res = subprocess.run(
+                ["systemctl", "--user", "enable", SYSTEMD_SERVICE_NAME],
+                capture_output=True,
+                text=True,
+            )
+            if res.returncode != 0 and not is_autostart_enabled():
+                subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+                res = subprocess.run(
+                    ["systemctl", "--user", "enable", SYSTEMD_SERVICE_NAME],
+                    capture_output=True,
+                    text=True,
+                )
+                if res.returncode != 0 and not is_autostart_enabled():
+                    return False, (res.stderr or res.stdout or "启用开机启动失败").strip()
+            subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+            return True, "已启用开机自动启动"
+
+        subprocess.run(
+            ["systemctl", "--user", "disable", SYSTEMD_SERVICE_NAME],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        # If globally enabled under /etc/systemd/user/default.target.wants/,
+        # shadow the .wants symlink with /dev/null so manual start still works.
+        if _global_wants_link().exists() or is_autostart_enabled():
+            try:
+                override_link.parent.mkdir(parents=True, exist_ok=True)
+                if override_link.exists() or override_link.is_symlink():
+                    override_link.unlink(missing_ok=True)
+                override_link.symlink_to("/dev/null")
+            except OSError as e:
+                return False, f"关闭开机启动失败: {e}"
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+        return True, "已关闭开机自动启动"
+
+    autostart_file = _xdg_autostart_file()
+    try:
+        if enabled:
+            autostart_file.parent.mkdir(parents=True, exist_ok=True)
+            py_exec = get_python_executable()
+            autostart_file.write_text(
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=SilentInput Daemon\n"
+                f'Exec="{py_exec}" -u "{DAEMON_SCRIPT}"\n'
+                "X-GNOME-Autostart-enabled=true\n",
+                encoding="utf-8",
+            )
+            return True, "已启用开机自动启动 (XDG)"
+        autostart_file.unlink(missing_ok=True)
+        return True, "已关闭开机自动启动"
+    except OSError as e:
+        return False, f"设置开机启动失败: {e}"
+
 def start_daemon_process() -> tuple[bool, str]:
     """Start daemon in background if not already running"""
     running, pid = is_daemon_running()

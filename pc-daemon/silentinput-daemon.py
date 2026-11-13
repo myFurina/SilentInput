@@ -91,6 +91,8 @@ KEY_MAP = {}
 CHAR_MAP = {}
 evdev = None
 uinput_device = None
+_uinput_warned = False
+_held_mouse_buttons: dict[int, set[object]] = {}
 
 try:
     import evdev
@@ -113,6 +115,8 @@ try:
         "insert": ecodes.KEY_INSERT, "ins": ecodes.KEY_INSERT,
         "home": ecodes.KEY_HOME, "end": ecodes.KEY_END,
         "pageup": ecodes.KEY_PAGEUP, "pagedown": ecodes.KEY_PAGEDOWN,
+        "print": ecodes.KEY_SYSRQ, "printscreen": ecodes.KEY_SYSRQ,
+        "prtsc": ecodes.KEY_SYSRQ, "sysrq": ecodes.KEY_SYSRQ,
         "shift": ecodes.KEY_LEFTSHIFT, "ctrl": ecodes.KEY_LEFTCTRL,
         "alt": ecodes.KEY_LEFTALT, "super": ecodes.KEY_LEFTMETA, "win": ecodes.KEY_LEFTMETA,
         "up": ecodes.KEY_UP, "down": ecodes.KEY_DOWN,
@@ -177,16 +181,28 @@ except Exception as e:
     UINPUT_CAPABILITIES = {}
     print(f"[SilentInput] Warning: could not load evdev mappings ({e}). Fallback to tools.", file=sys.stderr)
 
-def init_uinput_device():
-    global uinput_device
-    if not HAVE_UINPUT or evdev is None or not UINPUT_CAPABILITIES or uinput_device is not None:
-        return
+def init_uinput_device(log_failure: bool = True) -> bool:
+    global uinput_device, _uinput_warned
+    if uinput_device is not None:
+        return True
+    if not HAVE_UINPUT or evdev is None or not UINPUT_CAPABILITIES:
+        return False
     try:
         uinput_device = evdev.UInput(UINPUT_CAPABILITIES, name="SilentInput-Virtual-Device")
+        _uinput_warned = False
         print(f"[SilentInput] Kernel uinput virtual hardware device created successfully ({len(UINPUT_CAPABILITIES[evdev.ecodes.EV_KEY])} keys supported).")
+        return True
     except Exception as e:
         uinput_device = None
-        print(f"[SilentInput] Warning: could not initialize kernel uinput ({e}). Fallback to tools.", file=sys.stderr)
+        if log_failure and not _uinput_warned:
+            _uinput_warned = True
+            print(f"[SilentInput] Warning: could not initialize kernel uinput ({e}). Will retry automatically.", file=sys.stderr)
+        return False
+
+def ensure_uinput_device() -> bool:
+    if uinput_device is not None:
+        return True
+    return init_uinput_device(log_failure=False)
 
 def close_uinput_device():
     global uinput_device
@@ -196,6 +212,29 @@ def close_uinput_device():
         except Exception:
             pass
         uinput_device = None
+
+def _emit_uinput_events(events: list[tuple[int, int, int]]) -> bool:
+    """Write (ev_type, code, value) tuples and syn() cleanly; reset device on OSError."""
+    if not ensure_uinput_device() or uinput_device is None:
+        return False
+    for attempt in range(2):
+        dev = uinput_device
+        if dev is None:
+            if not ensure_uinput_device():
+                return False
+            dev = uinput_device
+        try:
+            for ev_type, code, value in events:
+                dev.write(ev_type, code, value)
+            dev.syn()
+            return True
+        except OSError as e:
+            print(f"[SilentInput] Warning: uinput write failed ({e}), resetting virtual device.", file=sys.stderr)
+            close_uinput_device()
+            if attempt == 0 and ensure_uinput_device():
+                continue
+            return False
+    return False
 
 def _detect_wayland_env() -> dict:
     """Build environment dict with valid Wayland socket (ignoring .lock files)."""
@@ -260,38 +299,37 @@ async def type_text(text: str) -> bool:
     Guaranteed to work natively in any Linux terminal (bash, zsh, vim, nano, Ptyxis),
     GUI app, and password prompt without needing clipboard or paste shortcuts.
     """
-    if not uinput_device or evdev is None:
+    if not ensure_uinput_device() or evdev is None:
         return False
 
     for ch in text:
         if ch in CHAR_MAP:
             keycode, requires_shift = CHAR_MAP[ch]
+            press = []
             if requires_shift:
-                uinput_device.write(evdev.ecodes.EV_KEY, evdev.ecodes.KEY_LEFTSHIFT, 1)
-            uinput_device.write(evdev.ecodes.EV_KEY, keycode, 1)
-            uinput_device.syn()
+                press.append((evdev.ecodes.EV_KEY, evdev.ecodes.KEY_LEFTSHIFT, 1))
+            press.append((evdev.ecodes.EV_KEY, keycode, 1))
+            if not _emit_uinput_events(press):
+                return False
             await asyncio.sleep(0.002)
-            uinput_device.write(evdev.ecodes.EV_KEY, keycode, 0)
+            release = [(evdev.ecodes.EV_KEY, keycode, 0)]
             if requires_shift:
-                uinput_device.write(evdev.ecodes.EV_KEY, evdev.ecodes.KEY_LEFTSHIFT, 0)
-            uinput_device.syn()
+                release.append((evdev.ecodes.EV_KEY, evdev.ecodes.KEY_LEFTSHIFT, 0))
+            if not _emit_uinput_events(release):
+                return False
             await asyncio.sleep(0.002)
     return True
 
 async def emit_key_combination(combo_str: str):
     """Emit key combination or single key via virtual hardware keyboard"""
-    if uinput_device and evdev is not None:
+    if ensure_uinput_device() and evdev is not None:
         parts = combo_str.lower().split("+")
         codes = [KEY_MAP[p.strip()] for p in parts if p.strip() in KEY_MAP]
         if codes:
-            for code in codes:
-                uinput_device.write(evdev.ecodes.EV_KEY, code, 1)
-            uinput_device.syn()
-            await asyncio.sleep(0.015)
-            for code in reversed(codes):
-                uinput_device.write(evdev.ecodes.EV_KEY, code, 0)
-            uinput_device.syn()
-            return
+            if _emit_uinput_events([(evdev.ecodes.EV_KEY, code, 1) for code in codes]):
+                await asyncio.sleep(0.015)
+                _emit_uinput_events([(evdev.ecodes.EV_KEY, code, 0) for code in reversed(codes)])
+                return
 
     # Fallback to wtype/ydotool (non-blocking)
     parts = [p.strip() for p in combo_str.lower().split("+") if p.strip()]
@@ -304,6 +342,7 @@ async def emit_key_combination(combo_str: str):
         "space": "space", "delete": "Delete", "del": "Delete",
         "insert": "Insert", "ins": "Insert", "home": "Home", "end": "End",
         "pageup": "Prior", "pagedown": "Next",
+        "print": "Print", "printscreen": "Print", "prtsc": "Print", "sysrq": "Print",
         "up": "Up", "down": "Down", "left": "Left", "right": "Right",
         "minus": "minus", "equal": "equal", "slash": "slash", "backslash": "backslash",
     }
@@ -323,18 +362,21 @@ async def emit_key_combination(combo_str: str):
         ydotool_args = ["ydotool", "key"] + [f"{c}:1" for c in codes] + [f"{c}:0" for c in reversed(codes)]
         fallback_cmds.append(ydotool_args)
 
+    env = _detect_wayland_env()
     for cmd in fallback_cmds:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                env=env,
             )
             rc = await asyncio.wait_for(proc.wait(), timeout=2.0)
             if rc == 0:
                 return
         except Exception:
             continue
+    print(f"[SilentInput] Warning: could not emit key '{combo_str}' (uinput unavailable and fallback tools failed).", file=sys.stderr)
 
 async def ws_handshake(reader, writer, first_line: str) -> bool:
     """RFC 6455 WebSocket handshake. Rejects browser Origin and non-Upgrade HTTP requests."""
@@ -516,6 +558,7 @@ async def process_message(
     is_authenticated: bool,
     config: dict,
     peer_ip: str = "",
+    conn_token: object | None = None,
 ) -> tuple[bool, bool]:
     """
     Process incoming JSON command.
@@ -628,37 +671,92 @@ async def process_message(
             print(f"[SilentInput] Key event: {key}")
             await emit_key_combination(key)
     elif msg_type == "mouse":
-        if uinput_device and evdev is not None:
+        if ensure_uinput_device() and evdev is not None:
             action = data.get("action", "")
+            holder_token = conn_token if conn_token is not None else id(writer)
             if action == "click_left":
-                uinput_device.write(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_LEFT, 1)
-                uinput_device.syn()
-                await asyncio.sleep(0.02)
-                uinput_device.write(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_LEFT, 0)
-                uinput_device.syn()
+                if _emit_uinput_events([(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_LEFT, 1)]):
+                    await asyncio.sleep(0.02)
+                    _emit_uinput_events([(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_LEFT, 0)])
+                _track_held_button(evdev.ecodes.BTN_LEFT, False, holder_token)
             elif action == "click_right":
-                uinput_device.write(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_RIGHT, 1)
-                uinput_device.syn()
-                await asyncio.sleep(0.02)
-                uinput_device.write(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_RIGHT, 0)
-                uinput_device.syn()
+                if _emit_uinput_events([(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_RIGHT, 1)]):
+                    await asyncio.sleep(0.02)
+                    _emit_uinput_events([(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_RIGHT, 0)])
+                _track_held_button(evdev.ecodes.BTN_RIGHT, False, holder_token)
+            elif action == "down_left":
+                if _emit_uinput_events([(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_LEFT, 1)]):
+                    _track_held_button(evdev.ecodes.BTN_LEFT, True, holder_token)
+            elif action == "up_left":
+                _emit_uinput_events([(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_LEFT, 0)])
+                _track_held_button(evdev.ecodes.BTN_LEFT, False, holder_token)
+            elif action == "down_right":
+                if _emit_uinput_events([(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_RIGHT, 1)]):
+                    _track_held_button(evdev.ecodes.BTN_RIGHT, True, holder_token)
+            elif action == "up_right":
+                _emit_uinput_events([(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_RIGHT, 0)])
+                _track_held_button(evdev.ecodes.BTN_RIGHT, False, holder_token)
             else:
+                events = []
+                button_updates: list[tuple[int, bool]] = []
                 vx = _safe_round_int(data.get("dx", 0))
                 vy = _safe_round_int(data.get("dy", 0))
                 vw = _safe_round_int(data.get("wheel", 0))
                 if vx != 0:
-                    uinput_device.write(evdev.ecodes.EV_REL, evdev.ecodes.REL_X, vx)
+                    events.append((evdev.ecodes.EV_REL, evdev.ecodes.REL_X, vx))
                 if vy != 0:
-                    uinput_device.write(evdev.ecodes.EV_REL, evdev.ecodes.REL_Y, vy)
+                    events.append((evdev.ecodes.EV_REL, evdev.ecodes.REL_Y, vy))
                 if vw != 0:
-                    uinput_device.write(evdev.ecodes.EV_REL, evdev.ecodes.REL_WHEEL, vw)
+                    events.append((evdev.ecodes.EV_REL, evdev.ecodes.REL_WHEEL, vw))
                 if "btn_left" in data:
-                    uinput_device.write(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_LEFT, 1 if data["btn_left"] else 0)
+                    pressed = 1 if data["btn_left"] else 0
+                    events.append((evdev.ecodes.EV_KEY, evdev.ecodes.BTN_LEFT, pressed))
+                    button_updates.append((evdev.ecodes.BTN_LEFT, bool(pressed)))
                 if "btn_right" in data:
-                    uinput_device.write(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_RIGHT, 1 if data["btn_right"] else 0)
-                uinput_device.syn()
+                    pressed = 1 if data["btn_right"] else 0
+                    events.append((evdev.ecodes.EV_KEY, evdev.ecodes.BTN_RIGHT, pressed))
+                    button_updates.append((evdev.ecodes.BTN_RIGHT, bool(pressed)))
+                if events:
+                    emitted = _emit_uinput_events(events)
+                    for btn_code, is_pressed in button_updates:
+                        if is_pressed:
+                            if emitted:
+                                _track_held_button(btn_code, True, holder_token)
+                        else:
+                            _track_held_button(btn_code, False, holder_token)
 
     return is_authenticated, False
+
+def _track_held_button(button_code: int, pressed: bool, holder_token: object):
+    if pressed:
+        _held_mouse_buttons.setdefault(button_code, set()).add(holder_token)
+        return
+    holders = _held_mouse_buttons.get(button_code)
+    if holders is not None:
+        holders.discard(holder_token)
+        if not holders:
+            _held_mouse_buttons.pop(button_code, None)
+
+def _release_held_mouse_buttons(conn_token: object | None = None):
+    """Ensure mouse buttons held by this connection (or all if conn_token is None) are released."""
+    if not _held_mouse_buttons:
+        return
+
+    if conn_token is None:
+        buttons_to_release = list(_held_mouse_buttons.keys())
+        _held_mouse_buttons.clear()
+    else:
+        buttons_to_release = []
+        for btn_code, holders in list(_held_mouse_buttons.items()):
+            if conn_token in holders:
+                holders.discard(conn_token)
+                if not holders:
+                    _held_mouse_buttons.pop(btn_code, None)
+                    buttons_to_release.append(btn_code)
+
+    if buttons_to_release and evdev is not None and uinput_device is not None:
+        events = [(evdev.ecodes.EV_KEY, btn, 0) for btn in buttons_to_release]
+        _emit_uinput_events(events)
 
 async def handle_client(reader, writer):
     config = await asyncio.to_thread(silentinput_config.load_config)
@@ -724,6 +822,7 @@ async def handle_client(reader, writer):
             pass
         return
 
+    conn_token = object()
     auth_deadline = time.monotonic() + 15.0
     while True:
         try:
@@ -744,7 +843,7 @@ async def handle_client(reader, writer):
             if not msg_str:
                 continue
             authenticated, should_close = await process_message(
-                msg_str, writer, True, authenticated, config, peer_ip=peer_ip
+                msg_str, writer, True, authenticated, config, peer_ip=peer_ip, conn_token=conn_token
             )
             if should_close:
                 break
@@ -752,6 +851,7 @@ async def handle_client(reader, writer):
             print(f"[SilentInput] WS stream error: {e}")
             break
 
+    _release_held_mouse_buttons(conn_token)
     print(f"[SilentInput] Connection closed for {peer}")
     try:
         writer.close()
@@ -808,6 +908,7 @@ def _is_bt_address_paired(mac_addr: str) -> bool:
 async def handle_bt_client(reader, writer, peer_name: str):
     config = await asyncio.to_thread(silentinput_config.load_config)
     print(f"[SilentInput] Bluetooth client connected: {peer_name}")
+    conn_token = object()
     # Bluetooth connections are authenticated via BlueZ OS-level device pairing check
     authenticated = True
 
@@ -825,6 +926,7 @@ async def handle_bt_client(reader, writer, peer_name: str):
                     is_authenticated=authenticated,
                     config=config,
                     peer_ip=peer_name,
+                    conn_token=conn_token,
                 )
                 if should_close:
                     break
@@ -832,6 +934,7 @@ async def handle_bt_client(reader, writer, peer_name: str):
             print(f"[SilentInput] Bluetooth stream error: {e}")
             break
 
+    _release_held_mouse_buttons(conn_token)
     print(f"[SilentInput] Bluetooth connection closed for {peer_name}")
     try:
         writer.close()
@@ -925,25 +1028,40 @@ def setup_bluetooth_server(loop):
             'AutoConnect': True,
         }
 
-        def register_profile(reason: str = "startup"):
+        profile_state = {"registered": False, "retries": 0}
+
+        def register_profile(reason: str = "startup") -> bool:
             try:
                 mgr = dbus.Interface(bus.get_object('org.bluez', '/org/bluez'), 'org.bluez.ProfileManager1')
                 mgr.RegisterProfile(PROFILE_PATH, SPP_UUID, opts)
+                profile_state["registered"] = True
                 print(f"[SilentInput] Registered Bluetooth SPP profile with BlueZ ({reason})")
+                return True
             except dbus.exceptions.DBusException as de:
                 err_name = de.get_dbus_name() or ""
                 if "AlreadyExists" in err_name:
-                    return
+                    profile_state["registered"] = True
+                    return True
                 print(f"[SilentInput] BlueZ RegisterProfile ({reason}) failed: {de}")
             except Exception as re_err:
                 print(f"[SilentInput] BlueZ RegisterProfile ({reason}) error: {re_err}")
+            return False
+
+        def _retry_startup_register():
+            if profile_state["registered"]:
+                return False
+            profile_state["retries"] += 1
+            if register_profile(f"boot-retry-{profile_state['retries']}"):
+                return False
+            return profile_state["retries"] < 20
 
         def _on_bluez_owner_changed(name, old_owner, new_owner):
             if new_owner:
+                profile_state["registered"] = False
                 GLib.timeout_add(500, lambda: (register_profile("bluez-restarted"), False)[1])
 
         def _on_adapter_props_changed(interface, changed, invalidated):
-            if interface == "org.bluez.Adapter1" and changed.get("Powered") is True:
+            if interface == "org.bluez.Adapter1" and bool(changed.get("Powered")):
                 GLib.timeout_add(300, lambda: (register_profile("adapter-powered-on"), False)[1])
 
         def _on_prepare_for_sleep(sleeping):
@@ -971,7 +1089,8 @@ def setup_bluetooth_server(loop):
         except Exception:
             pass
 
-        register_profile("startup")
+        if not register_profile("startup"):
+            GLib.timeout_add_seconds(3, _retry_startup_register)
         dbus_registered = True
         _bt_dbus_refs.extend([bus, profile, register_profile])
 
@@ -1031,6 +1150,17 @@ def setup_bluetooth_server(loop):
 def cleanup_pid():
     silentinput_config.PID_FILE.unlink(missing_ok=True)
 
+async def maintain_uinput_device():
+    """Retry kernel uinput initialization until logind uaccess ACL settles after boot."""
+    attempts = 0
+    while True:
+        if uinput_device is None and HAVE_UINPUT:
+            init_uinput_device(log_failure=(attempts == 0))
+            attempts += 1
+        else:
+            attempts = 0
+        await asyncio.sleep(2 if (uinput_device is None and attempts < 30) else 15)
+
 async def main():
     init_uinput_device()
     config = silentinput_config.load_config()
@@ -1041,7 +1171,8 @@ async def main():
     silentinput_config.ensure_config_dir()
     silentinput_config.PID_FILE.write_text(str(os.getpid()))
 
-    # Start ADB reverse loop
+    # Start kernel uinput recovery & ADB reverse loops
+    uinput_task = asyncio.create_task(maintain_uinput_device())
     adb_task = asyncio.create_task(maintain_adb_reverse(port))
 
     # Start Bluetooth companion server
@@ -1081,6 +1212,9 @@ async def main():
 
     if not servers:
         print("[SilentInput] Error: Could not bind to any address!", file=sys.stderr)
+        uinput_task.cancel()
+        adb_task.cancel()
+        await asyncio.gather(uinput_task, adb_task, return_exceptions=True)
         cleanup_pid()
         return
 
@@ -1101,12 +1235,13 @@ async def main():
         print("\n[SilentInput] Shutting down daemon...")
     finally:
         stop_task.cancel()
+        uinput_task.cancel()
         adb_task.cancel()
         for t in serve_tasks:
             t.cancel()
         for s in servers:
             s.close()
-        await asyncio.gather(stop_task, adb_task, *serve_tasks, return_exceptions=True)
+        await asyncio.gather(stop_task, uinput_task, adb_task, *serve_tasks, return_exceptions=True)
         await asyncio.gather(*(s.wait_closed() for s in servers), return_exceptions=True)
         close_uinput_device()
         cleanup_pid()

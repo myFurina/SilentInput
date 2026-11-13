@@ -1,6 +1,6 @@
 [Unit]
 Description=SilentInput PC Companion Daemon
-After=network.target
+After=network-online.target graphical-session-pre.target bluetooth.target
 
 [Service]
 Type=simple

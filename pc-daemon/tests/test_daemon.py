@@ -396,6 +396,217 @@ class TestDaemonProtocolAsync(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(loaded["port"], 53318)
                 self.assertEqual(list(tmp_path.glob(".config.*.tmp")), [])
 
+    def test_uinput_lazy_recovery_after_boot_permission_error(self):
+        fake_dev = mock.MagicMock()
+        fake_evdev = types.SimpleNamespace(
+            UInput=mock.MagicMock(side_effect=[PermissionError("/dev/uinput"), fake_dev]),
+            ecodes=types.SimpleNamespace(EV_KEY=1),
+        )
+        with mock.patch.object(silentinput_daemon, "HAVE_UINPUT", True), \
+             mock.patch.object(silentinput_daemon, "evdev", fake_evdev), \
+             mock.patch.object(silentinput_daemon, "UINPUT_CAPABILITIES", {1: [30]}), \
+             mock.patch.object(silentinput_daemon, "uinput_device", None), \
+             mock.patch.object(silentinput_daemon, "_uinput_warned", False):
+            self.assertFalse(silentinput_daemon.init_uinput_device())
+            self.assertIsNone(silentinput_daemon.uinput_device)
+            # Once logind ACL settles, ensure_uinput_device() recovers without service restart
+            self.assertTrue(silentinput_daemon.ensure_uinput_device())
+            self.assertIs(silentinput_daemon.uinput_device, fake_dev)
+            silentinput_daemon.close_uinput_device()
+
+    def test_autostart_xdg_fallback_and_systemd_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            xdg_file = tmp_path / "autostart" / "com.silentinput.daemon.desktop"
+            with mock.patch.object(silentinput_config, "has_active_systemd", return_value=False), \
+                 mock.patch.object(silentinput_config, "_xdg_autostart_file", return_value=xdg_file):
+                self.assertFalse(silentinput_config.is_autostart_enabled())
+                ok, _ = silentinput_config.set_autostart_enabled(True)
+                self.assertTrue(ok)
+                self.assertTrue(xdg_file.exists())
+                self.assertTrue(silentinput_config.is_autostart_enabled())
+                self.assertIn(f'Exec="{sys.executable}" -u "{silentinput_config.DAEMON_SCRIPT}"', xdg_file.read_text(encoding="utf-8"))
+                ok, _ = silentinput_config.set_autostart_enabled(False)
+                self.assertTrue(ok)
+                self.assertFalse(xdg_file.exists())
+
+            user_override = tmp_path / "user" / "default.target.wants" / "silentinput.service"
+            global_link = tmp_path / "global" / "silentinput.service"
+            global_link.parent.mkdir(parents=True)
+            global_link.write_text("stub")
+            systemctl_state = {"enabled": True}
+
+            def fake_systemctl(cmd, *args, **kwargs):
+                action = cmd[2] if len(cmd) > 2 else ""
+                if action == "enable":
+                    systemctl_state["enabled"] = True
+                    return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+                if action == "disable":
+                    systemctl_state["enabled"] = False
+                    return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+                if action == "is-enabled":
+                    if systemctl_state["enabled"]:
+                        return types.SimpleNamespace(returncode=0, stdout="enabled\n", stderr="")
+                    return types.SimpleNamespace(returncode=1, stdout="disabled\n", stderr="")
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(silentinput_config, "has_active_systemd", return_value=True), \
+                 mock.patch.object(silentinput_config, "_user_wants_override_link", return_value=user_override), \
+                 mock.patch.object(silentinput_config, "_global_wants_link", return_value=global_link), \
+                 mock.patch.object(silentinput_config.subprocess, "run", side_effect=fake_systemctl):
+                self.assertTrue(silentinput_config.is_autostart_enabled())
+                ok, _ = silentinput_config.set_autostart_enabled(False)
+                self.assertTrue(ok)
+                self.assertTrue(user_override.is_symlink())
+                self.assertEqual(os.readlink(user_override), "/dev/null")
+                self.assertFalse(silentinput_config.is_autostart_enabled())
+
+                # Even if global wants link would still make systemctl say "enabled",
+                # /dev/null override makes is_autostart_enabled() return False until re-enabled.
+                systemctl_state["enabled"] = True
+                self.assertFalse(silentinput_config.is_autostart_enabled())
+
+                ok, _ = silentinput_config.set_autostart_enabled(True)
+                self.assertTrue(ok)
+                self.assertFalse(user_override.exists())
+                self.assertTrue(silentinput_config.is_autostart_enabled())
+
+    def test_prtsc_key_mapped_to_sysrq(self):
+        if silentinput_daemon.HAVE_UINPUT and silentinput_daemon.evdev is not None:
+            sysrq = silentinput_daemon.evdev.ecodes.KEY_SYSRQ
+            self.assertEqual(silentinput_daemon.KEY_MAP.get("prtsc"), sysrq)
+            self.assertEqual(silentinput_daemon.KEY_MAP.get("printscreen"), sysrq)
+
+    def test_emit_uinput_events_recovers_after_oserror(self):
+        dev1 = mock.MagicMock()
+        dev1.write.side_effect = OSError("ENODEV")
+        dev2 = mock.MagicMock()
+        fake_evdev = types.SimpleNamespace(
+            UInput=mock.MagicMock(side_effect=[dev1, dev2]),
+            ecodes=types.SimpleNamespace(EV_KEY=1),
+        )
+        with mock.patch.object(silentinput_daemon, "HAVE_UINPUT", True), \
+             mock.patch.object(silentinput_daemon, "evdev", fake_evdev), \
+             mock.patch.object(silentinput_daemon, "UINPUT_CAPABILITIES", {1: [30]}), \
+             mock.patch.object(silentinput_daemon, "uinput_device", None), \
+             mock.patch.object(silentinput_daemon, "_uinput_warned", False):
+            ok = silentinput_daemon._emit_uinput_events([(1, 30, 1), (1, 30, 0)])
+            self.assertTrue(ok)
+            dev1.close.assert_called_once()
+            dev2.write.assert_has_calls([mock.call(1, 30, 1), mock.call(1, 30, 0)])
+            dev2.syn.assert_called_once()
+            self.assertIs(silentinput_daemon.uinput_device, dev2)
+            silentinput_daemon.close_uinput_device()
+
+    def test_bluez_adapter_powered_signal_handles_dbus_boolean_subclass(self):
+        class _FakeDbusBoolean(int):
+            pass
+
+        val_true = _FakeDbusBoolean(1)
+        val_false = _FakeDbusBoolean(0)
+        self.assertIsNot(val_true, True)
+        self.assertTrue(bool(val_true))
+
+        signal_callbacks = {}
+        timeouts = []
+        mock_mgr = mock.MagicMock()
+        mock_bus = mock.MagicMock()
+        mock_bus.get_object.return_value = object()
+
+        def fake_add_signal_receiver(cb, signal_name=None, **kwargs):
+            signal_callbacks[signal_name] = cb
+
+        mock_bus.add_signal_receiver.side_effect = fake_add_signal_receiver
+
+        fake_dbus = types.ModuleType("dbus")
+        fake_dbus.SystemBus = mock.MagicMock(return_value=mock_bus)
+        fake_dbus.Interface = mock.MagicMock(return_value=mock_mgr)
+        fake_dbus.UInt16 = int
+        class _FakeDbusObject:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        fake_dbus_service = types.ModuleType("dbus.service")
+        fake_dbus_service.Object = _FakeDbusObject
+        fake_dbus_service.method = lambda *a, **kw: (lambda f: f)
+        fake_dbus_exceptions = types.ModuleType("dbus.exceptions")
+        fake_dbus_exceptions.DBusException = Exception
+        fake_dbus_mainloop = types.ModuleType("dbus.mainloop")
+        fake_dbus_mainloop_glib = types.ModuleType("dbus.mainloop.glib")
+        fake_dbus_mainloop_glib.DBusGMainLoop = mock.MagicMock()
+        fake_dbus_mainloop.glib = fake_dbus_mainloop_glib
+        fake_dbus.service = fake_dbus_service
+        fake_dbus.exceptions = fake_dbus_exceptions
+        fake_dbus.mainloop = fake_dbus_mainloop
+
+        fake_glib = types.SimpleNamespace(
+            MainLoop=lambda: types.SimpleNamespace(run=lambda: None),
+            timeout_add=lambda delay, fn: timeouts.append((delay, fn)),
+            timeout_add_seconds=lambda delay, fn: timeouts.append((delay * 1000, fn)),
+        )
+        fake_gi = types.ModuleType("gi")
+        fake_gi_repo = types.ModuleType("gi.repository")
+        fake_gi_repo.GLib = fake_glib
+
+        with mock.patch.dict(sys.modules, {
+            "dbus": fake_dbus,
+            "dbus.service": fake_dbus_service,
+            "dbus.exceptions": fake_dbus_exceptions,
+            "dbus.mainloop": fake_dbus_mainloop,
+            "dbus.mainloop.glib": fake_dbus_mainloop_glib,
+            "gi": fake_gi,
+            "gi.repository": fake_gi_repo,
+        }), mock.patch.object(silentinput_daemon, "_bt_dbus_refs", []):
+            silentinput_daemon.setup_bluetooth_server(loop=None)
+            self.assertIn("PropertiesChanged", signal_callbacks)
+            mock_mgr.RegisterProfile.reset_mock()
+
+            props_cb = signal_callbacks["PropertiesChanged"]
+            props_cb("org.bluez.Adapter1", {"Powered": val_false}, [])
+            self.assertEqual(timeouts, [])
+
+            props_cb("org.bluez.Adapter1", {"Powered": val_true}, [])
+            self.assertEqual(len(timeouts), 1)
+            self.assertEqual(timeouts[0][0], 300)
+            timeouts[0][1]()
+            mock_mgr.RegisterProfile.assert_called_once()
+
+    async def test_mouse_down_up_left_and_release_on_disconnect(self):
+        emitted = []
+        fake_evdev = types.SimpleNamespace(
+            ecodes=types.SimpleNamespace(EV_KEY=1, EV_REL=2, BTN_LEFT=272, BTN_RIGHT=273, REL_X=0, REL_Y=1, REL_WHEEL=8)
+        )
+        cfg = {"auth_token": "tok"}
+        with mock.patch.object(silentinput_daemon, "evdev", fake_evdev), \
+             mock.patch.object(silentinput_daemon, "ensure_uinput_device", return_value=True), \
+             mock.patch.object(silentinput_daemon, "uinput_device", object()), \
+             mock.patch.object(silentinput_daemon, "_emit_uinput_events", side_effect=lambda evs: emitted.append(evs) or True), \
+             mock.patch.object(silentinput_daemon, "_held_mouse_buttons", {}):
+            tok_active = object()
+            tok_other = object()
+            tok_unauth = object()
+            await silentinput_daemon.process_message(
+                json.dumps({"type": "mouse", "action": "down_left"}),
+                _FakeWriter(),
+                is_websocket=True,
+                is_authenticated=True,
+                config=cfg,
+                conn_token=tok_active,
+            )
+            self.assertEqual(emitted[-1], [(1, 272, 1)])
+            self.assertIn(272, silentinput_daemon._held_mouse_buttons)
+
+            # Unauthenticated or unrelated connection closing must NOT release tok_active's held button
+            silentinput_daemon._release_held_mouse_buttons(tok_unauth)
+            silentinput_daemon._release_held_mouse_buttons(tok_other)
+            self.assertEqual(len(emitted), 1)
+            self.assertIn(tok_active, silentinput_daemon._held_mouse_buttons[272])
+
+            # Only when tok_active disconnects is BTN_LEFT released cleanly
+            silentinput_daemon._release_held_mouse_buttons(tok_active)
+            self.assertEqual(emitted[-1], [(1, 272, 0)])
+            self.assertEqual(len(silentinput_daemon._held_mouse_buttons), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

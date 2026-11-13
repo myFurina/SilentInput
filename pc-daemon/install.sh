@@ -78,9 +78,11 @@ if [ ! -f "$SCRIPT_DIR/silentinput-daemon.py" ]; then
     echo "========================================="
     IS_IMMUTABLE=0
     [ -e /run/ostree-booted ] && IS_IMMUTABLE=1
+    TMP_DIR="$(mktemp -d)"
+    trap 'rm -rf "$TMP_DIR"' EXIT
 
     if [ "$IS_IMMUTABLE" -eq 0 ] && command -v apt-get >/dev/null 2>&1; then
-        TMP_DEB="/tmp/silentinput-latest.deb"
+        TMP_DEB="$TMP_DIR/silentinput-latest.deb"
         if download_latest_release_asset ".deb" "$TMP_DEB"; then
             echo "📦 检测到 Debian/Ubuntu 系统，正在通过 apt 安装（自动拉取依赖）..."
             sudo apt-get update
@@ -90,7 +92,7 @@ if [ ! -f "$SCRIPT_DIR/silentinput-daemon.py" ]; then
             exit 0
         fi
     elif [ "$IS_IMMUTABLE" -eq 0 ] && command -v dnf >/dev/null 2>&1; then
-        TMP_RPM="/tmp/silentinput-latest.rpm"
+        TMP_RPM="$TMP_DIR/silentinput-latest.rpm"
         if download_latest_release_asset ".rpm" "$TMP_RPM"; then
             echo "📦 检测到 Fedora/RHEL 系统，正在通过 dnf 安装（自动拉取依赖）..."
             sudo dnf install -y "$TMP_RPM"
@@ -101,19 +103,18 @@ if [ ! -f "$SCRIPT_DIR/silentinput-daemon.py" ]; then
     fi
 
     echo "⬇️  正在拉取最新 SilentInput 源码包到 $DATA_DIR/src ..."
-    TMP_TAR="/tmp/silentinput-main.tar.gz"
+    TMP_TAR="$TMP_DIR/silentinput-main.tar.gz"
     rm -rf "$DATA_DIR/src"
     mkdir -p "$DATA_DIR/src"
     curl -fL --progress-bar "https://github.com/$REPO/archive/refs/heads/main.tar.gz" -o "$TMP_TAR"
     tar -xzf "$TMP_TAR" -C "$DATA_DIR/src" --strip-components=2 --wildcards "*/pc-daemon/*" "*/pc-daemon/**/*" 2>/dev/null || {
-        TMP_EXTRACT="/tmp/silentinput-extract"
-        rm -rf "$TMP_EXTRACT"
+        TMP_EXTRACT="$TMP_DIR/silentinput-extract"
         mkdir -p "$TMP_EXTRACT"
         tar -xzf "$TMP_TAR" -C "$TMP_EXTRACT"
         cp -r "$TMP_EXTRACT"/*/pc-daemon/* "$DATA_DIR/src/"
-        rm -rf "$TMP_EXTRACT"
     }
-    rm -f "$TMP_TAR"
+    rm -rf "$TMP_DIR"
+    trap - EXIT
     exec bash "$DATA_DIR/src/install.sh" "$@"
 fi
 
@@ -216,9 +217,22 @@ echo "✅ 已配置 CLI 命令: $BIN_DIR/silentinput"
 echo "✅ 已初始化本地配对密钥与 TLS 自签名证书"
 
 # 6. 安装桌面图标与应用入口
+ICON_BASE_DIR="$HOME/.local/share/icons/hicolor"
+ICON_PNG_DIR="$ICON_BASE_DIR/128x128/apps"
 ICON_VALUE="input-keyboard"
 if [ -f "$SCRIPT_DIR/packaging/silentinput.svg" ]; then
+    mkdir -p "$ICON_DIR" "$ICON_PNG_DIR"
     cp -f "$SCRIPT_DIR/packaging/silentinput.svg" "$ICON_DIR/com.silentinput.controlcenter.svg"
+    if [ ! -f "$ICON_BASE_DIR/index.theme" ] && [ -f "/usr/share/icons/hicolor/index.theme" ]; then
+        cp -f "/usr/share/icons/hicolor/index.theme" "$ICON_BASE_DIR/index.theme"
+    fi
+    if command -v magick >/dev/null 2>&1; then
+        magick -background none "$ICON_DIR/com.silentinput.controlcenter.svg" -resize 128x128 "$ICON_PNG_DIR/com.silentinput.controlcenter.png" 2>/dev/null || true
+    elif command -v rsvg-convert >/dev/null 2>&1; then
+        rsvg-convert -w 128 -h 128 "$ICON_DIR/com.silentinput.controlcenter.svg" -o "$ICON_PNG_DIR/com.silentinput.controlcenter.png" 2>/dev/null || true
+    fi
+    command -v gtk4-update-icon-cache >/dev/null 2>&1 && gtk4-update-icon-cache -f -t "$ICON_BASE_DIR" >/dev/null 2>&1 || true
+    command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t "$ICON_BASE_DIR" >/dev/null 2>&1 || true
     ICON_VALUE="com.silentinput.controlcenter"
 fi
 
@@ -228,7 +242,7 @@ cat > "$APP_DIR/com.silentinput.controlcenter.desktop" << EOF
 Name=SilentInput 控制中心
 Name[en]=SilentInput Control Center
 Comment=静音输入伴侣 PC 服务与设置
-Exec=$PYTHON_BIN $SCRIPT_DIR/silentinput-gui.py
+Exec="$PYTHON_BIN" "$SCRIPT_DIR/silentinput-gui.py"
 Icon=$ICON_VALUE
 Terminal=false
 Type=Application
@@ -244,11 +258,11 @@ echo "✅ 已创建桌面应用图标: SilentInput 控制中心"
 cat > "$SYSTEMD_USER_DIR/silentinput.service" << EOF
 [Unit]
 Description=SilentInput PC Companion Daemon
-After=network.target
+After=network-online.target graphical-session-pre.target bluetooth.target
 
 [Service]
 Type=simple
-ExecStart=$PYTHON_BIN -u $SCRIPT_DIR/silentinput-daemon.py
+ExecStart="$PYTHON_BIN" -u "$SCRIPT_DIR/silentinput-daemon.py"
 Restart=on-failure
 RestartSec=3
 Environment="PYTHONUNBUFFERED=1"

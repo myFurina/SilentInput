@@ -95,6 +95,8 @@ def cmd_status():
     print(f" 流量加密:    {'🔒 TLS 传输加密 (WSS)' if tls_enabled else '明文传输 (WS)'}")
     print(" USB 模式:    物理线连接自动信任")
     print(" 蓝牙信道:    📶 RFCOMM Channel 1 (SPP 标准串口)")
+    autostart_str = "🟢 已开启" if silentinput_config.is_autostart_enabled() else "⚪ 已关闭"
+    print(f" 开机自启:    {autostart_str}")
     print("=========================================")
 
 def cmd_token(args):
@@ -153,6 +155,30 @@ def cmd_tls(args):
         cmd_restart()
     else:
         print(f"❌ 未知参数: {sub}。请使用 on 或 off。", file=sys.stderr)
+
+def cmd_autostart(args):
+    if not args:
+        enabled = silentinput_config.is_autostart_enabled()
+        state_str = "🟢 已启用 (登录桌面时自动启动)" if enabled else "⚪ 已关闭 (仅手动启动)"
+        print(f"当前开机自启状态: {state_str}")
+        print("用法:")
+        print("  silentinput autostart on   - 启用开机自启")
+        print("  silentinput autostart off  - 关闭开机自启")
+        return
+
+    sub = args[0].lower()
+    if sub in ("on", "enable", "true", "1"):
+        ok, msg = silentinput_config.set_autostart_enabled(True)
+    elif sub in ("off", "disable", "false", "0"):
+        ok, msg = silentinput_config.set_autostart_enabled(False)
+    else:
+        print(f"❌ 未知参数: {sub}。请使用 on 或 off。", file=sys.stderr)
+        return
+
+    if ok:
+        print(f"✅ {msg}")
+    else:
+        print(f"❌ {msg}", file=sys.stderr)
 
 def cmd_logs():
     log_file = silentinput_config.LOG_FILE
@@ -238,6 +264,7 @@ SilentInput 管理命令:
   silentinput bluetooth   - 查看电脑蓝牙名称、MAC 地址及配对指引
   silentinput token       - 查看当前安全配对密钥 (--reset 可重新生成)
   silentinput tls         - 查看或切换 TLS 传输加密 (on/off)
+  silentinput autostart   - 查看或切换开机自动启动 (on/off)
   silentinput logs        - 实时跟踪后台服务运行日志
   silentinput gui         - 打开原生 GNOME 桌面控制中心界面
   silentinput install     - 安装到系统 (开机自启、桌面图标、CLI 命令)
@@ -265,6 +292,8 @@ def main():
         cmd_token(sys.argv[2:])
     elif sub == "tls":
         cmd_tls(sys.argv[2:])
+    elif sub == "autostart":
+        cmd_autostart(sys.argv[2:])
     elif sub == "logs":
         cmd_logs()
     elif sub == "gui":

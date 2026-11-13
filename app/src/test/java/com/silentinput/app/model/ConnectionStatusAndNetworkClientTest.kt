@@ -4,6 +4,7 @@ import com.silentinput.app.network.NetworkClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ConnectionStatusAndNetworkClientTest {
@@ -130,6 +131,7 @@ class ConnectionStatusAndNetworkClientTest {
 
             assertEquals("请输入配对密钥", client.connectionError.value)
             assertFalse(client.isConnected.value)
+            assertFalse(client.isConnecting.value)
             assertFalse(client.isAuthenticated.value)
             assertFalse(client.isReconnecting.value)
 
@@ -137,9 +139,11 @@ class ConnectionStatusAndNetworkClientTest {
             client.authToken = "secret"
             client.connect()
             assertEquals("请输入电脑 IP 地址", client.connectionError.value)
+            assertFalse(client.isConnecting.value)
 
             client.disconnect()
             assertNull(client.connectionError.value)
+            assertFalse(client.isConnecting.value)
             assertFalse(client.isReconnecting.value)
         } finally {
             client.destroy()
@@ -186,5 +190,137 @@ class ConnectionStatusAndNetworkClientTest {
         )
         assertEquals("状态: 正在重连...", lanReconnectingDialog.text)
         assertEquals(StatusTone.PENDING, lanReconnectingDialog.tone)
+    }
+
+    @Test
+    fun `connecting state displays 正在连接 immediately on top bar and dialogs`() {
+        val lanTop = ConnectionStatusFormatter.formatTopBarStatus(
+            mode = "lan",
+            isBtConnected = false,
+            isBtConnecting = false,
+            btDeviceName = null,
+            btLatencyMs = null,
+            isNetConnected = false,
+            isNetAuthenticated = false,
+            isNetReconnecting = false,
+            isNetEncrypted = true,
+            netConnectionError = null,
+            netLatencyMs = null,
+            activeServerIp = "192.168.1.20",
+            isNetConnecting = true
+        )
+        assertEquals("局域网: 正在连接...", lanTop.text)
+        assertEquals(StatusTone.PENDING, lanTop.tone)
+
+        val lanDialog = ConnectionStatusFormatter.formatLanDialogStatus(
+            isLanConnected = false,
+            isLanAuthenticated = false,
+            isNetEncrypted = true,
+            isNetReconnecting = false,
+            connError = null,
+            latencyMs = null,
+            isLanConnecting = true
+        )
+        assertEquals("状态: 正在连接...", lanDialog.text)
+        assertEquals(StatusTone.PENDING, lanDialog.tone)
+
+        val usbDialog = ConnectionStatusFormatter.formatUsbDialogStatus(
+            isUsbConnected = false,
+            isUsbAuthenticated = false,
+            isNetEncrypted = true,
+            isNetReconnecting = false,
+            connError = null,
+            latencyMs = null,
+            isUsbConnecting = true
+        )
+        assertEquals("状态: 正在连接...", usbDialog.text)
+        assertEquals(StatusTone.PENDING, usbDialog.tone)
+    }
+
+    @Test
+    fun `bluetooth auto reconnect respects manual disconnect flag`() {
+        assertFalse(
+            ConnectionStatusFormatter.shouldAutoReconnectBluetooth(
+                mode = "bluetooth",
+                isBtConnected = false,
+                isBtConnecting = false,
+                manualDisconnected = true,
+                isBluetoothEnabled = true,
+                lastBtDeviceAddress = "AA:BB:CC:DD:EE:FF"
+            )
+        )
+        assertFalse(
+            ConnectionStatusFormatter.shouldAutoReconnectBluetooth(
+                mode = "lan",
+                isBtConnected = false,
+                isBtConnecting = false,
+                manualDisconnected = false,
+                isBluetoothEnabled = true,
+                lastBtDeviceAddress = "AA:BB:CC:DD:EE:FF"
+            )
+        )
+        assertFalse(
+            ConnectionStatusFormatter.shouldAutoReconnectBluetooth(
+                mode = "bluetooth",
+                isBtConnected = false,
+                isBtConnecting = false,
+                manualDisconnected = false,
+                isBluetoothEnabled = false,
+                lastBtDeviceAddress = "AA:BB:CC:DD:EE:FF"
+            )
+        )
+        assertTrue(
+            ConnectionStatusFormatter.shouldAutoReconnectBluetooth(
+                mode = "bluetooth",
+                isBtConnected = false,
+                isBtConnecting = false,
+                manualDisconnected = false,
+                isBluetoothEnabled = true,
+                lastBtDeviceAddress = "AA:BB:CC:DD:EE:FF"
+            )
+        )
+    }
+
+    @Test
+    fun `network client connect with malformed host sets error and clears isConnecting`() {
+        val client = NetworkClient()
+        try {
+            client.serverIp = "192.168.1. 10"
+            client.authToken = "secret-token"
+            client.isTlsEnabled = true
+            client.connect()
+
+            assertFalse(client.isConnected.value)
+            assertFalse(client.isConnecting.value)
+            assertFalse(client.isReconnecting.value)
+            assertEquals("连接地址格式无效，请检查 IP 输入", client.connectionError.value)
+
+            client.serverIp = "http://192.168.1.10"
+            client.connect()
+
+            assertFalse(client.isConnected.value)
+            assertFalse(client.isConnecting.value)
+            assertEquals("连接地址格式无效，请检查 IP 输入", client.connectionError.value)
+        } finally {
+            client.destroy()
+        }
+    }
+
+    @Test
+    fun `network client disconnect clears isConnecting and connectionError`() {
+        val client = NetworkClient()
+        try {
+            client.serverIp = ""
+            client.connect()
+            assertEquals("请输入电脑 IP 地址", client.connectionError.value)
+            assertFalse(client.isConnecting.value)
+
+            client.disconnect()
+            assertFalse(client.isConnecting.value)
+            assertFalse(client.isReconnecting.value)
+            assertNull(client.connectionError.value)
+        } finally {
+            client.destroy()
+        }
     }
 }

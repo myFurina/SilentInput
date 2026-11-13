@@ -7,13 +7,16 @@ import android.content.SharedPreferences
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.silentinput.app.bluetooth.BluetoothCompanionClient
+import com.silentinput.app.model.ConnectionStatusFormatter
 import com.silentinput.app.network.NetworkClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -27,6 +30,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_AUTH_TOKEN = "auth_token"
         private const val KEY_TLS_ENCRYPTION = "tls_encryption"
         private const val KEY_LAST_BT_ADDRESS = "last_bt_device_address"
+        private const val KEY_BT_MANUAL_DISCONNECTED = "bt_manual_disconnected"
+        private const val KEY_FAVORITE_BT_ADDRESSES = "favorite_bt_addresses"
         private const val KEY_HAPTIC_ENABLED = "haptic_enabled"
         private const val KEY_DARK_MODE = "dark_mode"
         private const val KEY_TEXT_INLINE_TRACKPAD = "text_inline_trackpad"
@@ -74,6 +79,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _lastBtDeviceAddress = MutableStateFlow(prefs.getString(KEY_LAST_BT_ADDRESS, null))
     val lastBtDeviceAddress: StateFlow<String?> = _lastBtDeviceAddress.asStateFlow()
 
+    private val _isBtManualDisconnected = MutableStateFlow(
+        prefs.getBoolean(KEY_BT_MANUAL_DISCONNECTED, false)
+    )
+
+    private val _favoriteBtAddresses = MutableStateFlow(
+        prefs.getStringSet(KEY_FAVORITE_BT_ADDRESSES, emptySet())?.toSet() ?: emptySet()
+    )
+    val favoriteBtAddresses: StateFlow<Set<String>> = _favoriteBtAddresses.asStateFlow()
+
     private val _isHapticEnabled = MutableStateFlow(prefs.getBoolean(KEY_HAPTIC_ENABLED, false))
     val isHapticEnabled: StateFlow<Boolean> = _isHapticEnabled.asStateFlow()
 
@@ -103,9 +117,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _longTextInput = MutableStateFlow("")
     val longTextInput: StateFlow<String> = _longTextInput.asStateFlow()
 
+    private val _isLeftMouseHeld = MutableStateFlow(false)
+    val isLeftMouseHeld: StateFlow<Boolean> = _isLeftMouseHeld.asStateFlow()
+
     // Delegated network state
     val isNetConnected: StateFlow<Boolean> = networkClient.isConnected
     val isNetAuthenticated: StateFlow<Boolean> = networkClient.isAuthenticated
+    val isNetConnecting: StateFlow<Boolean> = networkClient.isConnecting
     val isNetReconnecting: StateFlow<Boolean> = networkClient.isReconnecting
     val isNetEncrypted: StateFlow<Boolean> = networkClient.isEncrypted
     val netConnectionError: StateFlow<String?> = networkClient.connectionError
@@ -117,6 +135,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Delegated Bluetooth SPP companion state
     val isBtConnected: StateFlow<Boolean> = btClient.isConnected
     val isBtConnecting: StateFlow<Boolean> = btClient.isConnecting
+    val isBtAdapterEnabled: StateFlow<Boolean> = btClient.isBluetoothEnabledFlow
     val btConnectedDeviceName: StateFlow<String?> = btClient.connectedDeviceName
     val btLatencyMs: StateFlow<Long?> = btClient.latencyMs
     val btStatusMessage: StateFlow<String?> = btClient.statusMessage
@@ -142,33 +161,76 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         networkClient.serverPort = prefs.getInt(KEY_SERVER_PORT, NetworkClient.DEFAULT_PORT)
         networkClient.authToken = _savedAuthToken.value
         networkClient.isTlsEnabled = _isTlsEnabled.value
+        btClient.onAdapterStateChanged = {
+            refreshBondedDevices()
+        }
+        viewModelScope.launch {
+            isAnyConnected.collectLatest { connected ->
+                if (!connected && _isLeftMouseHeld.value) {
+                    _isLeftMouseHeld.value = false
+                }
+            }
+        }
     }
 
     fun updateBluetoothPermission(granted: Boolean) {
-        _hasBtPermission.value = granted
+        refreshBluetoothState(granted)
+    }
+
+    fun refreshBluetoothState(btPermissionGranted: Boolean? = null) {
+        if (btPermissionGranted != null) {
+            _hasBtPermission.value = btPermissionGranted
+        }
+        btClient.refreshBluetoothEnabled()
         refreshBondedDevices()
     }
 
     fun refreshBondedDevices() {
-        _bondedBtDevices.value = if (_hasBtPermission.value && btClient.isBluetoothEnabled()) {
+        _bondedBtDevices.value = if (_hasBtPermission.value && btClient.refreshBluetoothEnabled()) {
             btClient.getBondedDevices()
         } else {
             emptyList()
         }
     }
 
-    fun isBluetoothEnabled(): Boolean = btClient.isBluetoothEnabled()
+    fun tryLegacySetBluetoothEnabled(enable: Boolean): Boolean {
+        val handled = btClient.setBluetoothEnabled(enable)
+        if (handled) {
+            _bondedBtDevices.value = if (enable && _hasBtPermission.value) {
+                btClient.getBondedDevices()
+            } else {
+                emptyList()
+            }
+        }
+        return handled
+    }
+
+    fun toggleFavoriteBtDevice(address: String) {
+        val updated = _favoriteBtAddresses.value.toMutableSet().apply {
+            if (contains(address)) remove(address) else add(address)
+        }.toSet()
+        _favoriteBtAddresses.value = updated
+        prefs.edit().putStringSet(KEY_FAVORITE_BT_ADDRESSES, updated).apply()
+    }
+
+    fun isBluetoothEnabled(): Boolean = btClient.refreshBluetoothEnabled()
 
     fun onResume(btPermissionGranted: Boolean) {
-        updateBluetoothPermission(btPermissionGranted)
+        refreshBluetoothState(btPermissionGranted)
         if (_connectionMode.value == "bluetooth") {
-            if (!btClient.isConnected.value && !btClient.isConnecting.value) {
-                val lastAddress = _lastBtDeviceAddress.value
-                if (lastAddress != null && btClient.isBluetoothEnabled()) {
-                    val dev = _bondedBtDevices.value.firstOrNull { it.address == lastAddress }
-                    if (dev != null) {
-                        btClient.connect(dev)
-                    }
+            val lastAddress = _lastBtDeviceAddress.value
+            if (ConnectionStatusFormatter.shouldAutoReconnectBluetooth(
+                    mode = _connectionMode.value,
+                    isBtConnected = btClient.isConnected.value,
+                    isBtConnecting = btClient.isConnecting.value,
+                    manualDisconnected = _isBtManualDisconnected.value,
+                    isBluetoothEnabled = btClient.refreshBluetoothEnabled(),
+                    lastBtDeviceAddress = lastAddress
+                )
+            ) {
+                val dev = _bondedBtDevices.value.firstOrNull { it.address == lastAddress }
+                if (dev != null) {
+                    btClient.connect(dev)
                 }
             }
         } else {
@@ -233,9 +295,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun connectBluetooth(device: BluetoothDevice) {
         networkClient.disconnect()
+        _isBtManualDisconnected.value = false
         prefs.edit()
             .putString(KEY_CONNECTION_MODE, "bluetooth")
             .putString(KEY_LAST_BT_ADDRESS, device.address)
+            .putBoolean(KEY_BT_MANUAL_DISCONNECTED, false)
             .apply()
         _connectionMode.value = "bluetooth"
         _lastBtDeviceAddress.value = device.address
@@ -243,6 +307,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnectBluetooth() {
+        _isBtManualDisconnected.value = true
+        prefs.edit().putBoolean(KEY_BT_MANUAL_DISCONNECTED, true).apply()
         btClient.disconnect()
     }
 
@@ -264,7 +330,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendMouseClick(button: String) {
-        val action = "click_$button"
+        if (button == "left") {
+            _isLeftMouseHeld.value = false
+        }
+        sendMouseAction("click_$button")
+    }
+
+    fun setLeftMouseHold(pressed: Boolean) {
+        if (pressed && !isAnyConnected.value) {
+            _isLeftMouseHeld.value = false
+            return
+        }
+        if (_isLeftMouseHeld.value == pressed) return
+        _isLeftMouseHeld.value = pressed
+        if (isAnyConnected.value) {
+            sendMouseAction(if (pressed) "down_left" else "up_left")
+        }
+    }
+
+    fun sendMouseAction(action: String) {
         if (btClient.isConnected.value) {
             btClient.sendMouse(0f, 0f, action)
         } else if (isNetReady.value) {

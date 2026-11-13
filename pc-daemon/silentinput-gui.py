@@ -37,6 +37,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.config = silentinput_config.load_config()
         self._probe_in_flight = False
         self._service_action_count = 0
+        self._autostart_action_count = 0
         self._config_generation = 0
         self._acl_save_timer_id = None
 
@@ -67,6 +68,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.service_row = Adw.SwitchRow(title="后台服务")
         self.service_row.connect("notify::active", self.on_service_switch_toggled)
         status_group.add(self.service_row)
+
+        self.autostart_row = Adw.SwitchRow(title="开机自动启动")
+        self.autostart_row.set_subtitle("登录桌面时自动启动后台输入服务")
+        self.autostart_row.connect("notify::active", self.on_autostart_toggled)
+        status_group.add(self.autostart_row)
 
         # --- Group 2: 配对密钥 (无线连接必须验证) ---
         sec_group = Adw.PreferencesGroup(title="安全与配对")
@@ -192,9 +198,10 @@ class MainWindow(Adw.ApplicationWindow):
             try:
                 cfg = silentinput_config.load_config()
                 running, pid = silentinput_config.is_daemon_running()
+                autostart = silentinput_config.is_autostart_enabled()
                 usb_devices = silentinput_config.get_connected_usb_devices()
                 ips = silentinput_config.get_all_host_ips()
-                GLib.idle_add(self._apply_status_update, cfg, running, pid, usb_devices, ips, gen_before)
+                GLib.idle_add(self._apply_status_update, cfg, running, pid, autostart, usb_devices, ips, gen_before)
             except Exception:
                 GLib.idle_add(self._finish_probe)
 
@@ -239,7 +246,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.blacklist_row.set_text(bl_text)
             self.blacklist_row.handler_unblock_by_func(self.on_blacklist_changed)
 
-    def _apply_status_update(self, cfg, running, pid, usb_devices, ips, gen_before):
+    def _apply_status_update(self, cfg, running, pid, autostart, usb_devices, ips, gen_before):
         self._probe_in_flight = False
         # Do not overwrite local config if user edited settings while background probe ran
         if gen_before == self._config_generation and self._acl_save_timer_id is None:
@@ -256,6 +263,15 @@ class MainWindow(Adw.ApplicationWindow):
                 self.service_row.set_subtitle(f"正在运行{pid_info}")
             else:
                 self.service_row.set_subtitle("已停止")
+
+        if self._autostart_action_count == 0:
+            self.autostart_row.handler_block_by_func(self.on_autostart_toggled)
+            self.autostart_row.set_active(autostart)
+            self.autostart_row.handler_unblock_by_func(self.on_autostart_toggled)
+            self.autostart_row.set_subtitle(
+                "已启用 · 登录桌面时自动启动后台输入服务" if autostart
+                else "已关闭 · 仅手动打开服务时运行"
+            )
 
         self.update_token_display()
 
@@ -315,6 +331,32 @@ class MainWindow(Adw.ApplicationWindow):
                 def _done():
                     self._service_action_count = max(0, self._service_action_count - 1)
                     self.update_status()
+                    return False
+                GLib.idle_add(_done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def on_autostart_toggled(self, switch_row, param):
+        active = switch_row.get_active()
+        self._autostart_action_count += 1
+        self.autostart_row.set_subtitle("正在开启开机启动..." if active else "正在关闭开机启动...")
+
+        def _worker():
+            ok, msg = False, ""
+            try:
+                ok, msg = silentinput_config.set_autostart_enabled(active)
+            finally:
+                def _done():
+                    self._autostart_action_count = max(0, self._autostart_action_count - 1)
+                    if msg:
+                        self.show_toast(msg)
+                    if not ok:
+                        self.update_status()
+                    else:
+                        self.autostart_row.set_subtitle(
+                            "已启用 · 登录桌面时自动启动后台输入服务" if active
+                            else "已关闭 · 仅手动打开服务时运行"
+                        )
                     return False
                 GLib.idle_add(_done)
 

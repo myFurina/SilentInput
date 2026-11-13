@@ -104,6 +104,9 @@ class NetworkClient(context: Context? = null) {
     private val _isConnected = MutableStateFlow(false)
     val isConnected = _isConnected.asStateFlow()
 
+    private val _isConnecting = MutableStateFlow(false)
+    val isConnecting = _isConnecting.asStateFlow()
+
     private val _isReconnecting = MutableStateFlow(false)
     val isReconnecting = _isReconnecting.asStateFlow()
 
@@ -155,6 +158,7 @@ class NetworkClient(context: Context? = null) {
             val cleanIp = serverIp.trim()
             if (cleanIp.isEmpty()) {
                 shouldBeConnected = false
+                _isConnecting.value = false
                 _isReconnecting.value = false
                 reconnectJob?.cancel()
                 reconnectJob = null
@@ -164,6 +168,7 @@ class NetworkClient(context: Context? = null) {
             }
             if (cleanIp != "127.0.0.1" && authToken.trim().isBlank()) {
                 shouldBeConnected = false
+                _isConnecting.value = false
                 _isReconnecting.value = false
                 reconnectJob?.cancel()
                 reconnectJob = null
@@ -172,6 +177,7 @@ class NetworkClient(context: Context? = null) {
                 return
             }
             shouldBeConnected = true
+            _isConnecting.value = true
             _isReconnecting.value = false
             _connectionError.value = null
             _certMismatchHost.value = null
@@ -211,17 +217,18 @@ class NetworkClient(context: Context? = null) {
         Log.d(TAG, "Connecting to $url (Strict TLS: $useTls)...")
 
         val connGen = ++connectionGeneration
+        _isConnecting.value = true
         val scopedClient = try {
             buildClientForHost(cleanIp, serverPort, useTls, connGen)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize TLS client: ${e.message}", e)
             _connectionError.value = "TLS 初始化失败: ${e.message ?: "未知错误"}"
+            _isConnecting.value = false
             shouldBeConnected = false
             return
         }
 
-        val request = Request.Builder().url(url).build()
-        val newSocket = scopedClient.newWebSocket(request, object : WebSocketListener() {
+        val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 val tokenSnapshot: String
                 val isUsb = cleanIp == "127.0.0.1"
@@ -232,6 +239,7 @@ class NetworkClient(context: Context? = null) {
                     if (!isUsb && tokenSnapshot.isBlank()) {
                         Log.w(TAG, "LAN connection aborted: empty pairing token")
                         shouldBeConnected = false
+                        _isConnecting.value = false
                         _isReconnecting.value = false
                         reconnectJob?.cancel()
                         reconnectJob = null
@@ -242,6 +250,7 @@ class NetworkClient(context: Context? = null) {
 
                     Log.d(TAG, "WebSocket connected to $url (TLS: $useTls)")
                     _isConnected.value = true
+                    _isConnecting.value = false
                     _isReconnecting.value = false
                     _connectionError.value = null
                     _certMismatchHost.value = null
@@ -369,13 +378,29 @@ class NetworkClient(context: Context? = null) {
                     handleDisconnectedLocked()
                 }
             }
-        })
+        }
+        val newSocket = try {
+            val request = Request.Builder().url(url).build()
+            scopedClient.newWebSocket(request, listener)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to open WebSocket ($url): ${e.message}", e)
+            _connectionError.value = if (e is IllegalArgumentException) {
+                "连接地址格式无效，请检查 IP 输入"
+            } else {
+                "建立连接失败: ${e.message ?: "未知错误"}"
+            }
+            _isConnecting.value = false
+            _isReconnecting.value = false
+            shouldBeConnected = false
+            return
+        }
         webSocket = newSocket
     }
 
     private fun handleDisconnectedLocked() {
         webSocket = null
         _isConnected.value = false
+        _isConnecting.value = false
         _isAuthenticated.value = false
         _latencyMs.value = null
         _isEncrypted.value = false
@@ -520,7 +545,11 @@ class NetworkClient(context: Context? = null) {
         val old = webSocket
         webSocket = null
         try {
-            old?.close(1000, "Normal closure")
+            if (_isConnected.value) {
+                old?.close(1000, "Normal closure")
+            } else {
+                old?.cancel()
+            }
         } catch (_: Exception) {}
         _isConnected.value = false
         _isAuthenticated.value = false
@@ -531,6 +560,7 @@ class NetworkClient(context: Context? = null) {
     fun disconnect() {
         synchronized(stateLock) {
             shouldBeConnected = false
+            _isConnecting.value = false
             _isReconnecting.value = false
             _connectionError.value = null
             reconnectJob?.cancel()

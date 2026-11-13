@@ -17,6 +17,22 @@ data class StatusDisplay(
  */
 object ConnectionStatusFormatter {
 
+    fun shouldAutoReconnectBluetooth(
+        mode: String,
+        isBtConnected: Boolean,
+        isBtConnecting: Boolean,
+        manualDisconnected: Boolean,
+        isBluetoothEnabled: Boolean,
+        lastBtDeviceAddress: String?
+    ): Boolean {
+        return mode == "bluetooth" &&
+            !isBtConnected &&
+            !isBtConnecting &&
+            !manualDisconnected &&
+            isBluetoothEnabled &&
+            !lastBtDeviceAddress.isNullOrBlank()
+    }
+
     fun formatTopBarStatus(
         mode: String,
         isBtConnected: Boolean,
@@ -29,7 +45,8 @@ object ConnectionStatusFormatter {
         isNetEncrypted: Boolean,
         netConnectionError: String?,
         netLatencyMs: Long?,
-        activeServerIp: String
+        activeServerIp: String,
+        isNetConnecting: Boolean = false
     ): StatusDisplay {
         val isNetReady = isNetConnected && isNetAuthenticated
         return when (mode) {
@@ -50,6 +67,7 @@ object ConnectionStatusFormatter {
                         "局域网: 已连接$latText$encTag"
                     }
                     isNetConnected && !isNetAuthenticated -> "局域网: 正在验证密钥..."
+                    isNetConnecting -> "局域网: 正在连接..."
                     isNetReconnecting -> if (netConnectionError != null) "局域网: $netConnectionError" else "局域网: 正在重连..."
                     netConnectionError != null -> "局域网: $netConnectionError"
                     else -> "局域网: 未连接"
@@ -57,7 +75,7 @@ object ConnectionStatusFormatter {
                 val tone = when {
                     isNetReady && (netLatencyMs ?: 0L) >= 800L -> StatusTone.HIGH_LATENCY
                     isNetReady -> StatusTone.NORMAL
-                    isNetConnected -> StatusTone.PENDING
+                    isNetConnected || isNetConnecting -> StatusTone.PENDING
                     isNetReconnecting && netConnectionError == null -> StatusTone.PENDING
                     else -> StatusTone.ERROR
                 }
@@ -71,6 +89,7 @@ object ConnectionStatusFormatter {
                         "USB: 已连接$latText"
                     }
                     isNetConnected && !isNetAuthenticated && isLoopback -> "USB: 正在验证密钥..."
+                    isNetConnecting && isLoopback -> "USB: 正在连接..."
                     isNetReconnecting -> if (netConnectionError != null) "USB: $netConnectionError" else "USB: 正在重连..."
                     netConnectionError != null -> "USB: $netConnectionError"
                     else -> "USB: 未连接"
@@ -78,7 +97,7 @@ object ConnectionStatusFormatter {
                 val tone = when {
                     isNetReady && isLoopback && (netLatencyMs ?: 0L) >= 800L -> StatusTone.HIGH_LATENCY
                     isNetReady && isLoopback -> StatusTone.NORMAL
-                    isNetConnected && isLoopback -> StatusTone.PENDING
+                    (isNetConnected && isLoopback) || (isNetConnecting && isLoopback) -> StatusTone.PENDING
                     isNetReconnecting && netConnectionError == null -> StatusTone.PENDING
                     else -> StatusTone.ERROR
                 }
@@ -93,7 +112,8 @@ object ConnectionStatusFormatter {
         isNetEncrypted: Boolean,
         isNetReconnecting: Boolean,
         connError: String?,
-        latencyMs: Long?
+        latencyMs: Long?,
+        isUsbConnecting: Boolean = false
     ): StatusDisplay {
         return when {
             isUsbConnected && isUsbAuthenticated -> {
@@ -103,6 +123,8 @@ object ConnectionStatusFormatter {
             }
             isUsbConnected && !isUsbAuthenticated ->
                 StatusDisplay("状态: 正在验证密钥...", StatusTone.PENDING)
+            isUsbConnecting ->
+                StatusDisplay("状态: 正在连接...", StatusTone.PENDING)
             connError != null ->
                 StatusDisplay("状态: $connError", StatusTone.ERROR)
             isNetReconnecting ->
@@ -118,7 +140,8 @@ object ConnectionStatusFormatter {
         isNetEncrypted: Boolean,
         isNetReconnecting: Boolean,
         connError: String?,
-        latencyMs: Long?
+        latencyMs: Long?,
+        isLanConnecting: Boolean = false
     ): StatusDisplay {
         return when {
             isLanConnected && isLanAuthenticated -> {
@@ -128,6 +151,8 @@ object ConnectionStatusFormatter {
             }
             isLanConnected && !isLanAuthenticated ->
                 StatusDisplay("状态: 正在验证配对密钥...", StatusTone.PENDING)
+            isLanConnecting ->
+                StatusDisplay("状态: 正在连接...", StatusTone.PENDING)
             connError != null ->
                 StatusDisplay("状态: $connError", StatusTone.ERROR)
             isNetReconnecting ->

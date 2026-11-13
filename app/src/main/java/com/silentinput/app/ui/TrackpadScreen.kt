@@ -1,6 +1,7 @@
 package com.silentinput.app.ui
 
 import android.view.HapticFeedbackConstants
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -24,14 +25,32 @@ fun TrackpadScreen(
     sensitivity: Float,
     onSensitivityChange: (Float) -> Unit,
     isHapticEnabled: Boolean = false,
+    isConnected: Boolean = true,
+    isLeftHeld: Boolean = false,
     onMouseMove: (dx: Float, dy: Float) -> Unit,
     onMouseClick: (button: String) -> Unit,
-    onMouseScroll: (wheel: Float) -> Unit
+    onMouseScroll: (wheel: Float) -> Unit,
+    onLeftMouseHoldChange: (Boolean) -> Unit = {},
+    onSendKey: (String) -> Unit = {}
 ) {
     val view = LocalView.current
+    val currentIsLeftHeld by rememberUpdatedState(isLeftHeld)
+    val currentOnLeftHoldChange by rememberUpdatedState(onLeftMouseHoldChange)
+
     DisposableEffect(view) {
         view.isSoundEffectsEnabled = false
-        onDispose {}
+        onDispose {
+            if (currentIsLeftHeld) {
+                currentOnLeftHoldChange(false)
+            }
+        }
+    }
+
+    fun setLeftHold(held: Boolean) {
+        if (held && !isConnected) return
+        if (isLeftHeld == held) return
+        if (isHapticEnabled) view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        onLeftMouseHoldChange(held)
     }
 
     Column(
@@ -39,15 +58,64 @@ fun TrackpadScreen(
             .fillMaxSize()
             .padding(12.dp)
     ) {
+        // Quick selection & screenshot toolbar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = { setLeftHold(!isLeftHeld) },
+                enabled = isConnected || isLeftHeld,
+                modifier = Modifier.weight(1.4f).height(42.dp),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isLeftHeld) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = if (isLeftHeld) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                )
+            ) {
+                Text(
+                    text = if (isLeftHeld) "正在框选 · 点此松开" else "框选（按住左键）",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            OutlinedButton(
+                onClick = {
+                    if (isHapticEnabled) view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    onSendKey("prtsc")
+                },
+                modifier = Modifier.weight(1f).height(42.dp),
+                shape = RoundedCornerShape(10.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp)
+            ) {
+                Text("截屏 PrtSc", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            }
+        }
+
         TrackpadSurface(
             sensitivity = sensitivity,
             isHapticEnabled = isHapticEnabled,
             onMouseMove = onMouseMove,
-            onMouseClick = onMouseClick,
+            onMouseClick = { btn ->
+                if (isLeftHeld && btn == "left") {
+                    setLeftHold(false)
+                } else {
+                    onMouseClick(btn)
+                }
+            },
             onMouseScroll = onMouseScroll,
+            isLeftHeld = isLeftHeld,
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
+                .weight(1f),
+            hintText = if (isLeftHeld) {
+                "正在按住左键框选/拖拽\n单指滑动选中范围 · 轻点或按按钮松开"
+            } else {
+                "触控区域\n单指移动 · 双指滚动 · 轻点左键\n长按右键 · 点上方「框选」拖拽选字/截图"
+            }
         )
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -61,14 +129,22 @@ fun TrackpadScreen(
         ) {
             Button(
                 onClick = {
-                    if (isHapticEnabled) view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    onMouseClick("left")
+                    if (isLeftHeld) {
+                        setLeftHold(false)
+                    } else {
+                        if (isHapticEnabled) view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        onMouseClick("left")
+                    }
                 },
                 modifier = Modifier.weight(1f).fillMaxHeight(),
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
             ) {
-                Text("左键", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                Text(
+                    text = if (isLeftHeld) "松开左键" else "左键",
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
             }
 
             Button(
@@ -111,12 +187,14 @@ fun TrackpadSurface(
     onMouseClick: (button: String) -> Unit,
     onMouseScroll: (wheel: Float) -> Unit,
     modifier: Modifier = Modifier,
+    isLeftHeld: Boolean = false,
     hintText: String = "触控区域\n单指移动 · 双指滚动 · 轻点左键"
 ) {
     val view = LocalView.current
 
     val currentSensitivity by rememberUpdatedState(sensitivity)
     val currentHapticEnabled by rememberUpdatedState(isHapticEnabled)
+    val currentIsLeftHeld by rememberUpdatedState(isLeftHeld)
     val currentOnMouseMove by rememberUpdatedState(onMouseMove)
     val currentOnMouseClick by rememberUpdatedState(onMouseClick)
     val currentOnMouseScroll by rememberUpdatedState(onMouseScroll)
@@ -137,7 +215,14 @@ fun TrackpadSurface(
             .pointerInput(Unit) {
                 detectTapGestures(
                     onTap = { dispatchClick("left") },
-                    onDoubleTap = { dispatchClick("left"); dispatchClick("left") },
+                    onDoubleTap = {
+                        if (currentIsLeftHeld) {
+                            dispatchClick("left")
+                        } else {
+                            dispatchClick("left")
+                            dispatchClick("left")
+                        }
+                    },
                     onLongPress = { dispatchClick("right") }
                 )
             }
@@ -185,6 +270,7 @@ fun TrackpadSurface(
                 }
             },
         shape = RoundedCornerShape(16.dp),
+        border = if (isLeftHeld) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         Box(
