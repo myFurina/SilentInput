@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""
+SilentInput Unified CLI & Management Tool
+Controls service lifecycle (start/stop/restart/status), configuration, and installation.
+"""
+
+import os
+import sys
+import time
+import subprocess
+import shutil
+from pathlib import Path
+
+# Add pc-daemon directory to sys.path
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+import silentinput_config
+
+SYSTEMD_SERVICE_FILE = Path.home() / ".config" / "systemd" / "user" / "silentinput.service"
+DESKTOP_ENTRY_FILE = Path.home() / ".local" / "share" / "applications" / "silentinput.desktop"
+BIN_LINK_FILE = Path.home() / ".local" / "bin" / "silentinput"
+
+def has_active_systemd() -> bool:
+    return silentinput_config.has_active_systemd()
+
+def cmd_start():
+    success, msg = silentinput_config.service_start()
+    if success:
+        print(f"✅ {msg}")
+    else:
+        print(f"❌ {msg}", file=sys.stderr)
+
+def cmd_stop():
+    _, msg = silentinput_config.service_stop()
+    print(f"🛑 {msg}")
+
+def cmd_restart():
+    success, msg = silentinput_config.service_restart()
+    if success:
+        print(f"✅ {msg}")
+    else:
+        print(f"❌ {msg}", file=sys.stderr)
+
+def cmd_status():
+    config = silentinput_config.load_config()
+    running, pid = silentinput_config.is_daemon_running()
+
+    print("=========================================")
+    print("        SilentInput PC Companion        ")
+    print("=========================================")
+    if running:
+        pid_info = f" (PID: {pid})" if pid > 0 else ""
+        print(f" 服务状态:    🟢 运行中{pid_info}")
+    else:
+        print(" 服务状态:    ⚪ 已停止")
+
+    print(f" 监听端口:    {config.get('port', 53318)}")
+    
+    mode = config.get("access_control_mode", "whitelist")
+    mode_desc = {
+        "whitelist": "白名单模式 (仅允许名单内 IP)",
+        "blacklist": "黑名单模式 (拒绝名单内 IP，其余允许)",
+        "all": "允许所有网络 (0.0.0.0)",
+        "localhost_only": "仅本机 USB (127.0.0.1)"
+    }.get(mode, mode)
+    print(f" 访问控制:    {mode_desc}")
+
+    if mode == "whitelist":
+        whitelist = config.get("whitelist", [])
+        print(f" IP 白名单:   {', '.join(whitelist) if whitelist else '空 (拒绝所有非本机 IP)'}")
+    elif mode == "blacklist":
+        blacklist = config.get("blacklist", [])
+        print(f" IP 黑名单:   {', '.join(blacklist) if blacklist else '空'}")
+
+    host_ips = silentinput_config.get_all_host_ips()
+    if host_ips:
+        print(" 电脑 IP (局域网):")
+        for hip in host_ips:
+            print(f"   • {hip}")
+    else:
+        print(" 电脑 IP (局域网): 未检测到有效 IP")
+
+    usb_devs = silentinput_config.get_connected_usb_devices()
+    if usb_devs:
+        print(f" USB 有线:    🔌 已连接设备 ({', '.join(usb_devs)})")
+    else:
+        print(" USB 有线:    未检测到连接设备")
+
+    token = config.get("auth_token", "")
+    expire_desc = silentinput_config.get_token_status_text(config)
+    tls_enabled = config.get("enable_tls", True)
+    print(f" 配对密钥:    🔑 {token}")
+    print(f" 密钥有效期:  {expire_desc}")
+    print(" 无线验证:    需输入配对密钥")
+    print(f" 流量加密:    {'🔒 TLS 传输加密 (WSS)' if tls_enabled else '明文传输 (WS)'}")
+    print(" USB 模式:    物理线连接自动信任")
+    print(" 蓝牙信道:    📶 RFCOMM Channel 1 (SPP 标准串口)")
+    print("=========================================")
+
+def cmd_token(args):
+    config = silentinput_config.load_config()
+    if "--reset" in args:
+        new_token = silentinput_config.regenerate_token()
+        print(f"✅ 已生成新的随机配对密钥: {new_token}")
+        print("提示：如果后台服务正在运行，请执行 'silentinput restart' 使新密钥生效。")
+    elif "--expire" in args:
+        try:
+            idx = args.index("--expire")
+            mode = args[idx + 1].strip().lower()
+            if mode not in ("never", "24h", "7d", "1h"):
+                print("❌ 无效的有效期模式。可选值: never (不过期), 24h (24小时), 7d (7天), 1h (1小时)")
+                return
+            config["token_expire_mode"] = mode
+            config["token_created_at"] = time.time()
+            silentinput_config.save_config(config)
+            print(f"✅ 已设置配对密钥有效期模式为: {mode}")
+        except Exception:
+            print("用法: silentinput token --expire <never|24h|7d|1h>")
+    else:
+        token = config.get("auth_token")
+        expire_desc = silentinput_config.get_token_status_text(config)
+        print("=========================================")
+        print(f" 当前配对密钥: 🔑 {token}")
+        print(f" 密钥有效期:   {expire_desc}")
+        print("=========================================")
+        print("常用管理选项:")
+        print("  silentinput token --reset              - 立即轮换并生成新的随机密钥")
+        print("  silentinput token --expire never       - 设置为永不过期")
+        print("  silentinput token --expire 24h         - 设置为 24 小时自动刷新轮换")
+        print("  silentinput token --expire 7d          - 设置为 7 天自动刷新轮换")
+        print("  silentinput token --expire 1h          - 设置为 1 小时临时有效")
+
+def cmd_tls(args):
+    config = silentinput_config.load_config()
+    current = config.get("enable_tls", True)
+    if not args:
+        state_str = "🟢 已开启 (严格 WSS 传输加密，手机端需同步开启)" if current else "⚪ 已关闭 (明文 WS，手机端需同步关闭)"
+        print(f"当前 TLS 传输加密: {state_str}")
+        print("用法:")
+        print("  silentinput tls on     - 启用 TLS 传输加密 (默认)")
+        print("  silentinput tls off    - 停用 TLS 传输加密 (明文传输)")
+        print("\n注: 为防止中间人攻击与降级攻击，手机端与电脑端必须保持相同的加密设置。")
+        return
+
+    sub = args[0].lower()
+    if sub in ("on", "enable", "true", "1"):
+        silentinput_config.set_tls_enabled(True)
+        print("✅ 已开启 TLS 传输加密 (WSS)。正在重启服务生效...")
+        cmd_restart()
+    elif sub in ("off", "disable", "false", "0"):
+        silentinput_config.set_tls_enabled(False)
+        print("⚠️ 已关闭 TLS 传输加密 (明文 WS)。正在重启服务生效...")
+        cmd_restart()
+    else:
+        print(f"❌ 未知参数: {sub}。请使用 on 或 off。", file=sys.stderr)
+
+def cmd_logs():
+    log_file = silentinput_config.LOG_FILE
+    if not log_file.exists():
+        print(f"暂无日志文件 ({log_file})")
+        return
+    print(f"正在查看日志: {log_file} (按 Ctrl+C 退出)")
+    try:
+        subprocess.run(["tail", "-n", "30", "-f", str(log_file)])
+    except KeyboardInterrupt:
+        pass
+
+def cmd_gui():
+    gui_script = SCRIPT_DIR / "silentinput-gui.py"
+    if not gui_script.exists():
+        print("❌ 未找到 silentinput-gui.py", file=sys.stderr)
+        return
+    try:
+        subprocess.Popen([silentinput_config.get_python_executable(), str(gui_script)], start_new_session=True)
+        print("🖥️ 已打开 SilentInput 控制中心。")
+    except Exception as e:
+        print(f"❌ 打开控制中心失败: {e}", file=sys.stderr)
+
+def cmd_install(args=None):
+    install_script = SCRIPT_DIR / "install.sh"
+    if install_script.exists():
+        subprocess.run(["bash", str(install_script), *(args or [])], check=False)
+    else:
+        print("ℹ️ 当前通过系统安装包部署，无需手动执行 install.sh。")
+
+def cmd_uninstall(args=None):
+    pkg_cmd = silentinput_config.get_package_uninstall_command()
+    if silentinput_config.is_system_package_install() or pkg_cmd:
+        cmd_hint = pkg_cmd or "sudo apt remove silentinput  # 或 sudo dnf remove silentinput"
+        print("ℹ️ 当前 SilentInput 通过系统包管理器安装，请执行以下命令卸载：")
+        print(f"   {cmd_hint}")
+        return
+    uninstall_script = SCRIPT_DIR / "uninstall.sh"
+    if uninstall_script.exists():
+        subprocess.run(["bash", str(uninstall_script), *(args or [])], check=False)
+    else:
+        print("❌ 未找到 uninstall.sh", file=sys.stderr)
+
+def cmd_bluetooth():
+    print("=========================================")
+    print("         SilentInput 蓝牙状态            ")
+    print("=========================================")
+    try:
+        res = subprocess.run(["bluetoothctl", "show"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
+        out = res.stdout
+        name = "未知"
+        addr = "未知"
+        powered = "未知"
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("Name:"):
+                name = line.split(":", 1)[1].strip()
+            elif line.startswith("Controller"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    addr = parts[1]
+            elif line.startswith("Powered:"):
+                powered = "🟢 已开启" if "yes" in line.lower() else "🔴 已关闭"
+
+        print(f" 蓝牙控制器:  {powered}")
+        print(f" 电脑蓝牙名:  {name}")
+        print(f" 蓝牙 MAC:    {addr}")
+        print(f" 伴侣信道:    RFCOMM Channel 1 (SPP 标准串口)")
+        print("\n💡 配对指引:")
+        print("  1. 在手机系统设置 -> 蓝牙中，搜索并连接配对这台电脑。")
+        print("  2. 打开 SilentInput 手机 App，在设置面板切换至「蓝牙」一键连接即可！")
+    except Exception as e:
+        print(f" 查询蓝牙状态失败: {e}")
+    print("=========================================")
+
+def print_help():
+    print("""
+SilentInput 管理命令:
+  silentinput start       - 启动后台输入接收服务
+  silentinput stop        - 停止后台服务
+  silentinput restart     - 重启后台服务
+  silentinput status      - 查看运行状态、IP、端口及配对密钥
+  silentinput bluetooth   - 查看电脑蓝牙名称、MAC 地址及配对指引
+  silentinput token       - 查看当前安全配对密钥 (--reset 可重新生成)
+  silentinput tls         - 查看或切换 TLS 传输加密 (on/off)
+  silentinput logs        - 实时跟踪后台服务运行日志
+  silentinput gui         - 打开原生 GNOME 桌面控制中心界面
+  silentinput install     - 安装到系统 (开机自启、桌面图标、CLI 命令)
+  silentinput uninstall   - 从系统中完全卸载并清理
+""")
+
+def main():
+    if len(sys.argv) < 2:
+        cmd_status()
+        print_help()
+        return
+
+    sub = sys.argv[1].lower()
+    if sub in ("start", "up"):
+        cmd_start()
+    elif sub in ("stop", "down"):
+        cmd_stop()
+    elif sub in ("restart", "reload"):
+        cmd_restart()
+    elif sub in ("status", "info"):
+        cmd_status()
+    elif sub in ("bluetooth", "bt"):
+        cmd_bluetooth()
+    elif sub == "token":
+        cmd_token(sys.argv[2:])
+    elif sub == "tls":
+        cmd_tls(sys.argv[2:])
+    elif sub == "logs":
+        cmd_logs()
+    elif sub == "gui":
+        cmd_gui()
+    elif sub == "install":
+        cmd_install(sys.argv[2:])
+    elif sub == "uninstall":
+        cmd_uninstall(sys.argv[2:])
+    elif sub in ("help", "-h", "--help"):
+        print_help()
+    else:
+        print(f"未知参数: {sub}")
+        print_help()
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

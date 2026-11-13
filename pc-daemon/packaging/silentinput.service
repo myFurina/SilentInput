@@ -1,0 +1,13 @@
+[Unit]
+Description=SilentInput PC Companion Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u /usr/lib/silentinput/silentinput-daemon.py
+Restart=on-failure
+RestartSec=3
+Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=default.target

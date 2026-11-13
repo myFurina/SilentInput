@@ -1,0 +1,86 @@
+name: silentinput
+arch: all
+platform: linux
+version: "${VERSION}"
+section: utils
+priority: optional
+maintainer: "myFurina <https://github.com/myFurina/SilentInput>"
+description: |
+  SilentInput PC companion daemon and GTK control center for Linux/Wayland.
+  Supports USB (adb reverse), LAN (WebSocket/WSS TLS), and Bluetooth RFCOMM input.
+homepage: "https://github.com/myFurina/SilentInput"
+license: "GPL-3.0"
+
+contents:
+  - src: ./pc-daemon/silentinput-daemon.py
+    dst: /usr/lib/silentinput/silentinput-daemon.py
+    file_info:
+      mode: 0755
+  - src: ./pc-daemon/silentinput-gui.py
+    dst: /usr/lib/silentinput/silentinput-gui.py
+    file_info:
+      mode: 0755
+  - src: ./pc-daemon/silentinput_config.py
+    dst: /usr/lib/silentinput/silentinput_config.py
+    file_info:
+      mode: 0644
+  - src: ./pc-daemon/silentinput
+    dst: /usr/lib/silentinput/silentinput
+    file_info:
+      mode: 0755
+  - src: /usr/lib/silentinput/silentinput
+    dst: /usr/bin/silentinput
+    type: symlink
+  - src: ./pc-daemon/packaging/silentinput.service
+    dst: /usr/lib/systemd/user/silentinput.service
+    file_info:
+      mode: 0644
+  - src: ./pc-daemon/packaging/com.silentinput.controlcenter.desktop
+    dst: /usr/share/applications/com.silentinput.controlcenter.desktop
+    file_info:
+      mode: 0644
+  - src: ./pc-daemon/packaging/60-silentinput-uinput.rules
+    dst: /usr/lib/udev/rules.d/60-silentinput-uinput.rules
+    file_info:
+      mode: 0644
+  - src: ./pc-daemon/packaging/silentinput.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/com.silentinput.controlcenter.svg
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: ./pc-daemon/packaging/scripts/postinstall.sh
+  preremove: ./pc-daemon/packaging/scripts/preremove.sh
+  postremove: ./pc-daemon/packaging/scripts/postremove.sh
+
+overrides:
+  deb:
+    depends:
+      - python3
+      - python3-evdev
+      - wl-clipboard
+      - python3-gi
+      - gir1.2-gtk-4.0
+      - gir1.2-adw-1
+    recommends:
+      - adb
+      - bluez
+  rpm:
+    depends:
+      - python3
+      - python3-evdev
+      - wl-clipboard
+      - python3-gobject
+      - gtk4
+      - libadwaita
+    recommends:
+      - android-tools
+      - bluez
+  archlinux:
+    depends:
+      - python
+      - python-evdev
+      - wl-clipboard
+      - python-gobject
+      - gtk4
+      - libadwaita

@@ -1,0 +1,179 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-daemon:
+    name: Test PC Daemon
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Syntax Check & Unit Tests
+        run: |
+          bash -n pc-daemon/install.sh pc-daemon/uninstall.sh pc-daemon/packaging/scripts/postinstall.sh pc-daemon/packaging/scripts/preremove.sh pc-daemon/packaging/scripts/postremove.sh
+          python3 -m py_compile pc-daemon/silentinput_config.py pc-daemon/silentinput-daemon.py pc-daemon/silentinput pc-daemon/silentinput-gui.py
+          python3 -m unittest discover -s pc-daemon/tests -v
+
+  package-linux:
+    name: Package PC Daemon (.deb / .rpm / Arch)
+    needs: test-daemon
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Compute Version
+        id: ver
+        run: |
+          raw="${{ github.run_number }}"
+          num=$(( raw - 30 ))
+          if [ "$num" -lt 1 ]; then num=1; fi
+          echo "num=$num" >> "$GITHUB_OUTPUT"
+          echo "version=1.0.$num" >> "$GITHUB_OUTPUT"
+
+      - name: Install nFPM
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Build Linux Packages
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          mkdir -p dist
+          nfpm package -f pc-daemon/packaging/nfpm.yaml -p deb -t dist/
+          nfpm package -f pc-daemon/packaging/nfpm.yaml -p rpm -t dist/
+          nfpm package -f pc-daemon/packaging/nfpm.yaml -p archlinux -t dist/
+          ls -lh dist/
+
+      - name: Verify Debian Package Install & Uninstall
+        run: |
+          dpkg-deb -I dist/*.deb
+          dpkg-deb -c dist/*.deb
+          sudo apt-get update
+          sudo apt-get install -y ./dist/*.deb
+          silentinput --help
+          sudo apt-get remove -y silentinput
+
+      - name: Upload Linux Packages Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  build:
+    name: Build & Package APK
+    needs: test-daemon
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.4'
+
+      - name: Prepare Release Signing
+        id: sign
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 --decode > "${{ runner.temp }}/silentinput-release.p12"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "store_file=${{ runner.temp }}/silentinput-release.p12" >> "$GITHUB_OUTPUT"
+            echo "apk_path=app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "apk_path=app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run Android Unit Tests
+        run: gradle testDebugUnitTest --stacktrace
+
+      - name: Build Signed Release APK
+        if: steps.sign.outputs.signed == 'true'
+        env:
+          SIGNING_STORE_FILE: ${{ steps.sign.outputs.store_file }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: gradle assembleRelease --stacktrace
+
+      - name: Build Debug APK (Fallback)
+        if: steps.sign.outputs.signed != 'true'
+        run: gradle assembleDebug --stacktrace
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-package
+          path: ${{ steps.sign.outputs.apk_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: [package-linux, build]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Compute Version
+        id: ver
+        run: |
+          raw="${{ github.run_number }}"
+          num=$(( raw - 30 ))
+          if [ "$num" -lt 1 ]; then num=1; fi
+          echo "num=$num" >> "$GITHUB_OUTPUT"
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List Release Assets
+        run: ls -lh release-assets/
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ steps.ver.outputs.num }}
+          name: SilentInput v1.0.${{ steps.ver.outputs.num }}
+          body: |
+            - **手机端**：下载下方 **`app-release.apk`** 安装（后续版本可直接覆盖升级）。
+            - **电脑端**：下载对应系统的 **`.deb`**（`sudo apt install ./silentinput_*.deb`）、**`.rpm`**（`sudo dnf install ./silentinput-*.rpm`）或 Arch 包，系统会自动拉取依赖。
+            - 支持 USB、局域网（TLS）与蓝牙三种连接方式。
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
