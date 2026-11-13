@@ -166,6 +166,20 @@ class NetworkClient(context: Context? = null) {
                 _connectionError.value = "请输入电脑 IP 地址"
                 return
             }
+            if (
+                cleanIp.contains("://") ||
+                cleanIp.any { it.isWhitespace() } ||
+                cleanIp.contains("/")
+            ) {
+                shouldBeConnected = false
+                _isConnecting.value = false
+                _isReconnecting.value = false
+                reconnectJob?.cancel()
+                reconnectJob = null
+                disconnectSocketOnlyLocked()
+                _connectionError.value = "连接地址格式无效，请检查 IP 输入"
+                return
+            }
             if (cleanIp != "127.0.0.1" && authToken.trim().isBlank()) {
                 shouldBeConnected = false
                 _isConnecting.value = false
