@@ -10,16 +10,12 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -47,6 +43,7 @@ import com.silentinput.app.model.StatusTone
 import com.silentinput.app.ui.KeyboardScreen
 import com.silentinput.app.ui.LocalAppStrings
 import com.silentinput.app.ui.LocalResolvedLanguage
+import com.silentinput.app.ui.MoreSettingsScreen
 import com.silentinput.app.ui.TextSenderScreen
 import com.silentinput.app.ui.TrackpadScreen
 import com.silentinput.app.ui.UnifiedConnectionDialog
@@ -207,6 +204,8 @@ fun MainAppScaffold(
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var showConfigDialog by rememberSaveable { mutableStateOf(false) }
+    var showMoreSettingsPage by rememberSaveable { mutableStateOf(false) }
+    var returnToConfigDialogOnBack by rememberSaveable { mutableStateOf(false) }
 
     val topBarStatus = ConnectionStatusFormatter.formatTopBarStatus(
         mode = currentMode,
@@ -224,6 +223,24 @@ fun MainAppScaffold(
         activeServerIp = activeServerIp,
         language = resolvedLanguage
     )
+
+    if (showMoreSettingsPage) {
+        MoreSettingsScreen(
+            viewModel = viewModel,
+            onBack = {
+                showMoreSettingsPage = false
+                if (returnToConfigDialogOnBack) {
+                    returnToConfigDialogOnBack = false
+                    showConfigDialog = true
+                }
+            },
+            onDone = {
+                showMoreSettingsPage = false
+                returnToConfigDialogOnBack = false
+            }
+        )
+        return
+    }
 
     Scaffold(
         topBar = {
@@ -321,25 +338,16 @@ fun MainAppScaffold(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        AnimatedContent(
-                            targetState = currentMode,
-                            transitionSpec = {
-                                fadeIn(tween(SilentMotion.DURATION_STATE_MS)) togetherWith
-                                    fadeOut(tween(120))
+                        Text(
+                            text = when (currentMode) {
+                                "bluetooth" -> strings.bannerBtDisconnected
+                                "lan" -> strings.bannerLanDisconnected
+                                else -> strings.bannerUsbDisconnected
                             },
-                            modifier = Modifier.weight(1f),
-                            label = "disconnectedBannerText"
-                        ) { mode ->
-                            Text(
-                                text = when (mode) {
-                                    "bluetooth" -> strings.bannerBtDisconnected
-                                    "lan" -> strings.bannerLanDisconnected
-                                    else -> strings.bannerUsbDisconnected
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        }
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.weight(1f)
+                        )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = strings.bannerSettingsAction,
@@ -352,55 +360,49 @@ fun MainAppScaffold(
             }
 
             Box(modifier = Modifier.weight(1f)) {
-                AnimatedContent(
-                    targetState = selectedTab,
-                    modifier = Modifier.fillMaxSize(),
-                    transitionSpec = {
-                        SilentMotion.directionalTabTransition(forward = targetState > initialState)
-                    },
-                    label = "mainTabTransition"
-                ) { targetTab ->
-                    when (targetTab) {
-                        0 -> KeyboardScreen(
-                            isHapticEnabled = isHapticEnabled,
-                            onSendKey = { viewModel.sendKey(it) }
-                        )
-                        1 -> TrackpadScreen(
-                            sensitivity = trackpadSensitivity,
-                            onSensitivityChange = { viewModel.updateTrackpadSensitivity(it) },
-                            naturalScrolling = isNaturalScrolling,
-                            isHapticEnabled = isHapticEnabled,
-                            isConnected = isAnyConnected,
-                            isLeftHeld = isLeftMouseHeld,
-                            onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },
-                            onMouseClick = { viewModel.sendMouseClick(it) },
-                            onMouseScroll = { viewModel.sendMouseScroll(it) },
-                            onLeftMouseHoldChange = { viewModel.setLeftMouseHold(it) },
-                            onSendKey = { viewModel.sendKey(it) }
-                        )
-                        2 -> TextSenderScreen(
-                            isConnected = isAnyConnected,
-                            isHapticEnabled = isHapticEnabled,
-                            inputText = longTextInput,
-                            onInputTextChange = { viewModel.updateLongTextInput(it) },
-                            targetMode = sendTargetMode,
-                            onTargetModeChange = { viewModel.setSendTargetMode(it) },
-                            clearOnSend = clearOnSend,
-                            onClearOnSendChange = { viewModel.setClearOnSend(it) },
-                            enterOnSend = enterOnSend,
-                            onEnterOnSendChange = { viewModel.setEnterOnSend(it) },
-                            snippets = snippets,
-                            showInlineTrackpad = showInlineTrackpadInText,
-                            trackpadSensitivity = trackpadSensitivity,
-                            naturalScrolling = isNaturalScrolling,
-                            onSendText = { viewModel.sendTextPaste(it) },
-                            onSendKey = { viewModel.sendKey(it) },
-                            onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },
-                            onMouseClick = { viewModel.sendMouseClick(it) },
-                            onMouseScroll = { viewModel.sendMouseScroll(it) },
-                            onOpenSettings = { showConfigDialog = true }
-                        )
-                    }
+                when (selectedTab) {
+                    0 -> KeyboardScreen(
+                        isHapticEnabled = isHapticEnabled,
+                        onSendKey = { viewModel.sendKey(it) }
+                    )
+                    1 -> TrackpadScreen(
+                        sensitivity = trackpadSensitivity,
+                        onSensitivityChange = { viewModel.updateTrackpadSensitivity(it) },
+                        naturalScrolling = isNaturalScrolling,
+                        isHapticEnabled = isHapticEnabled,
+                        isConnected = isAnyConnected,
+                        isLeftHeld = isLeftMouseHeld,
+                        onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },
+                        onMouseClick = { viewModel.sendMouseClick(it) },
+                        onMouseScroll = { viewModel.sendMouseScroll(it) },
+                        onLeftMouseHoldChange = { viewModel.setLeftMouseHold(it) },
+                        onSendKey = { viewModel.sendKey(it) }
+                    )
+                    2 -> TextSenderScreen(
+                        isConnected = isAnyConnected,
+                        isHapticEnabled = isHapticEnabled,
+                        inputText = longTextInput,
+                        onInputTextChange = { viewModel.updateLongTextInput(it) },
+                        targetMode = sendTargetMode,
+                        onTargetModeChange = { viewModel.setSendTargetMode(it) },
+                        clearOnSend = clearOnSend,
+                        onClearOnSendChange = { viewModel.setClearOnSend(it) },
+                        enterOnSend = enterOnSend,
+                        onEnterOnSendChange = { viewModel.setEnterOnSend(it) },
+                        snippets = snippets,
+                        showInlineTrackpad = showInlineTrackpadInText,
+                        trackpadSensitivity = trackpadSensitivity,
+                        naturalScrolling = isNaturalScrolling,
+                        onSendText = { viewModel.sendTextPaste(it) },
+                        onSendKey = { viewModel.sendKey(it) },
+                        onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },
+                        onMouseClick = { viewModel.sendMouseClick(it) },
+                        onMouseScroll = { viewModel.sendMouseScroll(it) },
+                        onOpenSettings = {
+                            returnToConfigDialogOnBack = false
+                            showMoreSettingsPage = true
+                        }
+                    )
                 }
             }
         }
@@ -410,6 +412,11 @@ fun MainAppScaffold(
                 viewModel = viewModel,
                 onRequestBtPermission = onRequestBtPermission,
                 onToggleBluetoothSystem = onToggleBluetoothSystem,
+                onOpenMoreSettings = {
+                    showConfigDialog = false
+                    returnToConfigDialogOnBack = true
+                    showMoreSettingsPage = true
+                },
                 onDismiss = { showConfigDialog = false }
             )
         }

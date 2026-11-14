@@ -1,13 +1,9 @@
 package com.silentinput.app.ui
 
 import android.view.HapticFeedbackConstants
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -103,17 +99,11 @@ fun TrackpadScreen(
                     contentColor = dragSelectContent
                 )
             ) {
-                AnimatedContent(
-                    targetState = isLeftHeld,
-                    transitionSpec = { fadeIn(tween(150)) togetherWith fadeOut(tween(110)) },
-                    label = "dragSelectText"
-                ) { held ->
-                    Text(
-                        text = if (held) strings.tpHoldingLeftBtn else strings.tpDragSelectBtn,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
+                Text(
+                    text = if (isLeftHeld) strings.tpHoldingLeftBtn else strings.tpDragSelectBtn,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
 
             val screenshotInteraction = remember { MutableInteractionSource() }
@@ -191,17 +181,11 @@ fun TrackpadScreen(
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = leftBtnContainer)
             ) {
-                AnimatedContent(
-                    targetState = isLeftHeld,
-                    transitionSpec = { fadeIn(tween(150)) togetherWith fadeOut(tween(110)) },
-                    label = "leftBtnText"
-                ) { held ->
-                    Text(
-                        text = if (held) strings.tpReleaseLeftBtn else strings.tpLeftBtn,
-                        fontWeight = FontWeight.Bold,
-                        color = leftBtnContent
-                    )
-                }
+                Text(
+                    text = if (isLeftHeld) strings.tpReleaseLeftBtn else strings.tpLeftBtn,
+                    fontWeight = FontWeight.Bold,
+                    color = leftBtnContent
+                )
             }
 
             val rightBtnInteraction = remember { MutableInteractionSource() }
@@ -361,19 +345,13 @@ fun TrackpadSurface(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
-            AnimatedContent(
-                targetState = resolvedHintText,
-                transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(120)) },
-                label = "trackpadHintText"
-            ) { textToShow ->
-                Text(
-                    text = textToShow,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                    lineHeight = 22.sp
-                )
-            }
+            Text(
+                text = resolvedHintText,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                lineHeight = 22.sp
+            )
         }
     }
 }

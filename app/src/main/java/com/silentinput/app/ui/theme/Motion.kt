@@ -1,6 +1,5 @@
 package com.silentinput.app.ui.theme
 
-import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.CubicBezierEasing
@@ -14,12 +13,8 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.interaction.InteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -33,8 +28,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 object SilentMotion {
     const val DURATION_EXPAND_MS = 240
     const val DURATION_COLLAPSE_MS = 160
-    const val DURATION_TAB_ENTER_MS = 220
-    const val DURATION_TAB_EXIT_MS = 150
     const val DURATION_STATE_MS = 180
 
     val EmphasizedDecelerateEasing = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1.0f)
@@ -56,28 +49,6 @@ object SilentMotion {
         ) + fadeOut(
             animationSpec = tween(110, easing = FastOutLinearInEasing)
         )
-    }
-
-    fun directionalTabTransition(forward: Boolean, slideDivisor: Int = 7): ContentTransform {
-        val enterOffset: (Int) -> Int = { fullWidth ->
-            val offset = (fullWidth / slideDivisor).coerceAtLeast(1)
-            if (forward) offset else -offset
-        }
-        val exitOffset: (Int) -> Int = { fullWidth ->
-            val offset = (fullWidth / slideDivisor).coerceAtLeast(1)
-            if (forward) -offset else offset
-        }
-        return (slideInHorizontally(
-            animationSpec = tween(DURATION_TAB_ENTER_MS, easing = EmphasizedDecelerateEasing),
-            initialOffsetX = enterOffset
-        ) + fadeIn(
-            animationSpec = tween(DURATION_TAB_ENTER_MS, easing = LinearOutSlowInEasing)
-        )) togetherWith (slideOutHorizontally(
-            animationSpec = tween(DURATION_TAB_EXIT_MS, easing = EmphasizedAccelerateEasing),
-            targetOffsetX = exitOffset
-        ) + fadeOut(
-            animationSpec = tween(DURATION_TAB_EXIT_MS, easing = FastOutLinearInEasing)
-        ))
     }
 }
 

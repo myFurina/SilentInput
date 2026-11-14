@@ -3,9 +3,8 @@ package com.silentinput.app.ui
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
-import androidx.compose.animation.AnimatedContent
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -14,12 +13,10 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,8 +27,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -68,6 +66,7 @@ fun UnifiedConnectionDialog(
     viewModel: MainViewModel,
     onRequestBtPermission: () -> Unit,
     onToggleBluetoothSystem: (Boolean) -> Unit,
+    onOpenMoreSettings: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     val currentMode by viewModel.connectionMode.collectAsState()
@@ -101,10 +100,7 @@ fun UnifiedConnectionDialog(
     val isHapticEnabled by viewModel.isHapticEnabled.collectAsState()
     val isDarkMode by viewModel.isDarkMode.collectAsState()
     val appLanguage by viewModel.appLanguage.collectAsState()
-    val showInlineTrackpadInText by viewModel.showInlineTrackpadInText.collectAsState()
-    val isNaturalScrolling by viewModel.isNaturalScrolling.collectAsState()
     val snippets by viewModel.snippets.collectAsState()
-    var moreSettingsExpanded by rememberSaveable { mutableStateOf(false) }
     val strings = LocalAppStrings.current
     val resolvedLanguage = LocalResolvedLanguage.current
 
@@ -120,22 +116,6 @@ fun UnifiedConnectionDialog(
     var ipInput by rememberSaveable { mutableStateOf(savedLanIp) }
     var tokenInput by rememberSaveable { mutableStateOf(savedToken) }
     val dialogScrollState = rememberScrollState()
-    val coroutineScope = rememberCoroutineScope()
-    var prevMoreExpanded by remember { mutableStateOf(moreSettingsExpanded) }
-
-    LaunchedEffect(moreSettingsExpanded) {
-        if (moreSettingsExpanded && !prevMoreExpanded) {
-            delay(100)
-            val targetScroll = (dialogScrollState.value + 300).coerceAtMost(dialogScrollState.maxValue)
-            if (targetScroll > dialogScrollState.value) {
-                dialogScrollState.animateScrollTo(
-                    value = targetScroll,
-                    animationSpec = tween(280, easing = FastOutSlowInEasing)
-                )
-            }
-        }
-        prevMoreExpanded = moreSettingsExpanded
-    }
 
     val isUsbTarget = activeServerIp == "127.0.0.1"
     val isUsbConnected = isNetConnected && isUsbTarget
@@ -180,21 +160,12 @@ fun UnifiedConnectionDialog(
                     )
                 }
 
-                AnimatedContent(
-                    targetState = selectedTab,
-                    transitionSpec = {
-                        SilentMotion.directionalTabTransition(
-                            forward = targetState > initialState,
-                            slideDivisor = 6
-                        ).using(
-                            SizeTransform(clip = false) { _, _ ->
-                                tween(SilentMotion.DURATION_EXPAND_MS, easing = SilentMotion.EmphasizedDecelerateEasing)
-                            }
-                        )
-                    },
-                    label = "settingsTabContent"
-                ) { tab ->
-                    when (tab) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .animateContentSize(animationSpec = tween(SilentMotion.DURATION_STATE_MS, easing = FastOutSlowInEasing))
+                ) {
+                    when (selectedTab) {
                         0 -> UsbConnectionTab(
                             isUsbConnected = isUsbConnected,
                             isUsbAuthenticated = isNetAuthenticated,
@@ -246,19 +217,7 @@ fun UnifiedConnectionDialog(
                             onRefreshBluetoothState = { viewModel.refreshBluetoothState() },
                             onToggleFavoriteDevice = { viewModel.toggleFavoriteBtDevice(it) },
                             onConnectDevice = { viewModel.connectBluetooth(it) },
-                            onDisconnect = { viewModel.disconnectBluetooth() },
-                            onExpandPairedDevices = {
-                                coroutineScope.launch {
-                                    delay(100)
-                                    val target = (dialogScrollState.value + 220).coerceAtMost(dialogScrollState.maxValue)
-                                    if (target > dialogScrollState.value) {
-                                        dialogScrollState.animateScrollTo(
-                                            value = target,
-                                            animationSpec = tween(260, easing = FastOutSlowInEasing)
-                                        )
-                                    }
-                                }
-                            }
+                            onDisconnect = { viewModel.disconnectBluetooth() }
                         )
                     }
                 }
@@ -270,66 +229,11 @@ fun UnifiedConnectionDialog(
                     AppLanguage.ZH -> strings.languageShortZh
                     AppLanguage.EN -> strings.languageShortEn
                 }
-                CollapsibleSection(
+                MoreSettingsEntryRow(
                     title = strings.moreSettingsTitle,
                     summary = strings.moreSettingsSummary(!isHapticEnabled, isDarkMode, langShort, snippets.size),
-                    expanded = moreSettingsExpanded,
-                    onToggle = { moreSettingsExpanded = !moreSettingsExpanded }
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        LanguageSettingRow(
-                            selectedLanguage = appLanguage,
-                            onSelectLanguage = { viewModel.setAppLanguage(it) }
-                        )
-
-                        ToggleSettingRow(
-                            title = strings.silentModeTitle,
-                            subtitle = strings.silentModeSubtitle,
-                            checked = !isHapticEnabled,
-                            onCheckedChange = { viewModel.setHapticEnabled(!it) }
-                        )
-
-                        ToggleSettingRow(
-                            title = strings.darkModeTitle,
-                            subtitle = strings.darkModeSubtitle,
-                            checked = isDarkMode,
-                            onCheckedChange = { viewModel.toggleDarkMode() }
-                        )
-
-                        ToggleSettingRow(
-                            title = strings.inlineTrackpadTitle,
-                            subtitle = strings.inlineTrackpadSubtitle,
-                            checked = showInlineTrackpadInText,
-                            onCheckedChange = { viewModel.setShowInlineTrackpadInText(it) }
-                        )
-
-                        SectionDivider()
-
-                        ToggleSettingRow(
-                            title = strings.naturalScrollingTitle,
-                            subtitle = strings.naturalScrollingSubtitle,
-                            checked = isNaturalScrolling,
-                            onCheckedChange = { viewModel.setNaturalScrolling(it) }
-                        )
-
-                        SectionDivider()
-
-                        CustomSnippetsSection(
-                            snippets = snippets,
-                            onAddSnippet = {
-                                viewModel.addSnippet(it)
-                                coroutineScope.launch {
-                                    delay(80)
-                                    dialogScrollState.animateScrollTo(
-                                        value = dialogScrollState.maxValue,
-                                        animationSpec = tween(240, easing = FastOutSlowInEasing)
-                                    )
-                                }
-                            },
-                            onDeleteSnippet = { viewModel.deleteSnippet(it) }
-                        )
-                    }
-                }
+                    onClick = onOpenMoreSettings
+                )
             }
         },
         confirmButton = {
@@ -338,6 +242,200 @@ fun UnifiedConnectionDialog(
             }
         }
     )
+}
+
+@Composable
+private fun MoreSettingsEntryRow(
+    title: String,
+    summary: String,
+    onClick: () -> Unit
+) {
+    val strings = LocalAppStrings.current
+    val interactionSource = remember { MutableInteractionSource() }
+    val shape = RoundedCornerShape(10.dp)
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .pressScale(interactionSource, pressedScale = 0.98f)
+            .clip(shape)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                onClick = onClick
+            ),
+        shape = shape,
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(
+                modifier = Modifier.weight(1f).padding(end = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = summary,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowRight,
+                contentDescription = strings.expandDesc,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MoreSettingsScreen(
+    viewModel: MainViewModel,
+    onBack: () -> Unit,
+    onDone: () -> Unit
+) {
+    BackHandler(onBack = onBack)
+
+    val isHapticEnabled by viewModel.isHapticEnabled.collectAsState()
+    val isDarkMode by viewModel.isDarkMode.collectAsState()
+    val appLanguage by viewModel.appLanguage.collectAsState()
+    val showInlineTrackpadInText by viewModel.showInlineTrackpadInText.collectAsState()
+    val isNaturalScrolling by viewModel.isNaturalScrolling.collectAsState()
+    val snippets by viewModel.snippets.collectAsState()
+    val strings = LocalAppStrings.current
+    val scrollState = rememberScrollState()
+    val coroutineScope = rememberCoroutineScope()
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        text = strings.moreSettingsTitle,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowBack,
+                            contentDescription = strings.collapseDesc
+                        )
+                    }
+                },
+                actions = {
+                    TextButton(onClick = onDone) {
+                        Text(strings.done, fontWeight = FontWeight.SemiBold)
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .verticalScroll(scrollState)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    LanguageSettingRow(
+                        selectedLanguage = appLanguage,
+                        onSelectLanguage = { viewModel.setAppLanguage(it) }
+                    )
+
+                    SectionDivider()
+
+                    ToggleSettingRow(
+                        title = strings.silentModeTitle,
+                        subtitle = strings.silentModeSubtitle,
+                        checked = !isHapticEnabled,
+                        onCheckedChange = { viewModel.setHapticEnabled(!it) }
+                    )
+
+                    SectionDivider()
+
+                    ToggleSettingRow(
+                        title = strings.darkModeTitle,
+                        subtitle = strings.darkModeSubtitle,
+                        checked = isDarkMode,
+                        onCheckedChange = { viewModel.toggleDarkMode() }
+                    )
+                }
+            }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    ToggleSettingRow(
+                        title = strings.inlineTrackpadTitle,
+                        subtitle = strings.inlineTrackpadSubtitle,
+                        checked = showInlineTrackpadInText,
+                        onCheckedChange = { viewModel.setShowInlineTrackpadInText(it) }
+                    )
+
+                    SectionDivider()
+
+                    ToggleSettingRow(
+                        title = strings.naturalScrollingTitle,
+                        subtitle = strings.naturalScrollingSubtitle,
+                        checked = isNaturalScrolling,
+                        onCheckedChange = { viewModel.setNaturalScrolling(it) }
+                    )
+                }
+            }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+            ) {
+                Box(modifier = Modifier.padding(14.dp)) {
+                    CustomSnippetsSection(
+                        snippets = snippets,
+                        onAddSnippet = {
+                            viewModel.addSnippet(it)
+                            coroutineScope.launch {
+                                delay(80)
+                                scrollState.animateScrollTo(
+                                    value = scrollState.maxValue,
+                                    animationSpec = tween(240, easing = FastOutSlowInEasing)
+                                )
+                            }
+                        },
+                        onDeleteSnippet = { viewModel.deleteSnippet(it) }
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -442,17 +540,11 @@ private fun LanConnectionTab(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(strings.lanTlsTitle, fontSize = 14.sp)
-                AnimatedContent(
-                    targetState = isTlsEnabled,
-                    transitionSpec = { fadeIn(tween(150)) togetherWith fadeOut(tween(110)) },
-                    label = "lanTlsSubtitle"
-                ) { tlsOn ->
-                    Text(
-                        if (tlsOn) strings.lanTlsSubtitleOn else strings.lanTlsSubtitleOff,
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                Text(
+                    if (isTlsEnabled) strings.lanTlsSubtitleOn else strings.lanTlsSubtitleOff,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
             Switch(
                 checked = isTlsEnabled,
@@ -596,11 +688,11 @@ private fun BluetoothConnectionTab(
     onRefreshBluetoothState: () -> Unit,
     onToggleFavoriteDevice: (String) -> Unit,
     onConnectDevice: (BluetoothDevice) -> Unit,
-    onDisconnect: () -> Unit,
-    onExpandPairedDevices: () -> Unit
+    onDisconnect: () -> Unit
 ) {
     val strings = LocalAppStrings.current
-    var pairedExpanded by rememberSaveable { mutableStateOf(false) }
+    val deviceListScrollState = rememberScrollState()
+    val coroutineScope = rememberCoroutineScope()
     var refreshSpinCount by remember { mutableIntStateOf(0) }
     val refreshRotation by animateFloatAsState(
         targetValue = refreshSpinCount * 360f,
@@ -612,12 +704,14 @@ private fun BluetoothConnectionTab(
         onRefreshBluetoothState()
     }
 
-    val favoriteDevices = remember(bondedDevices, favoriteBtAddresses) {
-        bondedDevices.filter { favoriteBtAddresses.contains(it.address) }
+    val sortedDevices = remember(bondedDevices, favoriteBtAddresses, lastBtAddress) {
+        bondedDevices.sortedWith(
+            compareByDescending<BluetoothDevice> { favoriteBtAddresses.contains(it.address) }
+                .thenByDescending { it.address == lastBtAddress }
+        )
     }
 
     Column(
-        modifier = Modifier.animateContentSize(animationSpec = tween(200, easing = FastOutSlowInEasing)),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         // System Bluetooth toggle & refresh inside the Bluetooth tab
@@ -696,11 +790,8 @@ private fun BluetoothConnectionTab(
                 color = MaterialTheme.colorScheme.error
             )
         } else {
-            Column(
-                modifier = Modifier.animateContentSize(animationSpec = tween(200, easing = FastOutSlowInEasing)),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (isBtConnected) {
+            if (isBtConnected) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     val latStr = if (btLatency != null) " (${btLatency}ms)" else ""
                     Text(
                         text = strings.btConnectedToLabel(btConnectedName ?: strings.statusFallbackPcName, latStr),
@@ -715,80 +806,88 @@ private fun BluetoothConnectionTab(
                     ) {
                         Text(strings.btDisconnectBtn)
                     }
-                } else if (isBtConnecting) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                }
+            } else if (isBtConnecting) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                    Text(
+                        text = btStatusMsg ?: strings.btConnectingFallback,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = strings.btPairedDevicesTitle(bondedDevices.size),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f).padding(end = 8.dp)
+                    )
+                    if (bondedDevices.isNotEmpty()) {
                         Text(
-                            text = btStatusMsg ?: strings.btConnectingFallback,
+                            text = strings.btFavoriteTip,
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                ) {
+                    if (bondedDevices.isEmpty()) {
+                        Text(
+                            text = strings.btPairedEmptyBody,
                             fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.primary
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(12.dp)
                         )
-                    }
-                }
-            }
-
-            Column(
-                modifier = Modifier.animateContentSize(animationSpec = tween(200, easing = FastOutSlowInEasing)),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                if (favoriteDevices.isNotEmpty()) {
-                    Text(
-                        text = strings.btFavoriteDevicesTitle,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    favoriteDevices.forEach { dev ->
-                        BluetoothDeviceRow(
-                            device = dev,
-                            isFavorite = true,
-                            isLastUsed = dev.address == lastBtAddress,
-                            isConnecting = isBtConnecting,
-                            onToggleFavorite = { onToggleFavoriteDevice(dev.address) },
-                            onConnect = { onConnectDevice(dev) }
-                        )
-                    }
-                } else if (bondedDevices.isNotEmpty() && !isBtConnected) {
-                    Text(
-                        text = strings.btFavoriteTip,
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            CollapsibleSection(
-                title = strings.btPairedDevicesTitle(bondedDevices.size),
-                summary = if (bondedDevices.isEmpty()) strings.btPairedEmptySummary else strings.btPairedNonEmptySummary,
-                expanded = pairedExpanded,
-                onToggle = {
-                    val willExpand = !pairedExpanded
-                    pairedExpanded = willExpand
-                    if (willExpand) {
-                        onExpandPairedDevices()
-                    }
-                }
-            ) {
-                if (bondedDevices.isEmpty()) {
-                    Text(
-                        text = strings.btPairedEmptyBody,
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        bondedDevices.forEach { dev ->
-                            BluetoothDeviceRow(
-                                device = dev,
-                                isFavorite = favoriteBtAddresses.contains(dev.address),
-                                isLastUsed = dev.address == lastBtAddress,
-                                isConnecting = isBtConnecting,
-                                onToggleFavorite = { onToggleFavoriteDevice(dev.address) },
-                                onConnect = { onConnectDevice(dev) }
-                            )
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 184.dp)
+                                .verticalScroll(deviceListScrollState)
+                                .padding(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            sortedDevices.forEach { dev ->
+                                key(dev.address) {
+                                    val isFavorite = favoriteBtAddresses.contains(dev.address)
+                                    BluetoothDeviceRow(
+                                        device = dev,
+                                        isFavorite = isFavorite,
+                                        isLastUsed = dev.address == lastBtAddress,
+                                        isConnecting = isBtConnecting,
+                                        onToggleFavorite = {
+                                            val willPin = !isFavorite
+                                            onToggleFavoriteDevice(dev.address)
+                                            if (willPin) {
+                                                coroutineScope.launch {
+                                                    deviceListScrollState.animateScrollTo(
+                                                        value = 0,
+                                                        animationSpec = tween(220, easing = FastOutSlowInEasing)
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        onConnect = { onConnectDevice(dev) }
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -883,67 +982,6 @@ private fun BluetoothDeviceRow(
                 .pressScale(connectInteraction, pressedScale = 0.95f, enabled = !isConnecting)
         ) {
             Text(if (isConnecting) strings.btRowConnecting else strings.btRowConnect, fontSize = 12.sp)
-        }
-    }
-}
-
-@Composable
-private fun CollapsibleSection(
-    title: String,
-    summary: String,
-    expanded: Boolean,
-    onToggle: () -> Unit,
-    content: @Composable () -> Unit
-) {
-    val strings = LocalAppStrings.current
-    val arrowRotation by animateFloatAsState(
-        targetValue = if (expanded) 180f else 0f,
-        animationSpec = tween(SilentMotion.DURATION_EXPAND_MS, easing = FastOutSlowInEasing),
-        label = "collapsibleArrowRotation"
-    )
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .clickable(onClick = onToggle)
-                .padding(vertical = 4.dp, horizontal = 2.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                AnimatedVisibility(
-                    visible = !expanded && summary.isNotBlank(),
-                    enter = fadeIn(tween(160)) + expandVertically(
-                        expandFrom = Alignment.Top,
-                        animationSpec = tween(180, easing = SilentMotion.EmphasizedDecelerateEasing)
-                    ),
-                    exit = fadeOut(tween(100)) + shrinkVertically(
-                        shrinkTowards = Alignment.Top,
-                        animationSpec = tween(140, easing = SilentMotion.EmphasizedAccelerateEasing)
-                    )
-                ) {
-                    Text(
-                        text = summary,
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            Icon(
-                imageVector = Icons.Default.KeyboardArrowDown,
-                contentDescription = if (expanded) strings.collapseDesc else strings.expandDesc,
-                modifier = Modifier.graphicsLayer { rotationZ = arrowRotation },
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        AnimatedVisibility(
-            visible = expanded,
-            enter = SilentMotion.expandSectionTransition(),
-            exit = SilentMotion.collapseSectionTransition()
-        ) {
-            content()
         }
     }
 }

@@ -1,10 +1,9 @@
 package com.silentinput.app.ui
 
 import android.view.HapticFeedbackConstants
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -12,7 +11,6 @@ import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
@@ -295,19 +293,11 @@ fun KeyboardScreen(
                 modifier = Modifier.size(16.dp)
             )
             Spacer(modifier = Modifier.width(6.dp))
-            AnimatedContent(
-                targetState = showFullKeyboard,
-                transitionSpec = {
-                    fadeIn(tween(150)) togetherWith fadeOut(tween(110))
-                },
-                label = "miniKbToggleText"
-            ) { expanded ->
-                Text(
-                    text = if (expanded) strings.kbCollapseMiniFull else strings.kbExpandMiniFull,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
+            Text(
+                text = if (showFullKeyboard) strings.kbCollapseMiniFull else strings.kbExpandMiniFull,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium
+            )
             Spacer(modifier = Modifier.weight(1f))
             Icon(
                 imageVector = Icons.Default.KeyboardArrowDown,
@@ -414,42 +404,30 @@ private fun MiniFullKeyboardPanel(
                 )
             }
 
-            AnimatedContent(
-                targetState = selectedTab,
-                transitionSpec = {
-                    SilentMotion.directionalTabTransition(
-                        forward = targetState > initialState,
-                        slideDivisor = 8
-                    ).using(
-                        SizeTransform(clip = false) { _, _ ->
-                            tween(200, easing = FastOutSlowInEasing)
+            Column(
+                modifier = Modifier.animateContentSize(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                verticalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                if (selectedTab == 0) {
+                    MiniKeyRow(MINI_NUMBER_ROW, onKeyPress)
+                    MiniKeyRow(MINI_QWERTY_TOP, onKeyPress)
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        MINI_QWERTY_MID.forEach { key ->
+                            MiniKeyboardKey(
+                                label = key.label,
+                                modifier = Modifier.weight(key.weight),
+                                onClick = { onKeyPress(key.code) }
+                            )
                         }
-                    )
-                },
-                label = "miniKeyboardTabContent"
-            ) { tab ->
-                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    if (tab == 0) {
-                        MiniKeyRow(MINI_NUMBER_ROW, onKeyPress)
-                        MiniKeyRow(MINI_QWERTY_TOP, onKeyPress)
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                            horizontalArrangement = Arrangement.spacedBy(3.dp)
-                        ) {
-                            MINI_QWERTY_MID.forEach { key ->
-                                MiniKeyboardKey(
-                                    label = key.label,
-                                    modifier = Modifier.weight(key.weight),
-                                    onClick = { onKeyPress(key.code) }
-                                )
-                            }
-                        }
-                        MiniKeyRow(MINI_QWERTY_BOT, onKeyPress)
-                    } else {
-                        MiniKeyRow(MINI_F_ROW_1, onKeyPress, spacing = 5.dp, fontSize = 12.sp)
-                        MiniKeyRow(MINI_F_ROW_2, onKeyPress, spacing = 5.dp, fontSize = 12.sp)
-                        MiniKeyRow(MINI_NAV_ROW, onKeyPress, spacing = 5.dp, fontSize = 11.sp)
                     }
+                    MiniKeyRow(MINI_QWERTY_BOT, onKeyPress)
+                } else {
+                    MiniKeyRow(MINI_F_ROW_1, onKeyPress, spacing = 5.dp, fontSize = 12.sp)
+                    MiniKeyRow(MINI_F_ROW_2, onKeyPress, spacing = 5.dp, fontSize = 12.sp)
+                    MiniKeyRow(MINI_NAV_ROW, onKeyPress, spacing = 5.dp, fontSize = 11.sp)
                 }
             }
         }
