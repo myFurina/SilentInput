@@ -837,8 +837,33 @@ class TestDaemonProtocolAsync(unittest.IsolatedAsyncioTestCase):
             emitted.append(list(events))
             return True
 
+        ec = types.SimpleNamespace(
+            EV_KEY=1,
+            KEY_LEFTSHIFT=42,
+            KEY_A=30,
+            KEY_4=5,
+            KEY_E=18,
+            KEY_2=3,
+            KEY_D=32,
+            KEY_H=35,
+            KEY_I=23,
+            KEY_1=2,
+        )
+        fake_evdev = types.SimpleNamespace(ecodes=ec)
+        fake_char_map = {
+            "A": (ec.KEY_A, True),
+            "4": (ec.KEY_4, False),
+            "e": (ec.KEY_E, False),
+            "2": (ec.KEY_2, False),
+            "d": (ec.KEY_D, False),
+            "h": (ec.KEY_H, False),
+            "i": (ec.KEY_I, False),
+            "!": (ec.KEY_1, True),
+        }
         fake_dev = mock.MagicMock()
-        with mock.patch.object(silentinput_daemon, "uinput_device", fake_dev), \
+        with mock.patch.object(silentinput_daemon, "evdev", fake_evdev), \
+             mock.patch.object(silentinput_daemon, "CHAR_MAP", fake_char_map), \
+             mock.patch.object(silentinput_daemon, "uinput_device", fake_dev), \
              mock.patch.object(silentinput_daemon, "ensure_uinput_device", return_value=True), \
              mock.patch.object(silentinput_daemon, "_emit_uinput_events", side_effect=fake_emit_events), \
              mock.patch.object(silentinput_daemon, "emit_key_combination", side_effect=fake_emit_combo):
@@ -847,8 +872,7 @@ class TestDaemonProtocolAsync(unittest.IsolatedAsyncioTestCase):
                 ok = await silentinput_daemon.type_text("A中")
                 self.assertTrue(ok)
             self.assertEqual(combos, ["ctrl+shift+u", "enter"])
-            pressed_codes = [ev[0][1] if ev[0][1] != silentinput_daemon.evdev.ecodes.KEY_LEFTSHIFT else ev[1][1] for ev in emitted[::2]]
-            ec = silentinput_daemon.evdev.ecodes
+            pressed_codes = [ev[0][1] if ev[0][1] != ec.KEY_LEFTSHIFT else ev[1][1] for ev in emitted[::2]]
             self.assertEqual(
                 pressed_codes,
                 [ec.KEY_A, ec.KEY_4, ec.KEY_E, ec.KEY_2, ec.KEY_D],
@@ -895,27 +919,28 @@ class TestDaemonProtocolAsync(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(status_payload["unicode_direct_typing"])
 
     async def test_landscape_punctuation_key_map_and_wtype_fallback(self):
-        ec = silentinput_daemon.evdev.ecodes
-        expected_map = {
-            "[": ec.KEY_LEFTBRACE,
-            "lbracket": ec.KEY_LEFTBRACE,
-            "]": ec.KEY_RIGHTBRACE,
-            "rbracket": ec.KEY_RIGHTBRACE,
-            ";": ec.KEY_SEMICOLON,
-            "semicolon": ec.KEY_SEMICOLON,
-            "'": ec.KEY_APOSTROPHE,
-            "apostrophe": ec.KEY_APOSTROPHE,
-            "`": ec.KEY_GRAVE,
-            "grave": ec.KEY_GRAVE,
-            ",": ec.KEY_COMMA,
-            ".": ec.KEY_DOT,
-            "-": ec.KEY_MINUS,
-            "=": ec.KEY_EQUAL,
-            "/": ec.KEY_SLASH,
-            "\\": ec.KEY_BACKSLASH,
-        }
-        for name, code in expected_map.items():
-            self.assertEqual(silentinput_daemon.KEY_MAP.get(name), code)
+        if silentinput_daemon.HAVE_UINPUT and silentinput_daemon.evdev is not None:
+            ec = silentinput_daemon.evdev.ecodes
+            expected_map = {
+                "[": ec.KEY_LEFTBRACE,
+                "lbracket": ec.KEY_LEFTBRACE,
+                "]": ec.KEY_RIGHTBRACE,
+                "rbracket": ec.KEY_RIGHTBRACE,
+                ";": ec.KEY_SEMICOLON,
+                "semicolon": ec.KEY_SEMICOLON,
+                "'": ec.KEY_APOSTROPHE,
+                "apostrophe": ec.KEY_APOSTROPHE,
+                "`": ec.KEY_GRAVE,
+                "grave": ec.KEY_GRAVE,
+                ",": ec.KEY_COMMA,
+                ".": ec.KEY_DOT,
+                "-": ec.KEY_MINUS,
+                "=": ec.KEY_EQUAL,
+                "/": ec.KEY_SLASH,
+                "\\": ec.KEY_BACKSLASH,
+            }
+            for name, code in expected_map.items():
+                self.assertEqual(silentinput_daemon.KEY_MAP.get(name), code)
 
         calls = []
 
@@ -925,6 +950,7 @@ class TestDaemonProtocolAsync(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(silentinput_daemon, "ensure_uinput_device", return_value=False), \
              mock.patch.object(silentinput_daemon, "HAVE_UINPUT", False), \
+             mock.patch.object(silentinput_daemon, "KEY_MAP", {}), \
              mock.patch.object(silentinput_daemon.asyncio, "create_subprocess_exec", side_effect=fake_exec):
             for key_name in ("[", "]", ";", "'", "`", ",", ".", "ctrl+["):
                 await silentinput_daemon.emit_key_combination(key_name)
