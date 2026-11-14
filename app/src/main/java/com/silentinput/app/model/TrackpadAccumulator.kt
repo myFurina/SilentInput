@@ -26,11 +26,17 @@ class TrackpadAccumulator {
         return intX to intY
     }
 
-    fun addScrollDelta(avgDy: Float, sensitivity: Float, stepDivisor: Float = 28f): Int {
+    fun addScrollDelta(
+        avgDy: Float,
+        sensitivity: Float,
+        stepDivisor: Float = 28f,
+        naturalScrolling: Boolean = true
+    ): Int {
         if (!avgDy.isFinite() || !sensitivity.isFinite() || !stepDivisor.isFinite() || stepDivisor == 0f) {
             return 0
         }
-        accWheel += (-avgDy * sensitivity) / stepDivisor
+        val directionSign = if (naturalScrolling) 1f else -1f
+        accWheel += (directionSign * avgDy * sensitivity) / stepDivisor
         val intWheel = accWheel.toInt()
         if (intWheel != 0) {
             accWheel -= intWheel

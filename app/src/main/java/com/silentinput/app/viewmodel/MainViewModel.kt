@@ -7,6 +7,7 @@ import android.content.SharedPreferences
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.silentinput.app.bluetooth.BluetoothCompanionClient
+import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.ConnectionStatusFormatter
 import com.silentinput.app.network.NetworkClient
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -34,7 +35,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_FAVORITE_BT_ADDRESSES = "favorite_bt_addresses"
         private const val KEY_HAPTIC_ENABLED = "haptic_enabled"
         private const val KEY_DARK_MODE = "dark_mode"
+        private const val KEY_APP_LANGUAGE = "app_language"
         private const val KEY_TEXT_INLINE_TRACKPAD = "text_inline_trackpad"
+        private const val KEY_NATURAL_SCROLLING = "natural_scrolling"
         private const val KEY_TRACKPAD_SENSITIVITY = "trackpad_sensitivity"
         private const val KEY_SEND_TARGET_MODE = "send_target_mode"
         private const val KEY_CLEAR_ON_SEND = "clear_on_send"
@@ -47,8 +50,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs: SharedPreferences =
         application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    private val networkClient = NetworkClient(application)
-    private val btClient = BluetoothCompanionClient(application)
+    private val _appLanguage = MutableStateFlow(
+        AppLanguage.fromPref(prefs.getString(KEY_APP_LANGUAGE, AppLanguage.SYSTEM.prefValue))
+    )
+    val appLanguage: StateFlow<AppLanguage> = _appLanguage.asStateFlow()
+
+    private val networkClient = NetworkClient(application, initialLanguage = _appLanguage.value)
+    private val btClient = BluetoothCompanionClient(application, initialLanguage = _appLanguage.value)
 
     private val _connectionMode = MutableStateFlow(prefs.getString(KEY_CONNECTION_MODE, "usb") ?: "usb")
     val connectionMode: StateFlow<String> = _connectionMode.asStateFlow()
@@ -96,6 +104,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _showInlineTrackpadInText = MutableStateFlow(prefs.getBoolean(KEY_TEXT_INLINE_TRACKPAD, true))
     val showInlineTrackpadInText: StateFlow<Boolean> = _showInlineTrackpadInText.asStateFlow()
+
+    private val _isNaturalScrolling = MutableStateFlow(prefs.getBoolean(KEY_NATURAL_SCROLLING, true))
+    val isNaturalScrolling: StateFlow<Boolean> = _isNaturalScrolling.asStateFlow()
 
     private val _trackpadSensitivity = MutableStateFlow(
         prefs.getFloat(KEY_TRACKPAD_SENSITIVITY, 0.6f).coerceIn(0.1f, 2.0f)
@@ -216,6 +227,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun isBluetoothEnabled(): Boolean = btClient.refreshBluetoothEnabled()
 
     fun onResume(btPermissionGranted: Boolean) {
+        networkClient.refreshLanguageIfSystem()
+        btClient.refreshLanguageIfSystem()
         refreshBluetoothState(btPermissionGranted)
         if (_connectionMode.value == "bluetooth") {
             val lastAddress = _lastBtDeviceAddress.value
@@ -418,6 +431,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setShowInlineTrackpadInText(enabled: Boolean) {
         _showInlineTrackpadInText.value = enabled
         prefs.edit().putBoolean(KEY_TEXT_INLINE_TRACKPAD, enabled).apply()
+    }
+
+    fun setNaturalScrolling(enabled: Boolean) {
+        _isNaturalScrolling.value = enabled
+        prefs.edit().putBoolean(KEY_NATURAL_SCROLLING, enabled).apply()
+    }
+
+    fun setAppLanguage(language: AppLanguage) {
+        if (_appLanguage.value == language) return
+        _appLanguage.value = language
+        prefs.edit().putString(KEY_APP_LANGUAGE, language.prefValue).apply()
+        networkClient.updateLanguage(language)
+        btClient.updateLanguage(language)
     }
 
     fun addSnippet(rawSnippet: String) {

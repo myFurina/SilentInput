@@ -19,6 +19,25 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Gdk
 
+
+def _is_zh_locale() -> bool:
+    for key in ("LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"):
+        val = os.environ.get(key, "").strip()
+        if val:
+            lowered = val.lower()
+            if lowered.startswith("zh"):
+                return True
+            if lowered not in ("c", "c.utf-8", "c.utf8", "posix"):
+                return False
+    return True
+
+
+_IS_ZH = _is_zh_locale()
+
+
+def _t(zh: str, en: str) -> str:
+    return zh if _IS_ZH else en
+
 class SilentInputApp(Adw.Application):
     def __init__(self):
         super().__init__(application_id="com.silentinput.controlcenter")
@@ -31,7 +50,7 @@ class SilentInputApp(Adw.Application):
 
 class MainWindow(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="SilentInput 控制中心")
+        super().__init__(application=app, title=_t("SilentInput 控制中心", "SilentInput Control Center"))
         self.set_default_size(540, 720)
 
         self.config = silentinput_config.load_config()
@@ -40,6 +59,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._autostart_action_count = 0
         self._config_generation = 0
         self._acl_save_timer_id = None
+        self._status_timer_id = None
+        self.connect("close-request", self.on_close_request)
 
         # Build UI layout
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -62,42 +83,47 @@ class MainWindow(Adw.ApplicationWindow):
         scrolled.set_child(page)
 
         # --- Group 1: 运行状态 ---
-        status_group = Adw.PreferencesGroup(title="服务运行状态")
+        status_group = Adw.PreferencesGroup(title=_t("服务运行状态", "Service Status"))
         page.add(status_group)
 
-        self.service_row = Adw.SwitchRow(title="后台服务")
+        self.service_row = Adw.SwitchRow(title=_t("后台服务", "Background Service"))
         self.service_row.connect("notify::active", self.on_service_switch_toggled)
         status_group.add(self.service_row)
 
-        self.autostart_row = Adw.SwitchRow(title="开机自动启动")
-        self.autostart_row.set_subtitle("登录桌面时自动启动后台输入服务")
+        self.autostart_row = Adw.SwitchRow(title=_t("开机自动启动", "Start at Login"))
+        self.autostart_row.set_subtitle(_t("登录桌面时自动启动后台输入服务", "Launch background input daemon on desktop login"))
         self.autostart_row.connect("notify::active", self.on_autostart_toggled)
         status_group.add(self.autostart_row)
 
         # --- Group 2: 配对密钥 (无线连接必须验证) ---
-        sec_group = Adw.PreferencesGroup(title="安全与配对")
+        sec_group = Adw.PreferencesGroup(title=_t("安全与配对", "Security & Pairing"))
         page.add(sec_group)
 
-        self.token_row = Adw.ActionRow(title="配对密钥")
+        self.token_row = Adw.ActionRow(title=_t("配对密钥", "Pairing Key"))
         token_val = self.config.get("auth_token", "")
         exp_txt = silentinput_config.get_token_status_text(self.config)
         self.token_row.set_subtitle(f"{token_val}  ({exp_txt})")
 
         btn_copy_token = Gtk.Button.new_from_icon_name("edit-copy-symbolic")
-        btn_copy_token.set_tooltip_text("复制密钥")
+        btn_copy_token.set_tooltip_text(_t("复制密钥", "Copy Pairing Key"))
         btn_copy_token.set_valign(Gtk.Align.CENTER)
         btn_copy_token.connect("clicked", self.on_copy_token)
         self.token_row.add_suffix(btn_copy_token)
 
         btn_regen_token = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
-        btn_regen_token.set_tooltip_text("重新生成随机密钥")
+        btn_regen_token.set_tooltip_text(_t("重新生成随机密钥", "Regenerate Random Key"))
         btn_regen_token.set_valign(Gtk.Align.CENTER)
         btn_regen_token.connect("clicked", self.on_regenerate_token)
         self.token_row.add_suffix(btn_regen_token)
         sec_group.add(self.token_row)
 
-        self.expire_row = Adw.ComboRow(title="密钥有效期")
-        self.expire_modes = ["永不过期", "24 小时自动轮换", "7 天自动轮换", "1 小时临时"]
+        self.expire_row = Adw.ComboRow(title=_t("密钥有效期", "Key Expiration"))
+        self.expire_modes = [
+            _t("永不过期", "Never expires"),
+            _t("24 小时自动轮换", "Rotate every 24h"),
+            _t("7 天自动轮换", "Rotate every 7d"),
+            _t("1 小时临时", "1h temporary"),
+        ]
         self.expire_keys = ["never", "24h", "7d", "1h"]
         expire_model = Gtk.StringList.new(self.expire_modes)
         self.expire_row.set_model(expire_model)
@@ -107,31 +133,36 @@ class MainWindow(Adw.ApplicationWindow):
         self.expire_row.connect("notify::selected", self.on_expire_mode_changed)
         sec_group.add(self.expire_row)
 
-        self.switch_usb_no_auth = Adw.SwitchRow(title="USB 有线免密直连")
-        self.switch_usb_no_auth.set_subtitle("通过 USB 数据线连接自动信任")
+        self.switch_usb_no_auth = Adw.SwitchRow(title=_t("USB 有线免密直连", "USB Trusted Direct Connect"))
+        self.switch_usb_no_auth.set_subtitle(_t("通过 USB 数据线连接自动信任", "Auto-trust local USB adb reverse connections"))
         self.switch_usb_no_auth.set_active(self.config.get("allow_usb_unauthenticated", True))
         self.switch_usb_no_auth.connect("notify::active", self.on_usb_auth_changed)
         sec_group.add(self.switch_usb_no_auth)
 
-        self.switch_tls = Adw.SwitchRow(title="TLS 传输加密 (WSS)")
-        self.switch_tls.set_subtitle("强制端到端加密（手机端需同步开启；若关闭两端均需关闭）")
+        self.switch_tls = Adw.SwitchRow(title=_t("TLS 传输加密 (WSS)", "TLS Encryption (WSS)"))
+        self.switch_tls.set_subtitle(_t("强制端到端加密（手机端需同步开启；若关闭两端均需关闭）", "Require E2E TLS encryption (must match mobile app setting)"))
         self.switch_tls.set_active(self.config.get("enable_tls", True))
         self.switch_tls.connect("notify::active", self.on_tls_changed)
         sec_group.add(self.switch_tls)
 
         # --- Group 3: 电脑 IP 地址列表 (支持单独复制每一个 IP) ---
-        self.ip_group = Adw.PreferencesGroup(title="电脑 IP (局域网，点击右侧按钮复制)")
+        self.ip_group = Adw.PreferencesGroup(title=_t("电脑 IP (局域网，点击右侧按钮复制)", "PC IP Addresses (LAN, click button to copy)"))
         page.add(self.ip_group)
         self.ip_rows = []
-        self.usb_row = Adw.ActionRow(title="USB 有线状态")
+        self.usb_row = Adw.ActionRow(title=_t("USB 有线状态", "USB Status"))
         self.ip_group.add(self.usb_row)
 
         # --- Group 4: 访问控制 (白名单 / 黑名单 互斥) ---
-        acl_group = Adw.PreferencesGroup(title="访问控制 (白黑名单互斥)")
+        acl_group = Adw.PreferencesGroup(title=_t("访问控制 (白黑名单互斥)", "Access Control"))
         page.add(acl_group)
 
-        self.bind_mode_row = Adw.ComboRow(title="控制模式")
-        self.bind_modes = ["白名单模式 (仅允许白名单 IP)", "黑名单模式 (仅拒绝黑名单 IP)", "允许所有网络 (0.0.0.0)", "仅本机 USB (127.0.0.1)"]
+        self.bind_mode_row = Adw.ComboRow(title=_t("控制模式", "Access Mode"))
+        self.bind_modes = [
+            _t("白名单模式 (仅允许白名单 IP)", "Whitelist (allow listed IPs only)"),
+            _t("黑名单模式 (仅拒绝黑名单 IP)", "Blacklist (block listed IPs only)"),
+            _t("允许所有网络 (0.0.0.0)", "Allow all networks (0.0.0.0)"),
+            _t("仅本机 USB (127.0.0.1)", "Localhost USB only (127.0.0.1)"),
+        ]
         self.mode_keys = ["whitelist", "blacklist", "all", "localhost_only"]
         model = Gtk.StringList.new(self.bind_modes)
         self.bind_mode_row.set_model(model)
@@ -141,12 +172,12 @@ class MainWindow(Adw.ApplicationWindow):
         self.bind_mode_row.connect("notify::selected", self.on_bind_mode_changed)
         acl_group.add(self.bind_mode_row)
 
-        self.whitelist_row = Adw.EntryRow(title="IP 白名单 (逗号分隔，支持 * 通配符)")
+        self.whitelist_row = Adw.EntryRow(title=_t("IP 白名单 (逗号分隔，支持 * 通配符)", "IP Whitelist (comma-separated, * wildcard supported)"))
         self.whitelist_row.set_text(", ".join(self.config.get("whitelist", [])))
         self.whitelist_row.connect("changed", self.on_whitelist_changed)
         acl_group.add(self.whitelist_row)
 
-        self.blacklist_row = Adw.EntryRow(title="IP 黑名单 (逗号分隔)")
+        self.blacklist_row = Adw.EntryRow(title=_t("IP 黑名单 (逗号分隔)", "IP Blacklist (comma-separated)"))
         self.blacklist_row.set_text(", ".join(self.config.get("blacklist", [])))
         self.blacklist_row.connect("changed", self.on_blacklist_changed)
         acl_group.add(self.blacklist_row)
@@ -154,26 +185,26 @@ class MainWindow(Adw.ApplicationWindow):
         self.update_acl_fields_visibility(current_mode)
 
         # --- Group 5: 快捷操作与维护 ---
-        actions_group = Adw.PreferencesGroup(title="操作与维护")
+        actions_group = Adw.PreferencesGroup(title=_t("操作与维护", "Actions & Maintenance"))
         page.add(actions_group)
 
-        restart_row = Adw.ActionRow(title="重启服务")
-        btn_restart = Gtk.Button(label="重启")
+        restart_row = Adw.ActionRow(title=_t("重启服务", "Restart Service"))
+        btn_restart = Gtk.Button(label=_t("重启", "Restart"))
         btn_restart.set_valign(Gtk.Align.CENTER)
         btn_restart.connect("clicked", self.on_restart_service)
         restart_row.add_suffix(btn_restart)
         actions_group.add(restart_row)
 
-        logs_row = Adw.ActionRow(title="运行日志")
-        btn_logs = Gtk.Button(label="查看日志")
+        logs_row = Adw.ActionRow(title=_t("运行日志", "Service Logs"))
+        btn_logs = Gtk.Button(label=_t("查看日志", "View Logs"))
         btn_logs.set_valign(Gtk.Align.CENTER)
         btn_logs.connect("clicked", self.on_show_logs)
         logs_row.add_suffix(btn_logs)
         actions_group.add(logs_row)
 
-        uninstall_row = Adw.ActionRow(title="卸载 SilentInput")
-        uninstall_row.set_subtitle("停止服务并从系统中移除快捷方式")
-        btn_uninstall = Gtk.Button(label="卸载")
+        uninstall_row = Adw.ActionRow(title=_t("卸载 SilentInput", "Uninstall SilentInput"))
+        uninstall_row.set_subtitle(_t("停止服务并从系统中移除快捷方式", "Stop daemon and remove desktop integration"))
+        btn_uninstall = Gtk.Button(label=_t("卸载", "Uninstall"))
         btn_uninstall.add_css_class("destructive-action")
         btn_uninstall.set_valign(Gtk.Align.CENTER)
         btn_uninstall.connect("clicked", self.on_uninstall_clicked)
@@ -182,7 +213,17 @@ class MainWindow(Adw.ApplicationWindow):
 
         # Initial refresh and periodic status update timer
         self.update_status()
-        GLib.timeout_add_seconds(3, self.update_status)
+        self._status_timer_id = GLib.timeout_add_seconds(3, self.update_status)
+
+    def on_close_request(self, _win):
+        if self._status_timer_id is not None:
+            GLib.source_remove(self._status_timer_id)
+            self._status_timer_id = None
+        if self._acl_save_timer_id is not None:
+            GLib.source_remove(self._acl_save_timer_id)
+            self._acl_save_timer_id = None
+            silentinput_config.save_config(self.config)
+        return False
 
     def update_acl_fields_visibility(self, mode: str):
         self.whitelist_row.set_visible(mode == "whitelist")
@@ -260,26 +301,27 @@ class MainWindow(Adw.ApplicationWindow):
 
             if running:
                 pid_info = f" (PID: {pid})" if pid > 0 else ""
-                self.service_row.set_subtitle(f"正在运行{pid_info}")
+                self.service_row.set_subtitle(_t(f"正在运行{pid_info}", f"Running{pid_info}"))
             else:
-                self.service_row.set_subtitle("已停止")
+                self.service_row.set_subtitle(_t("已停止", "Stopped"))
 
         if self._autostart_action_count == 0:
             self.autostart_row.handler_block_by_func(self.on_autostart_toggled)
             self.autostart_row.set_active(autostart)
             self.autostart_row.handler_unblock_by_func(self.on_autostart_toggled)
             self.autostart_row.set_subtitle(
-                "已启用 · 登录桌面时自动启动后台输入服务" if autostart
-                else "已关闭 · 仅手动打开服务时运行"
+                _t("已启用 · 登录桌面时自动启动后台输入服务", "Enabled · Starts daemon on desktop login")
+                if autostart
+                else _t("已关闭 · 仅手动打开服务时运行", "Disabled · Manual start only")
             )
 
         self.update_token_display()
 
         # Update USB device info
         if usb_devices:
-            self.usb_row.set_subtitle(f"已连接: {', '.join(usb_devices)}")
+            self.usb_row.set_subtitle(_t(f"已连接: {', '.join(usb_devices)}", f"Connected: {', '.join(usb_devices)}"))
         else:
-            self.usb_row.set_subtitle("未连接")
+            self.usb_row.set_subtitle(_t("未连接", "Disconnected"))
 
         # Update Host IPs: create separate row with copy button for each IP
         current_ip_set = set(ips)
@@ -292,14 +334,14 @@ class MainWindow(Adw.ApplicationWindow):
             self.ip_rows.clear()
 
             if not ips:
-                no_ip_row = Adw.ActionRow(title="未检测到有效局域网 IP")
+                no_ip_row = Adw.ActionRow(title=_t("未检测到有效局域网 IP", "No LAN IP detected"))
                 self.ip_group.add(no_ip_row)
                 self.ip_rows.append(no_ip_row)
             else:
                 for single_ip in ips:
                     row = Adw.ActionRow(title=single_ip)
                     btn_copy = Gtk.Button.new_from_icon_name("edit-copy-symbolic")
-                    btn_copy.set_tooltip_text(f"复制 {single_ip}")
+                    btn_copy.set_tooltip_text(_t(f"复制 {single_ip}", f"Copy {single_ip}"))
                     btn_copy.set_valign(Gtk.Align.CENTER)
                     btn_copy.connect("clicked", self.make_copy_ip_handler(single_ip))
                     row.add_suffix(btn_copy)
@@ -313,13 +355,13 @@ class MainWindow(Adw.ApplicationWindow):
         def _handler(button):
             clipboard = Gdk.Display.get_default().get_clipboard()
             clipboard.set(ip_str)
-            self.show_toast(f"已复制 IP: {ip_str}")
+            self.show_toast(_t(f"已复制 IP: {ip_str}", f"Copied IP: {ip_str}"))
         return _handler
 
     def on_service_switch_toggled(self, switch_row, param):
         active = switch_row.get_active()
         self._service_action_count += 1
-        self.service_row.set_subtitle("正在启动..." if active else "正在停止...")
+        self.service_row.set_subtitle(_t("正在启动...", "Starting...") if active else _t("正在停止...", "Stopping..."))
 
         def _worker():
             try:
@@ -339,7 +381,9 @@ class MainWindow(Adw.ApplicationWindow):
     def on_autostart_toggled(self, switch_row, param):
         active = switch_row.get_active()
         self._autostart_action_count += 1
-        self.autostart_row.set_subtitle("正在开启开机启动..." if active else "正在关闭开机启动...")
+        self.autostart_row.set_subtitle(
+            _t("正在开启开机启动...", "Enabling autostart...") if active else _t("正在关闭开机启动...", "Disabling autostart...")
+        )
 
         def _worker():
             ok, msg = False, ""
@@ -354,8 +398,9 @@ class MainWindow(Adw.ApplicationWindow):
                         self.update_status()
                     else:
                         self.autostart_row.set_subtitle(
-                            "已启用 · 登录桌面时自动启动后台输入服务" if active
-                            else "已关闭 · 仅手动打开服务时运行"
+                            _t("已启用 · 登录桌面时自动启动后台输入服务", "Enabled · Starts daemon on desktop login")
+                            if active
+                            else _t("已关闭 · 仅手动打开服务时运行", "Disabled · Manual start only")
                         )
                     return False
                 GLib.idle_add(_done)
@@ -367,14 +412,14 @@ class MainWindow(Adw.ApplicationWindow):
         if token:
             clipboard = Gdk.Display.get_default().get_clipboard()
             clipboard.set(token)
-            self.show_toast("配对密钥已复制")
+            self.show_toast(_t("配对密钥已复制", "Pairing key copied"))
 
     def on_regenerate_token(self, button):
         self._config_generation += 1
         new_token = silentinput_config.regenerate_token()
         self.config = silentinput_config.load_config()
         self.update_token_display()
-        self.show_toast(f"已生成新密钥: {new_token}")
+        self.show_toast(_t(f"已生成新密钥: {new_token}", f"Generated new key: {new_token}"))
 
     def on_expire_mode_changed(self, combo_row, param):
         idx = combo_row.get_selected()
@@ -385,7 +430,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.config["token_created_at"] = time.time()
             silentinput_config.save_config(self.config)
             self.update_token_display()
-            self.show_toast(f"有效期已设为: {self.expire_modes[idx]}")
+            self.show_toast(_t(f"有效期已设为: {self.expire_modes[idx]}", f"Expiration set to: {self.expire_modes[idx]}"))
 
     def update_token_display(self):
         token = self.config.get("auth_token", "")
@@ -402,7 +447,7 @@ class MainWindow(Adw.ApplicationWindow):
         enabled = switch_row.get_active()
         self.config["enable_tls"] = enabled
         silentinput_config.save_config(self.config)
-        self.show_toast("已更新加密设置，正在重启服务...")
+        self.show_toast(_t("已更新加密设置，正在重启服务...", "TLS setting updated, restarting service..."))
         self.on_restart_service(None)
 
     def on_bind_mode_changed(self, combo_row, param):
@@ -413,7 +458,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.config["access_control_mode"] = mode
             silentinput_config.save_config(self.config)
             self.update_acl_fields_visibility(mode)
-            self.show_toast("控制模式已更新")
+            self.show_toast(_t("控制模式已更新", "Access control mode updated"))
 
     def _schedule_acl_save(self):
         self._config_generation += 1
@@ -439,7 +484,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def on_restart_service(self, button):
         self._service_action_count += 1
-        self.show_toast("服务正在重启...")
+        self.show_toast(_t("服务正在重启...", "Restarting service..."))
         def _worker():
             try:
                 silentinput_config.service_restart()
@@ -447,7 +492,7 @@ class MainWindow(Adw.ApplicationWindow):
                 def _done():
                     self._service_action_count = max(0, self._service_action_count - 1)
                     self.update_status()
-                    self.show_toast("服务已重启")
+                    self.show_toast(_t("服务已重启", "Service restarted"))
                     return False
                 GLib.idle_add(_done)
         threading.Thread(target=_worker, daemon=True).start()
@@ -457,7 +502,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         def read_log_tail():
             if not log_file.exists():
-                return "暂无日志"
+                return _t("暂无日志", "No logs yet")
             try:
                 size = log_file.stat().st_size
                 with open(log_file, "rb") as f:
@@ -465,14 +510,14 @@ class MainWindow(Adw.ApplicationWindow):
                         f.seek(size - 32768)
                     raw = f.read()
                 lines = raw.decode("utf-8", errors="replace").splitlines()
-                return "\n".join(lines[-80:]) if lines else "日志为空"
+                return "\n".join(lines[-80:]) if lines else _t("日志为空", "Log is empty")
             except Exception as e:
-                return f"读取日志失败: {e}"
+                return _t(f"读取日志失败: {e}", f"Failed to read logs: {e}")
 
         log_win = Adw.Window(
             transient_for=self,
             modal=True,
-            title="运行日志 (最近 80 行)"
+            title=_t("运行日志 (最近 80 行)", "Service Logs (Last 80 lines)")
         )
         log_win.set_default_size(640, 480)
 
@@ -481,7 +526,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         header = Adw.HeaderBar()
         btn_refresh = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
-        btn_refresh.set_tooltip_text("刷新日志")
+        btn_refresh.set_tooltip_text(_t("刷新日志", "Refresh Logs"))
         header.pack_start(btn_refresh)
         box.append(header)
 
@@ -507,7 +552,11 @@ class MainWindow(Adw.ApplicationWindow):
             buf = text_view.get_buffer()
             buf.set_text(read_log_tail())
             end_iter = buf.get_end_iter()
-            mark = buf.create_mark("end", end_iter, False)
+            mark = buf.get_mark("end")
+            if mark is None:
+                mark = buf.create_mark("end", end_iter, False)
+            else:
+                buf.move_mark(mark, end_iter)
             text_view.scroll_mark_onscreen(mark)
 
         load_and_scroll()
@@ -521,7 +570,7 @@ class MainWindow(Adw.ApplicationWindow):
         bottom_bar.set_margin_start(12)
         bottom_bar.set_margin_end(12)
         bottom_bar.set_margin_bottom(12)
-        btn_close = Gtk.Button(label="关闭")
+        btn_close = Gtk.Button(label=_t("关闭", "Close"))
         btn_close.add_css_class("suggested-action")
         btn_close.connect("clicked", lambda _btn: log_win.close())
         bottom_bar.append(btn_close)
@@ -536,33 +585,41 @@ class MainWindow(Adw.ApplicationWindow):
             cmd_hint = pkg_cmd or "sudo apt remove silentinput"
             dialog = Adw.MessageDialog(
                 transient_for=self,
-                heading="通过包管理器卸载",
-                body=f"SilentInput 当前由系统包管理器安装。\n可在终端运行以下命令完整卸载：\n\n{cmd_hint}"
-            )
-            dialog.add_response("cancel", "关闭")
-            dialog.add_response("stop", "仅停止服务并退出")
-            dialog.connect(
-                "response",
-                lambda _d, resp: (
-                    silentinput_config.service_stop() if resp == "stop" else None,
-                    self.close() if resp == "stop" else None,
+                heading=_t("通过包管理器卸载", "Uninstall via Package Manager"),
+                body=_t(
+                    f"SilentInput 当前由系统包管理器安装。\n可在终端运行以下命令完整卸载：\n\n{cmd_hint}",
+                    f"SilentInput was installed via your system package manager.\nRun the command below in a terminal to uninstall:\n\n{cmd_hint}",
                 ),
             )
+            dialog.add_response("cancel", _t("关闭", "Close"))
+            dialog.add_response("stop", _t("仅停止服务并退出", "Stop Service & Quit"))
+
+            def on_pkg_response(_d, resp):
+                if resp == "stop":
+                    self.show_toast(_t("正在停止服务...", "Stopping service..."))
+                    def _worker():
+                        try:
+                            silentinput_config.service_stop()
+                        finally:
+                            GLib.idle_add(lambda: (self.close(), False)[1])
+                    threading.Thread(target=_worker, daemon=True).start()
+
+            dialog.connect("response", on_pkg_response)
             dialog.present()
             return
 
         dialog = Adw.MessageDialog(
             transient_for=self,
-            heading="确认卸载 SilentInput？",
-            body="这将停止正在运行的服务，并移除启动脚本与桌面图标。"
+            heading=_t("确认卸载 SilentInput？", "Uninstall SilentInput?"),
+            body=_t("这将停止正在运行的服务，并移除启动脚本与桌面图标。", "This will stop the running daemon and remove startup scripts and desktop shortcuts."),
         )
-        dialog.add_response("cancel", "取消")
-        dialog.add_response("uninstall", "确认卸载")
+        dialog.add_response("cancel", _t("取消", "Cancel"))
+        dialog.add_response("uninstall", _t("确认卸载", "Uninstall"))
         dialog.set_response_appearance("uninstall", Adw.ResponseAppearance.DESTRUCTIVE)
 
         def on_response(dlg, response):
             if response == "uninstall":
-                self.show_toast("正在卸载...")
+                self.show_toast(_t("正在卸载...", "Uninstalling..."))
                 def _worker():
                     try:
                         uninstall_script = silentinput_config.SCRIPT_DIR / "uninstall.sh"

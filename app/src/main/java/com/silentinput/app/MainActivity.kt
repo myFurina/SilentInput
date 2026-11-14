@@ -22,20 +22,26 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
+import com.silentinput.app.model.AppLocaleResolver
+import com.silentinput.app.model.AppStrings
 import com.silentinput.app.model.ConnectionStatusFormatter
 import com.silentinput.app.model.StatusTone
 import com.silentinput.app.ui.KeyboardScreen
+import com.silentinput.app.ui.LocalAppStrings
+import com.silentinput.app.ui.LocalResolvedLanguage
 import com.silentinput.app.ui.TextSenderScreen
 import com.silentinput.app.ui.TrackpadScreen
 import com.silentinput.app.ui.UnifiedConnectionDialog
 import com.silentinput.app.ui.theme.SilentInputTheme
 import com.silentinput.app.viewmodel.MainViewModel
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
@@ -76,13 +82,27 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val isDarkMode by viewModel.isDarkMode.collectAsState()
+            val appLanguage by viewModel.appLanguage.collectAsState()
+            val configuration = LocalConfiguration.current
+            val systemLocale = if (!configuration.locales.isEmpty) {
+                configuration.locales[0]
+            } else {
+                Locale.getDefault()
+            }
+            val resolvedLanguage = AppLocaleResolver.resolve(appLanguage, systemLocale)
+            val strings = remember(resolvedLanguage) { AppStrings.forResolved(resolvedLanguage) }
 
-            SilentInputTheme(darkTheme = isDarkMode) {
-                MainAppScaffold(
-                    viewModel = viewModel,
-                    onRequestBtPermission = { requestBluetoothPermission() },
-                    onToggleBluetoothSystem = { enable -> toggleBluetoothSystem(enable) }
-                )
+            CompositionLocalProvider(
+                LocalResolvedLanguage provides resolvedLanguage,
+                LocalAppStrings provides strings
+            ) {
+                SilentInputTheme(darkTheme = isDarkMode) {
+                    MainAppScaffold(
+                        viewModel = viewModel,
+                        onRequestBtPermission = { requestBluetoothPermission() },
+                        onToggleBluetoothSystem = { enable -> toggleBluetoothSystem(enable) }
+                    )
+                }
             }
         }
     }
@@ -137,6 +157,8 @@ fun MainAppScaffold(
     onToggleBluetoothSystem: (Boolean) -> Unit
 ) {
     val view = LocalView.current
+    val strings = LocalAppStrings.current
+    val resolvedLanguage = LocalResolvedLanguage.current
     DisposableEffect(view) {
         view.isSoundEffectsEnabled = false
         onDispose {}
@@ -162,6 +184,7 @@ fun MainAppScaffold(
 
     val isHapticEnabled by viewModel.isHapticEnabled.collectAsState()
     val trackpadSensitivity by viewModel.trackpadSensitivity.collectAsState()
+    val isNaturalScrolling by viewModel.isNaturalScrolling.collectAsState()
     val isLeftMouseHeld by viewModel.isLeftMouseHeld.collectAsState()
     val showInlineTrackpadInText by viewModel.showInlineTrackpadInText.collectAsState()
     val snippets by viewModel.snippets.collectAsState()
@@ -186,7 +209,8 @@ fun MainAppScaffold(
         isNetEncrypted = isNetEncrypted,
         netConnectionError = connectionError,
         netLatencyMs = latencyMs,
-        activeServerIp = activeServerIp
+        activeServerIp = activeServerIp,
+        language = resolvedLanguage
     )
 
     Scaffold(
@@ -209,7 +233,7 @@ fun MainAppScaffold(
                 },
                 actions = {
                     IconButton(onClick = { showConfigDialog = true }) {
-                        Icon(Icons.Default.Settings, contentDescription = "设置")
+                        Icon(Icons.Default.Settings, contentDescription = strings.settings)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -222,20 +246,20 @@ fun MainAppScaffold(
                 NavigationBarItem(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    icon = { Icon(Icons.Default.Keyboard, contentDescription = "键盘") },
-                    label = { Text("键盘") }
+                    icon = { Icon(Icons.Default.Keyboard, contentDescription = strings.tabKeyboard) },
+                    label = { Text(strings.tabKeyboard) }
                 )
                 NavigationBarItem(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
-                    icon = { Icon(Icons.Default.Mouse, contentDescription = "触控板") },
-                    label = { Text("触控板") }
+                    icon = { Icon(Icons.Default.Mouse, contentDescription = strings.tabTrackpad) },
+                    label = { Text(strings.tabTrackpad) }
                 )
                 NavigationBarItem(
                     selected = selectedTab == 2,
                     onClick = { selectedTab = 2 },
-                    icon = { Icon(Icons.Default.Edit, contentDescription = "文本") },
-                    label = { Text("文本") }
+                    icon = { Icon(Icons.Default.Edit, contentDescription = strings.tabText) },
+                    label = { Text(strings.tabText) }
                 )
             }
         }
@@ -255,15 +279,15 @@ fun MainAppScaffold(
                     ) {
                         Text(
                             text = when (currentMode) {
-                                "bluetooth" -> "蓝牙未连接，点击进入设置连接"
-                                "lan" -> "局域网未连接，点击进入设置连接"
-                                else -> "USB未连接，点击进入设置连接"
+                                "bluetooth" -> strings.bannerBtDisconnected
+                                "lan" -> strings.bannerLanDisconnected
+                                else -> strings.bannerUsbDisconnected
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onPrimaryContainer
                         )
                         Text(
-                            text = "设置 >",
+                            text = strings.bannerSettingsAction,
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onPrimaryContainer
@@ -281,6 +305,7 @@ fun MainAppScaffold(
                     1 -> TrackpadScreen(
                         sensitivity = trackpadSensitivity,
                         onSensitivityChange = { viewModel.updateTrackpadSensitivity(it) },
+                        naturalScrolling = isNaturalScrolling,
                         isHapticEnabled = isHapticEnabled,
                         isConnected = isAnyConnected,
                         isLeftHeld = isLeftMouseHeld,
@@ -304,6 +329,7 @@ fun MainAppScaffold(
                         snippets = snippets,
                         showInlineTrackpad = showInlineTrackpadInText,
                         trackpadSensitivity = trackpadSensitivity,
+                        naturalScrolling = isNaturalScrolling,
                         onSendText = { viewModel.sendTextPaste(it) },
                         onSendKey = { viewModel.sendKey(it) },
                         onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },

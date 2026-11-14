@@ -24,6 +24,7 @@ import kotlin.math.hypot
 fun TrackpadScreen(
     sensitivity: Float,
     onSensitivityChange: (Float) -> Unit,
+    naturalScrolling: Boolean = true,
     isHapticEnabled: Boolean = false,
     isConnected: Boolean = true,
     isLeftHeld: Boolean = false,
@@ -34,6 +35,7 @@ fun TrackpadScreen(
     onSendKey: (String) -> Unit = {}
 ) {
     val view = LocalView.current
+    val strings = LocalAppStrings.current
     val currentIsLeftHeld by rememberUpdatedState(isLeftHeld)
     val currentOnLeftHoldChange by rememberUpdatedState(onLeftMouseHoldChange)
 
@@ -76,7 +78,7 @@ fun TrackpadScreen(
                 )
             ) {
                 Text(
-                    text = if (isLeftHeld) "正在框选 · 点此松开" else "框选（按住左键）",
+                    text = if (isLeftHeld) strings.tpHoldingLeftBtn else strings.tpDragSelectBtn,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -91,12 +93,13 @@ fun TrackpadScreen(
                 shape = RoundedCornerShape(10.dp),
                 contentPadding = PaddingValues(horizontal = 8.dp)
             ) {
-                Text("截屏 PrtSc", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text(strings.tpScreenshotBtn, fontSize = 13.sp, fontWeight = FontWeight.Medium)
             }
         }
 
         TrackpadSurface(
             sensitivity = sensitivity,
+            naturalScrolling = naturalScrolling,
             isHapticEnabled = isHapticEnabled,
             onMouseMove = onMouseMove,
             onMouseClick = { btn ->
@@ -111,11 +114,7 @@ fun TrackpadScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
-            hintText = if (isLeftHeld) {
-                "正在按住左键框选/拖拽\n单指滑动选中范围 · 轻点或按按钮松开"
-            } else {
-                "触控区域\n单指移动 · 双指滚动 · 轻点左键\n长按右键 · 点上方「框选」拖拽选字/截图"
-            }
+            hintText = if (isLeftHeld) strings.tpHoldingHint else strings.tpDefaultHint
         )
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -141,7 +140,7 @@ fun TrackpadScreen(
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
             ) {
                 Text(
-                    text = if (isLeftHeld) "松开左键" else "左键",
+                    text = if (isLeftHeld) strings.tpReleaseLeftBtn else strings.tpLeftBtn,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onPrimaryContainer
                 )
@@ -156,7 +155,7 @@ fun TrackpadScreen(
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
             ) {
-                Text("右键", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSecondaryContainer)
+                Text(strings.tpRightBtn, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSecondaryContainer)
             }
         }
 
@@ -167,7 +166,7 @@ fun TrackpadScreen(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("灵敏度: ${String.format("%.1fx", sensitivity)}", style = MaterialTheme.typography.labelSmall)
+            Text(strings.tpSensitivityLabel(String.format("%.1fx", sensitivity)), style = MaterialTheme.typography.labelSmall)
             Spacer(modifier = Modifier.width(8.dp))
             Slider(
                 value = sensitivity,
@@ -182,17 +181,20 @@ fun TrackpadScreen(
 @Composable
 fun TrackpadSurface(
     sensitivity: Float,
+    naturalScrolling: Boolean = true,
     isHapticEnabled: Boolean = false,
     onMouseMove: (dx: Float, dy: Float) -> Unit,
     onMouseClick: (button: String) -> Unit,
     onMouseScroll: (wheel: Float) -> Unit,
     modifier: Modifier = Modifier,
     isLeftHeld: Boolean = false,
-    hintText: String = "触控区域\n单指移动 · 双指滚动 · 轻点左键"
+    hintText: String? = null
 ) {
     val view = LocalView.current
+    val resolvedHintText = hintText ?: LocalAppStrings.current.tpSurfaceStandaloneDefaultHint
 
     val currentSensitivity by rememberUpdatedState(sensitivity)
+    val currentNaturalScrolling by rememberUpdatedState(naturalScrolling)
     val currentHapticEnabled by rememberUpdatedState(isHapticEnabled)
     val currentIsLeftHeld by rememberUpdatedState(isLeftHeld)
     val currentOnMouseMove by rememberUpdatedState(onMouseMove)
@@ -245,7 +247,11 @@ fun TrackpadSurface(
                             gestureStarted = true
                             val avgDy = pressedChanges.map { it.positionChange().y }.average().toFloat()
                             pressedChanges.forEach { it.consume() }
-                            val intWheel = accumulator.addScrollDelta(avgDy, sens)
+                            val intWheel = accumulator.addScrollDelta(
+                                avgDy = avgDy,
+                                sensitivity = sens,
+                                naturalScrolling = currentNaturalScrolling
+                            )
                             if (intWheel != 0) {
                                 currentOnMouseScroll(intWheel.toFloat())
                             }
@@ -278,7 +284,7 @@ fun TrackpadSurface(
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = hintText,
+                text = resolvedHintText,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,

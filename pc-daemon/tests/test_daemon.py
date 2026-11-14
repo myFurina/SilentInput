@@ -48,10 +48,12 @@ def _build_ws_frame(payload: bytes, opcode: int = 0x1, fin: bool = True, masked:
 
 
 class _FakeWriter:
-    def __init__(self, peername=("192.168.1.50", 12345)):
+    def __init__(self, peername=("192.168.1.50", 12345), sock=None):
         self.buf = bytearray()
         self.closed = False
+        self.wait_closed_called = False
         self._peername = peername
+        self._sock = sock
 
     def write(self, data: bytes):
         self.buf.extend(data)
@@ -63,11 +65,14 @@ class _FakeWriter:
         self.closed = True
 
     async def wait_closed(self):
+        self.wait_closed_called = True
         return
 
     def get_extra_info(self, name, default=None):
         if name == "peername":
             return self._peername
+        if name == "socket":
+            return self._sock
         return default
 
 
@@ -606,6 +611,161 @@ class TestDaemonProtocolAsync(unittest.IsolatedAsyncioTestCase):
             silentinput_daemon._release_held_mouse_buttons(tok_active)
             self.assertEqual(emitted[-1], [(1, 272, 0)])
             self.assertEqual(len(silentinput_daemon._held_mouse_buttons), 0)
+
+    def test_auth_failures_ttl_and_capacity_eviction(self):
+        silentinput_daemon._auth_failures.clear()
+        fake_now = [1000.0]
+        with mock.patch.object(silentinput_daemon.time, "monotonic", side_effect=lambda: fake_now[0]), \
+             mock.patch.object(silentinput_daemon, "AUTH_FAILURE_MAX_ENTRIES", 3):
+            silentinput_daemon._record_auth_failure("10.0.0.1")
+            self.assertIn("10.0.0.1", silentinput_daemon._auth_failures)
+
+            # Advance past TTL -> old partial-failure IP is pruned on next write
+            fake_now[0] += silentinput_daemon.AUTH_FAILURE_TTL_SECONDS + 1.0
+            silentinput_daemon._record_auth_failure("10.0.0.2")
+            self.assertNotIn("10.0.0.1", silentinput_daemon._auth_failures)
+            self.assertIn("10.0.0.2", silentinput_daemon._auth_failures)
+
+            # Fill up to capacity and verify oldest entry is evicted
+            fake_now[0] += 1.0
+            silentinput_daemon._record_auth_failure("10.0.0.3")
+            fake_now[0] += 1.0
+            silentinput_daemon._record_auth_failure("10.0.0.4")
+            fake_now[0] += 1.0
+            silentinput_daemon._record_auth_failure("10.0.0.5")
+            self.assertEqual(len(silentinput_daemon._auth_failures), 3)
+            self.assertNotIn("10.0.0.2", silentinput_daemon._auth_failures)
+            self.assertIn("10.0.0.5", silentinput_daemon._auth_failures)
+
+    async def test_eof_awaits_wait_closed_and_idle_timeout_cleans_up(self):
+        cfg = {"auth_token": "tok", "allow_usb_unauthenticated": True, "access_control_mode": "all"}
+        fake_evdev = types.SimpleNamespace(
+            ecodes=types.SimpleNamespace(EV_KEY=1, EV_REL=2, BTN_LEFT=272, BTN_RIGHT=273, REL_X=0, REL_Y=1, REL_WHEEL=8)
+        )
+        emitted = []
+
+        # 1. Immediate EOF on handle_client must close & await wait_closed()
+        r_eof = asyncio.StreamReader()
+        r_eof.feed_eof()
+        w_eof = _FakeWriter(peername=("127.0.0.1", 50001))
+        with mock.patch.object(silentinput_config, "load_config", return_value=cfg):
+            await silentinput_daemon.handle_client(r_eof, w_eof)
+        self.assertTrue(w_eof.closed)
+        self.assertTrue(w_eof.wait_closed_called)
+
+        # 2. Authenticated WS idle timeout releases held buttons & closes writer
+        ws_key = base64.b64encode(b"1234567890123456").decode("ascii")
+        r_ws = asyncio.StreamReader()
+        r_ws.feed_data(
+            (
+                "GET / HTTP/1.1\r\n"
+                "Host: 127.0.0.1:53318\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {ws_key}\r\n\r\n"
+            ).encode("utf-8")
+        )
+        r_ws.feed_data(_build_ws_frame(json.dumps({"type": "mouse", "action": "down_left"}).encode("utf-8")))
+        w_ws = _FakeWriter(peername=("127.0.0.1", 50002))
+
+        with mock.patch.object(silentinput_config, "load_config", return_value=cfg), \
+             mock.patch.object(silentinput_daemon, "WS_IDLE_TIMEOUT_SECONDS", 0.05), \
+             mock.patch.object(silentinput_daemon, "evdev", fake_evdev), \
+             mock.patch.object(silentinput_daemon, "ensure_uinput_device", return_value=True), \
+             mock.patch.object(silentinput_daemon, "uinput_device", object()), \
+             mock.patch.object(silentinput_daemon, "_emit_uinput_events", side_effect=lambda evs: emitted.append(evs) or True), \
+             mock.patch.object(silentinput_daemon, "_held_mouse_buttons", {}):
+            await silentinput_daemon.handle_client(r_ws, w_ws)
+            self.assertEqual(len(silentinput_daemon._held_mouse_buttons), 0)
+        self.assertTrue(w_ws.closed)
+        self.assertTrue(w_ws.wait_closed_called)
+        self.assertEqual(emitted, [[(1, 272, 1)], [(1, 272, 0)]])
+        self.assertEqual(silentinput_daemon._active_ws_connections, 0)
+
+        # 3. Authenticated Bluetooth idle timeout releases held buttons & closes writer
+        emitted.clear()
+        r_bt = asyncio.StreamReader()
+        r_bt.feed_data((json.dumps({"type": "mouse", "action": "down_left"}) + "\n").encode("utf-8"))
+        w_bt = _FakeWriter(peername=("Bluetooth(dev)", 0))
+        with mock.patch.object(silentinput_config, "load_config", return_value=cfg), \
+             mock.patch.object(silentinput_daemon, "BT_IDLE_TIMEOUT_SECONDS", 0.05), \
+             mock.patch.object(silentinput_daemon, "evdev", fake_evdev), \
+             mock.patch.object(silentinput_daemon, "ensure_uinput_device", return_value=True), \
+             mock.patch.object(silentinput_daemon, "uinput_device", object()), \
+             mock.patch.object(silentinput_daemon, "_emit_uinput_events", side_effect=lambda evs: emitted.append(evs) or True), \
+             mock.patch.object(silentinput_daemon, "_held_mouse_buttons", {}):
+            await silentinput_daemon.handle_bt_client(r_bt, w_bt, "Bluetooth(dev)")
+            self.assertEqual(len(silentinput_daemon._held_mouse_buttons), 0)
+        self.assertTrue(w_bt.closed)
+        self.assertTrue(w_bt.wait_closed_called)
+        self.assertEqual(emitted, [[(1, 272, 1)], [(1, 272, 0)]])
+
+    async def test_cancellation_releases_mouse_and_closes_writer(self):
+        cfg = {"auth_token": "tok", "allow_usb_unauthenticated": True, "access_control_mode": "all"}
+        fake_evdev = types.SimpleNamespace(
+            ecodes=types.SimpleNamespace(EV_KEY=1, EV_REL=2, BTN_LEFT=272, BTN_RIGHT=273, REL_X=0, REL_Y=1, REL_WHEEL=8)
+        )
+        emitted = []
+        r_bt = asyncio.StreamReader()
+        r_bt.feed_data((json.dumps({"type": "mouse", "action": "down_left"}) + "\n").encode("utf-8"))
+        w_bt = _FakeWriter(peername=("Bluetooth(dev)", 0))
+
+        with mock.patch.object(silentinput_config, "load_config", return_value=cfg), \
+             mock.patch.object(silentinput_daemon, "BT_IDLE_TIMEOUT_SECONDS", 30.0), \
+             mock.patch.object(silentinput_daemon, "evdev", fake_evdev), \
+             mock.patch.object(silentinput_daemon, "ensure_uinput_device", return_value=True), \
+             mock.patch.object(silentinput_daemon, "uinput_device", object()), \
+             mock.patch.object(silentinput_daemon, "_emit_uinput_events", side_effect=lambda evs: emitted.append(evs) or True), \
+             mock.patch.object(silentinput_daemon, "_held_mouse_buttons", {}):
+            task = asyncio.create_task(silentinput_daemon.handle_bt_client(r_bt, w_bt, "Bluetooth(dev)"))
+            await asyncio.sleep(0.02)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertEqual(len(silentinput_daemon._held_mouse_buttons), 0)
+        self.assertTrue(w_bt.closed)
+        self.assertTrue(w_bt.wait_closed_called)
+        self.assertEqual(emitted, [[(1, 272, 1)], [(1, 272, 0)]])
+
+    async def test_ws_connection_limit_and_tcp_keepalive(self):
+        mock_sock = mock.MagicMock()
+        w_sock = _FakeWriter(sock=mock_sock)
+        silentinput_daemon._enable_tcp_keepalive(w_sock)
+        mock_sock.setsockopt.assert_any_call(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+        r_over = asyncio.StreamReader()
+        w_over = _FakeWriter(peername=("127.0.0.1", 50009))
+        with mock.patch.object(silentinput_daemon, "MAX_WS_CONNECTIONS", 2), \
+             mock.patch.object(silentinput_daemon, "_active_ws_connections", 2):
+            await silentinput_daemon.handle_client(r_over, w_over)
+        self.assertTrue(w_over.closed)
+        self.assertTrue(w_over.wait_closed_called)
+
+    async def test_emit_key_combination_wtype_validation(self):
+        calls = []
+
+        async def fake_exec(*cmd, **kwargs):
+            calls.append(cmd)
+            return types.SimpleNamespace(wait=mock.AsyncMock(return_value=0))
+
+        with mock.patch.object(silentinput_daemon, "ensure_uinput_device", return_value=False), \
+             mock.patch.object(silentinput_daemon, "HAVE_UINPUT", False), \
+             mock.patch.object(silentinput_daemon, "KEY_MAP", {}), \
+             mock.patch.object(silentinput_daemon.asyncio, "create_subprocess_exec", side_effect=fake_exec):
+            # Valid fallback keys execute wtype
+            await silentinput_daemon.emit_key_combination("ctrl+prtsc")
+            await silentinput_daemon.emit_key_combination("alt+a")
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0], ("wtype", "-M", "ctrl", "-k", "Print"))
+            self.assertEqual(calls[1], ("wtype", "-M", "alt", "-k", "a"))
+
+            # Malicious / unknown fallback keys are rejected before spawning subprocess
+            calls.clear()
+            await silentinput_daemon.emit_key_combination("--help")
+            await silentinput_daemon.emit_key_combination("ctrl+-M")
+            await silentinput_daemon.emit_key_combination("bad;cmd")
+            await silentinput_daemon.emit_key_combination("unknownlongkey")
+            self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

@@ -46,31 +46,34 @@ object ConnectionStatusFormatter {
         netConnectionError: String?,
         netLatencyMs: Long?,
         activeServerIp: String,
-        isNetConnecting: Boolean = false
+        isNetConnecting: Boolean = false,
+        language: ResolvedLanguage = ResolvedLanguage.ZH
     ): StatusDisplay {
+        val s = AppStrings.forResolved(language)
         val isNetReady = isNetConnected && isNetAuthenticated
         return when (mode) {
             "bluetooth" -> {
-                val devName = btDeviceName ?: "电脑"
+                val devName = btDeviceName ?: s.statusFallbackPcName
                 val latText = if (btLatencyMs != null) " (${btLatencyMs}ms)" else ""
                 when {
-                    isBtConnected -> StatusDisplay("蓝牙: 已连接至 $devName$latText", StatusTone.NORMAL)
-                    isBtConnecting -> StatusDisplay("蓝牙: 正在连接...", StatusTone.PENDING)
-                    else -> StatusDisplay("蓝牙: 未连接", StatusTone.ERROR)
+                    isBtConnected -> StatusDisplay(s.statusBtConnectedTo(devName, latText), StatusTone.NORMAL)
+                    isBtConnecting -> StatusDisplay(s.statusBtConnecting, StatusTone.PENDING)
+                    else -> StatusDisplay(s.statusBtDisconnected, StatusTone.ERROR)
                 }
             }
             "lan" -> {
+                val prefix = s.statusLanPrefix
                 val text = when {
                     isNetReady -> {
-                        val encTag = if (isNetEncrypted) " 🔒" else " (明文)"
-                        val latText = formatLatencySuffix(netLatencyMs, markHighLatency = true)
-                        "局域网: 已连接$latText$encTag"
+                        val encTag = if (isNetEncrypted) " 🔒" else s.statusPlaintextShortTag
+                        val latText = formatLatencySuffix(netLatencyMs, markHighLatency = true, strings = s)
+                        s.statusNetConnected(prefix, latText, encTag)
                     }
-                    isNetConnected && !isNetAuthenticated -> "局域网: 正在验证密钥..."
-                    isNetConnecting -> "局域网: 正在连接..."
-                    isNetReconnecting -> if (netConnectionError != null) "局域网: $netConnectionError" else "局域网: 正在重连..."
-                    netConnectionError != null -> "局域网: $netConnectionError"
-                    else -> "局域网: 未连接"
+                    isNetConnected && !isNetAuthenticated -> s.statusVerifyingKey(prefix)
+                    isNetConnecting -> s.statusConnecting(prefix)
+                    isNetReconnecting -> if (netConnectionError != null) "$prefix: $netConnectionError" else s.statusReconnecting(prefix)
+                    netConnectionError != null -> "$prefix: $netConnectionError"
+                    else -> s.statusDisconnected(prefix)
                 }
                 val tone = when {
                     isNetReady && (netLatencyMs ?: 0L) >= 800L -> StatusTone.HIGH_LATENCY
@@ -82,17 +85,18 @@ object ConnectionStatusFormatter {
                 StatusDisplay(text, tone)
             }
             else -> {
+                val prefix = s.statusUsbPrefix
                 val isLoopback = activeServerIp == "127.0.0.1"
                 val text = when {
                     isNetReady && isLoopback -> {
-                        val latText = formatLatencySuffix(netLatencyMs, markHighLatency = false)
-                        "USB: 已连接$latText"
+                        val latText = formatLatencySuffix(netLatencyMs, markHighLatency = false, strings = s)
+                        s.statusNetConnected(prefix, latText, "")
                     }
-                    isNetConnected && !isNetAuthenticated && isLoopback -> "USB: 正在验证密钥..."
-                    isNetConnecting && isLoopback -> "USB: 正在连接..."
-                    isNetReconnecting -> if (netConnectionError != null) "USB: $netConnectionError" else "USB: 正在重连..."
-                    netConnectionError != null -> "USB: $netConnectionError"
-                    else -> "USB: 未连接"
+                    isNetConnected && !isNetAuthenticated && isLoopback -> s.statusVerifyingKey(prefix)
+                    isNetConnecting && isLoopback -> s.statusConnecting(prefix)
+                    isNetReconnecting -> if (netConnectionError != null) "$prefix: $netConnectionError" else s.statusReconnecting(prefix)
+                    netConnectionError != null -> "$prefix: $netConnectionError"
+                    else -> s.statusDisconnected(prefix)
                 }
                 val tone = when {
                     isNetReady && isLoopback && (netLatencyMs ?: 0L) >= 800L -> StatusTone.HIGH_LATENCY
@@ -113,24 +117,26 @@ object ConnectionStatusFormatter {
         isNetReconnecting: Boolean,
         connError: String?,
         latencyMs: Long?,
-        isUsbConnecting: Boolean = false
+        isUsbConnecting: Boolean = false,
+        language: ResolvedLanguage = ResolvedLanguage.ZH
     ): StatusDisplay {
+        val s = AppStrings.forResolved(language)
         return when {
             isUsbConnected && isUsbAuthenticated -> {
-                val latStr = formatLatencySuffix(latencyMs, markHighLatency = false)
-                val encStr = if (isNetEncrypted) " [TLS加密]" else " [明文传输]"
-                StatusDisplay("状态: 已连接$latStr$encStr", StatusTone.NORMAL)
+                val latStr = formatLatencySuffix(latencyMs, markHighLatency = false, strings = s)
+                val encStr = if (isNetEncrypted) s.statusDialogTlsTag else s.statusDialogPlaintextTag
+                StatusDisplay(s.statusDialogConnected(latStr, encStr), StatusTone.NORMAL)
             }
             isUsbConnected && !isUsbAuthenticated ->
-                StatusDisplay("状态: 正在验证密钥...", StatusTone.PENDING)
+                StatusDisplay(s.statusDialogVerifyingKey, StatusTone.PENDING)
             isUsbConnecting ->
-                StatusDisplay("状态: 正在连接...", StatusTone.PENDING)
+                StatusDisplay(s.statusDialogConnecting, StatusTone.PENDING)
             connError != null ->
-                StatusDisplay("状态: $connError", StatusTone.ERROR)
+                StatusDisplay(s.statusDialogError(connError), StatusTone.ERROR)
             isNetReconnecting ->
-                StatusDisplay("状态: 正在重连...", StatusTone.PENDING)
+                StatusDisplay(s.statusDialogReconnecting, StatusTone.PENDING)
             else ->
-                StatusDisplay("状态: 未连接", StatusTone.NORMAL)
+                StatusDisplay(s.statusDialogDisconnected, StatusTone.NORMAL)
         }
     }
 
@@ -141,32 +147,38 @@ object ConnectionStatusFormatter {
         isNetReconnecting: Boolean,
         connError: String?,
         latencyMs: Long?,
-        isLanConnecting: Boolean = false
+        isLanConnecting: Boolean = false,
+        language: ResolvedLanguage = ResolvedLanguage.ZH
     ): StatusDisplay {
+        val s = AppStrings.forResolved(language)
         return when {
             isLanConnected && isLanAuthenticated -> {
-                val latStr = formatLatencySuffix(latencyMs, markHighLatency = true)
-                val encStr = if (isNetEncrypted) " [TLS加密]" else " [明文传输]"
-                StatusDisplay("状态: 已连接$latStr$encStr", StatusTone.NORMAL)
+                val latStr = formatLatencySuffix(latencyMs, markHighLatency = true, strings = s)
+                val encStr = if (isNetEncrypted) s.statusDialogTlsTag else s.statusDialogPlaintextTag
+                StatusDisplay(s.statusDialogConnected(latStr, encStr), StatusTone.NORMAL)
             }
             isLanConnected && !isLanAuthenticated ->
-                StatusDisplay("状态: 正在验证配对密钥...", StatusTone.PENDING)
+                StatusDisplay(s.statusDialogVerifyingPairingKey, StatusTone.PENDING)
             isLanConnecting ->
-                StatusDisplay("状态: 正在连接...", StatusTone.PENDING)
+                StatusDisplay(s.statusDialogConnecting, StatusTone.PENDING)
             connError != null ->
-                StatusDisplay("状态: $connError", StatusTone.ERROR)
+                StatusDisplay(s.statusDialogError(connError), StatusTone.ERROR)
             isNetReconnecting ->
-                StatusDisplay("状态: 正在重连...", StatusTone.PENDING)
+                StatusDisplay(s.statusDialogReconnecting, StatusTone.PENDING)
             else ->
-                StatusDisplay("状态: 未连接", StatusTone.NORMAL)
+                StatusDisplay(s.statusDialogDisconnected, StatusTone.NORMAL)
         }
     }
 
-    private fun formatLatencySuffix(latencyMs: Long?, markHighLatency: Boolean): String {
+    private fun formatLatencySuffix(
+        latencyMs: Long?,
+        markHighLatency: Boolean,
+        strings: AppStrings
+    ): String {
         return when {
             latencyMs == null -> ""
             latencyMs <= 1L -> " (<1ms)"
-            markHighLatency && latencyMs >= 1000L -> " (${latencyMs}ms 卡顿/高延迟)"
+            markHighLatency && latencyMs >= 1000L -> strings.statusHighLatencyTag(latencyMs)
             else -> " (${latencyMs}ms)"
         }
     }

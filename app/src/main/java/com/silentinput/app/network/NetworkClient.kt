@@ -3,6 +3,8 @@ package com.silentinput.app.network
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
+import com.silentinput.app.model.AppLanguage
+import com.silentinput.app.model.AppStrings
 import com.silentinput.app.model.ProtocolPayloads
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,7 +20,10 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 
-class NetworkClient(context: Context? = null) {
+class NetworkClient(
+    context: Context? = null,
+    initialLanguage: AppLanguage = AppLanguage.ZH
+) {
 
     companion object {
         private const val TAG = "NetworkClient"
@@ -33,6 +38,9 @@ class NetworkClient(context: Context? = null) {
 
     private val tofuPrefs = context?.applicationContext?.getSharedPreferences(TOFU_PREFS_NAME, Context.MODE_PRIVATE)
 
+    @Volatile
+    private var baseClientInitialized = false
+
     // Base OkHttpClient owning the shared Dispatcher and ConnectionPool
     private val baseClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -40,6 +48,7 @@ class NetworkClient(context: Context? = null) {
             .pingInterval(5, TimeUnit.SECONDS) // Keep NAT and Wi-Fi radio alive
             .retryOnConnectionFailure(true)
             .build()
+            .also { baseClientInitialized = true }
     }
 
     private fun sha256Hex(cert: X509Certificate): String {
@@ -132,6 +141,33 @@ class NetworkClient(context: Context? = null) {
     val savedCertFingerprint = _savedCertFingerprint.asStateFlow()
 
     @Volatile
+    var appLanguage: AppLanguage = initialLanguage
+
+    private var lastErrorFormatter: ((AppStrings) -> String)? = null
+
+    private fun currentStrings(): AppStrings = AppStrings.forLanguage(appLanguage)
+
+    private fun setConnectionError(formatter: ((AppStrings) -> String)?) {
+        lastErrorFormatter = formatter
+        _connectionError.value = formatter?.invoke(currentStrings())
+    }
+
+    fun updateLanguage(language: AppLanguage) {
+        synchronized(stateLock) {
+            appLanguage = language
+            lastErrorFormatter?.let { formatter ->
+                _connectionError.value = formatter(currentStrings())
+            }
+        }
+    }
+
+    fun refreshLanguageIfSystem() {
+        if (appLanguage == AppLanguage.SYSTEM) {
+            updateLanguage(AppLanguage.SYSTEM)
+        }
+    }
+
+    @Volatile
     var serverIp: String = "127.0.0.1"
     @Volatile
     var serverPort: Int = DEFAULT_PORT
@@ -163,7 +199,7 @@ class NetworkClient(context: Context? = null) {
                 reconnectJob?.cancel()
                 reconnectJob = null
                 disconnectSocketOnlyLocked()
-                _connectionError.value = "请输入电脑 IP 地址"
+                setConnectionError { it.netErrEmptyIp }
                 return
             }
             if (
@@ -177,7 +213,7 @@ class NetworkClient(context: Context? = null) {
                 reconnectJob?.cancel()
                 reconnectJob = null
                 disconnectSocketOnlyLocked()
-                _connectionError.value = "连接地址格式无效，请检查 IP 输入"
+                setConnectionError { it.netErrInvalidIp }
                 return
             }
             if (cleanIp != "127.0.0.1" && authToken.trim().isBlank()) {
@@ -187,13 +223,13 @@ class NetworkClient(context: Context? = null) {
                 reconnectJob?.cancel()
                 reconnectJob = null
                 disconnectSocketOnlyLocked()
-                _connectionError.value = "请输入配对密钥"
+                setConnectionError { it.netErrEmptyToken }
                 return
             }
             shouldBeConnected = true
             _isConnecting.value = true
             _isReconnecting.value = false
-            _connectionError.value = null
+            setConnectionError(null)
             _certMismatchHost.value = null
             _pendingCertFingerprint.value = null
             _savedCertFingerprint.value = null
@@ -214,7 +250,7 @@ class NetworkClient(context: Context? = null) {
             _certMismatchHost.value = null
             _pendingCertFingerprint.value = null
             _savedCertFingerprint.value = null
-            _connectionError.value = null
+            setConnectionError(null)
         }
         connect()
     }
@@ -236,7 +272,7 @@ class NetworkClient(context: Context? = null) {
             buildClientForHost(cleanIp, serverPort, useTls, connGen)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize TLS client: ${e.message}", e)
-            _connectionError.value = "TLS 初始化失败: ${e.message ?: "未知错误"}"
+            setConnectionError { it.netErrTlsInitFailed(e.message) }
             _isConnecting.value = false
             shouldBeConnected = false
             return
@@ -257,7 +293,7 @@ class NetworkClient(context: Context? = null) {
                         _isReconnecting.value = false
                         reconnectJob?.cancel()
                         reconnectJob = null
-                        _connectionError.value = "请输入配对密钥"
+                        setConnectionError { it.netErrEmptyToken }
                         disconnectSocketOnlyLocked()
                         return
                     }
@@ -266,7 +302,7 @@ class NetworkClient(context: Context? = null) {
                     _isConnected.value = true
                     _isConnecting.value = false
                     _isReconnecting.value = false
-                    _connectionError.value = null
+                    setConnectionError(null)
                     _certMismatchHost.value = null
                     _pendingCertFingerprint.value = null
                     _savedCertFingerprint.value = null
@@ -312,14 +348,14 @@ class NetworkClient(context: Context? = null) {
                                 synchronized(stateLock) {
                                     if (this@NetworkClient.webSocket !== webSocket) return
                                     _isAuthenticated.value = true
-                                    _connectionError.value = null
+                                    setConnectionError(null)
                                 }
                             } else {
                                 val serverMsg = json.optString("message", "")
-                                val errText = if (serverMsg.contains("Too many", ignoreCase = true)) {
-                                    "配对密钥错误次数过多，请稍后再试"
+                                val errFormatter: (AppStrings) -> String = if (serverMsg.contains("Too many", ignoreCase = true)) {
+                                    { it.netErrTooManyAttempts }
                                 } else {
-                                    "配对密钥错误"
+                                    { it.netErrWrongToken }
                                 }
                                 Log.w(TAG, "Authentication failed: $serverMsg")
                                 synchronized(stateLock) {
@@ -328,7 +364,7 @@ class NetworkClient(context: Context? = null) {
                                     _isReconnecting.value = false
                                     reconnectJob?.cancel()
                                     reconnectJob = null
-                                    _connectionError.value = errText
+                                    setConnectionError(errFormatter)
                                     disconnectSocketOnlyLocked()
                                 }
                             }
@@ -341,7 +377,7 @@ class NetworkClient(context: Context? = null) {
                                 _isReconnecting.value = false
                                 reconnectJob?.cancel()
                                 reconnectJob = null
-                                _connectionError.value = "配对密钥无效或未认证"
+                                setConnectionError { it.netErrInvalidOrUnauth }
                                 disconnectSocketOnlyLocked()
                             }
                         }
@@ -365,23 +401,23 @@ class NetworkClient(context: Context? = null) {
                     val isTofuMismatch = _certMismatchHost.value != null ||
                         t.message?.contains("TOFU_CERT_MISMATCH") == true ||
                         t.cause?.message?.contains("TOFU_CERT_MISMATCH") == true
-                    val errorMsg = when {
+                    val errFormatter: (AppStrings) -> String = when {
                         isTofuMismatch -> {
                             shouldBeConnected = false
-                            "电脑证书指纹已变更，已拦截连接"
+                            { it.netErrTofuMismatch }
                         }
                         useTls && (t is javax.net.ssl.SSLException || t.message?.contains("SSL", ignoreCase = true) == true) ->
-                            "TLS 握手失败 (电脑端未开启加密或证书异常)"
+                            { it.netErrTlsHandshakeFailed }
                         !useTls && (t.message?.contains("CLEARTEXT", ignoreCase = true) == true) ->
-                            "系统禁止明文传输"
+                            { it.netErrCleartextBlocked }
                         t is java.net.ConnectException ->
-                            "无法连接电脑 (请检查 IP、端口及服务状态)"
+                            { it.netErrConnectFailedHost }
                         t is java.net.SocketTimeoutException ->
-                            "连接超时 (请检查局域网连接)"
+                            { it.netErrTimeout }
                         else ->
-                            t.message ?: "连接失败"
+                            { s -> t.message ?: s.netErrGenericFailed }
                     }
-                    _connectionError.value = errorMsg
+                    setConnectionError(errFormatter)
                     handleDisconnectedLocked()
                 }
             }
@@ -398,11 +434,13 @@ class NetworkClient(context: Context? = null) {
             scopedClient.newWebSocket(request, listener)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to open WebSocket ($url): ${e.message}", e)
-            _connectionError.value = if (e is IllegalArgumentException) {
-                "连接地址格式无效，请检查 IP 输入"
-            } else {
-                "建立连接失败: ${e.message ?: "未知错误"}"
-            }
+            setConnectionError(
+                if (e is IllegalArgumentException) {
+                    { it.netErrInvalidIp }
+                } else {
+                    { it.netErrOpenFailed(e.message) }
+                }
+            )
             _isConnecting.value = false
             _isReconnecting.value = false
             shouldBeConnected = false
@@ -576,7 +614,7 @@ class NetworkClient(context: Context? = null) {
             shouldBeConnected = false
             _isConnecting.value = false
             _isReconnecting.value = false
-            _connectionError.value = null
+            setConnectionError(null)
             reconnectJob?.cancel()
             reconnectJob = null
             disconnectSocketOnlyLocked()
@@ -586,5 +624,13 @@ class NetworkClient(context: Context? = null) {
     fun destroy() {
         disconnect()
         scope.cancel()
+        if (baseClientInitialized) {
+            try {
+                baseClient.dispatcher.executorService.shutdown()
+            } catch (_: Exception) {}
+            try {
+                baseClient.connectionPool.evictAll()
+            } catch (_: Exception) {}
+        }
     }
 }

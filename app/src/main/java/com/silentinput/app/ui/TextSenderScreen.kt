@@ -53,6 +53,7 @@ fun TextSenderScreen(
     snippets: List<String>,
     showInlineTrackpad: Boolean = true,
     trackpadSensitivity: Float = 0.6f,
+    naturalScrolling: Boolean = true,
     onSendText: (String) -> Unit,
     onSendKey: (String) -> Unit,
     onMouseMove: (dx: Float, dy: Float) -> Unit,
@@ -61,6 +62,7 @@ fun TextSenderScreen(
     onOpenSettings: () -> Unit = {}
 ) {
     val view = LocalView.current
+    val strings = LocalAppStrings.current
     val isImeVisible = rememberIsImeVisible()
 
     DisposableEffect(view) {
@@ -107,7 +109,7 @@ fun TextSenderScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-            text = "文本输入",
+            text = strings.txtTitle,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary
@@ -120,7 +122,7 @@ fun TextSenderScreen(
                 .fillMaxWidth()
                 .heightIn(min = 90.dp, max = 150.dp),
             shape = RoundedCornerShape(12.dp),
-            placeholder = { Text("在此输入文本...") },
+            placeholder = { Text(strings.txtPlaceholder) },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = {
                 if (inputText.isNotBlank() && isConnected) {
@@ -132,7 +134,7 @@ fun TextSenderScreen(
                     IconButton(onClick = { onInputTextChange("") }) {
                         Icon(
                             Icons.Default.Close,
-                            contentDescription = "清空输入",
+                            contentDescription = strings.txtClearInputDesc,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(18.dp)
                         )
@@ -153,12 +155,12 @@ fun TextSenderScreen(
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 TargetModeChip(
-                    label = "终端",
+                    label = strings.txtTargetTerminal,
                     selected = targetMode == "terminal",
                     onClick = { onTargetModeChange("terminal") }
                 )
                 TargetModeChip(
-                    label = "应用",
+                    label = strings.txtTargetApp,
                     selected = targetMode == "gui",
                     onClick = { onTargetModeChange("gui") }
                 )
@@ -168,13 +170,13 @@ fun TextSenderScreen(
                     checked = enterOnSend,
                     onCheckedChange = onEnterOnSendChange
                 )
-                Text("回车", style = MaterialTheme.typography.bodySmall)
+                Text(strings.txtOptionEnter, style = MaterialTheme.typography.bodySmall)
                 Spacer(modifier = Modifier.width(2.dp))
                 Checkbox(
                     checked = clearOnSend,
                     onCheckedChange = onClearOnSendChange
                 )
-                Text("清空", style = MaterialTheme.typography.bodySmall)
+                Text(strings.txtOptionClear, style = MaterialTheme.typography.bodySmall)
             }
         }
 
@@ -194,7 +196,7 @@ fun TextSenderScreen(
             ) {
                 Icon(Icons.Default.Send, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("发送到电脑", fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Text(strings.txtSendToPc, fontSize = 15.sp, fontWeight = FontWeight.Bold)
             }
             OutlinedButton(
                 onClick = {
@@ -204,7 +206,7 @@ fun TextSenderScreen(
                 shape = RoundedCornerShape(12.dp),
                 contentPadding = PaddingValues(horizontal = 14.dp)
             ) {
-                Text("撤销 (Ctrl+Z)", fontSize = 12.sp)
+                Text(strings.txtUndoBtn, fontSize = 12.sp)
             }
         }
 
@@ -231,7 +233,7 @@ fun TextSenderScreen(
                 item {
                     AssistChip(
                         onClick = onOpenSettings,
-                        label = { Text("+ 短语", fontSize = 11.sp) }
+                        label = { Text(strings.txtAddSnippetChip, fontSize = 11.sp) }
                     )
                 }
             }
@@ -244,7 +246,7 @@ fun TextSenderScreen(
         ) {
             Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    text = "光标与编辑",
+                    text = strings.txtCursorEditTitle,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Bold
@@ -270,7 +272,7 @@ fun TextSenderScreen(
                         onRepeat = { sendKey("right") }
                     )
                     RepeatableEditKey(
-                        label = "退格",
+                        label = strings.txtCursorBackspace,
                         modifier = Modifier.weight(1.3f),
                         fontSize = 12.sp,
                         containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f),
@@ -295,7 +297,7 @@ fun TextSenderScreen(
                         ),
                         contentPadding = PaddingValues(0.dp)
                     ) {
-                        Text("回车", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        Text(strings.txtCursorEnter, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
                     }
                 }
             }
@@ -305,6 +307,7 @@ fun TextSenderScreen(
             if (showTrackpadArea) {
                 TrackpadSurface(
                     sensitivity = trackpadSensitivity,
+                    naturalScrolling = naturalScrolling,
                     isHapticEnabled = isHapticEnabled,
                     onMouseMove = onMouseMove,
                     onMouseClick = onMouseClick,
@@ -312,7 +315,7 @@ fun TextSenderScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
-                    hintText = "触控区域（输入法弹出时自动折叠）\n单指移动 · 双指滚动 · 轻点左键"
+                    hintText = strings.txtInlineTrackpadHint
                 )
             }
         }

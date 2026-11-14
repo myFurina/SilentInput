@@ -27,17 +27,24 @@ class TrackpadAccumulatorTest {
     }
 
     @Test
-    fun `two finger scroll accumulates with divisor and resets cleanly`() {
-        val acc = TrackpadAccumulator()
-        // Negative avgDy scrolls up (+1 wheel when >= 28 effective px)
-        assertEquals(0, acc.addScrollDelta(avgDy = -14f, sensitivity = 1.0f))
-        assertEquals(1, acc.addScrollDelta(avgDy = -14f, sensitivity = 1.0f))
+    fun `two finger scroll accumulates with divisor, respects natural scrolling, and resets cleanly`() {
+        val naturalAcc = TrackpadAccumulator()
+        // Natural scrolling (default = true): swiping fingers up (avgDy < 0) scrolls wheel down (-1)
+        assertEquals(0, naturalAcc.addScrollDelta(avgDy = -14f, sensitivity = 1.0f))
+        assertEquals(-1, naturalAcc.addScrollDelta(avgDy = -14f, sensitivity = 1.0f))
+        assertEquals(0, naturalAcc.addScrollDelta(avgDy = 14f, sensitivity = 1.0f))
+        assertEquals(1, naturalAcc.addScrollDelta(avgDy = 14f, sensitivity = 1.0f))
 
-        acc.addMoveDelta(0.5f, 0.5f, sensitivity = 1.0f)
-        acc.reset()
-        assertEquals(0f, acc.accX, 0.0f)
-        assertEquals(0f, acc.accY, 0.0f)
-        assertEquals(0f, acc.accWheel, 0.0f)
+        val traditionalAcc = TrackpadAccumulator()
+        // Traditional wheel mode (naturalScrolling = false): swiping up (avgDy < 0) emits +1 wheel
+        assertEquals(0, traditionalAcc.addScrollDelta(avgDy = -14f, sensitivity = 1.0f, naturalScrolling = false))
+        assertEquals(1, traditionalAcc.addScrollDelta(avgDy = -14f, sensitivity = 1.0f, naturalScrolling = false))
+
+        traditionalAcc.addMoveDelta(0.5f, 0.5f, sensitivity = 1.0f)
+        traditionalAcc.reset()
+        assertEquals(0f, traditionalAcc.accX, 0.0f)
+        assertEquals(0f, traditionalAcc.accY, 0.0f)
+        assertEquals(0f, traditionalAcc.accWheel, 0.0f)
     }
 
     @Test

@@ -37,6 +37,7 @@ fun KeyboardScreen(
     onSendKey: (String) -> Unit
 ) {
     val view = LocalView.current
+    val strings = LocalAppStrings.current
     DisposableEffect(view) {
         view.isSoundEffectsEnabled = false
         onDispose {}
@@ -86,7 +87,7 @@ fun KeyboardScreen(
     ) {
         // 1. Quick Actions Bar
         Text(
-            text = "快捷键",
+            text = strings.kbShortcutsTitle,
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.primary
         )
@@ -96,17 +97,17 @@ fun KeyboardScreen(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            QuickActionButton("中 / 英\n(Shift)", Modifier.weight(1f), isPrimaryHighlight = true) {
+            QuickActionButton(strings.kbImeSwitch, Modifier.weight(1f), isPrimaryHighlight = true) {
                 sendDirectShortcut("shift")
             }
-            QuickActionButton("空格\nSpace", Modifier.weight(1f)) {
+            QuickActionButton(strings.kbSpace, Modifier.weight(1f)) {
                 sendKey("space")
             }
-            QuickActionButton("回车\nEnter", Modifier.weight(1f)) {
+            QuickActionButton(strings.kbEnter, Modifier.weight(1f)) {
                 sendKey("enter")
             }
             QuickActionButton(
-                text = "退格\nBackspace",
+                text = strings.kbBackspace,
                 modifier = Modifier.weight(1f),
                 isRepeatable = true,
                 cancelOnDrag = showFullKeyboard
@@ -120,16 +121,16 @@ fun KeyboardScreen(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            QuickActionButton("复制\nCtrl+C", Modifier.weight(1f)) {
+            QuickActionButton(strings.kbCopy, Modifier.weight(1f)) {
                 sendDirectShortcut("ctrl+c")
             }
-            QuickActionButton("粘贴\nCtrl+V", Modifier.weight(1f)) {
+            QuickActionButton(strings.kbPaste, Modifier.weight(1f)) {
                 sendDirectShortcut("ctrl+v")
             }
-            QuickActionButton("撤销\nCtrl+Z", Modifier.weight(1f)) {
+            QuickActionButton(strings.kbUndo, Modifier.weight(1f)) {
                 sendDirectShortcut("ctrl+z")
             }
-            QuickActionButton("全选\nCtrl+A", Modifier.weight(1f)) {
+            QuickActionButton(strings.kbSelectAll, Modifier.weight(1f)) {
                 sendDirectShortcut("ctrl+a")
             }
         }
@@ -156,7 +157,7 @@ fun KeyboardScreen(
             QuickActionButton("Win", Modifier.weight(1f)) {
                 sendKey("super")
             }
-            QuickActionButton("截屏\nPrtSc", Modifier.weight(1f)) {
+            QuickActionButton(strings.kbScreenshot, Modifier.weight(1f)) {
                 sendKey("prtsc")
             }
         }
@@ -178,16 +179,16 @@ fun KeyboardScreen(
         ) {
             Text(
                 text = if (activeModifiersPrefix.isNotEmpty()) {
-                    "修饰键（待组合: ${activeModifiersPrefix.uppercase()}?）"
+                    strings.kbModifiersPending(activeModifiersPrefix.uppercase())
                 } else {
-                    "修饰键"
+                    strings.kbModifiersTitle
                 },
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary
             )
             if (activeModifiersPrefix.isNotEmpty()) {
                 Text(
-                    text = "点按下方任意键组合发送",
+                    text = strings.kbModifiersTapHint,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -231,7 +232,7 @@ fun KeyboardScreen(
             )
             Spacer(modifier = Modifier.width(6.dp))
             Text(
-                text = if (showFullKeyboard) "收起迷你全键盘" else "展开迷你全键盘 (A-Z / 0-9 / F1-F12)",
+                text = if (showFullKeyboard) strings.kbCollapseMiniFull else strings.kbExpandMiniFull,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium
             )
@@ -255,7 +256,7 @@ fun KeyboardScreen(
 
         // 3. Navigation
         Text(
-            text = "方向键",
+            text = strings.kbNavigationTitle,
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.primary
         )
@@ -283,6 +284,7 @@ private fun MiniFullKeyboardPanel(
     onSelectTab: (Int) -> Unit,
     onKeyPress: (String) -> Unit
 ) {
+    val strings = LocalAppStrings.current
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
@@ -298,13 +300,13 @@ private fun MiniFullKeyboardPanel(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 MiniTabChip(
-                    label = "字母 / 数字",
+                    label = strings.kbMiniTabAlphaNum,
                     selected = selectedTab == 0,
                     modifier = Modifier.weight(1f),
                     onClick = { onSelectTab(0) }
                 )
                 MiniTabChip(
-                    label = "F1-F12 / 导航",
+                    label = strings.kbMiniTabFNav,
                     selected = selectedTab == 1,
                     modifier = Modifier.weight(1f),
                     onClick = { onSelectTab(1) }

@@ -1,6 +1,7 @@
 package com.silentinput.app.model
 
 import com.silentinput.app.network.NetworkClient
+import java.util.Locale
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -322,5 +323,119 @@ class ConnectionStatusAndNetworkClientTest {
         } finally {
             client.destroy()
         }
+    }
+
+    @Test
+    fun `app language parser and locale resolver handle system zh and en`() {
+        assertEquals(AppLanguage.SYSTEM, AppLanguage.fromPref(null))
+        assertEquals(AppLanguage.SYSTEM, AppLanguage.fromPref("unknown"))
+        assertEquals(AppLanguage.ZH, AppLanguage.fromPref("zh"))
+        assertEquals(AppLanguage.EN, AppLanguage.fromPref("en"))
+
+        assertEquals(ResolvedLanguage.ZH, AppLocaleResolver.resolve(AppLanguage.SYSTEM, Locale.SIMPLIFIED_CHINESE))
+        assertEquals(ResolvedLanguage.ZH, AppLocaleResolver.resolve(AppLanguage.SYSTEM, Locale.TRADITIONAL_CHINESE))
+        assertEquals(ResolvedLanguage.EN, AppLocaleResolver.resolve(AppLanguage.SYSTEM, Locale.US))
+        assertEquals(ResolvedLanguage.EN, AppLocaleResolver.resolve(AppLanguage.SYSTEM, Locale.JAPAN))
+        assertEquals(ResolvedLanguage.EN, AppLocaleResolver.resolve(AppLanguage.EN, Locale.SIMPLIFIED_CHINESE))
+        assertEquals(ResolvedLanguage.ZH, AppLocaleResolver.resolve(AppLanguage.ZH, Locale.US))
+    }
+
+    @Test
+    fun `connection status formatter supports english and chinese outputs`() {
+        val btEn = ConnectionStatusFormatter.formatTopBarStatus(
+            mode = "bluetooth",
+            isBtConnected = true,
+            isBtConnecting = false,
+            btDeviceName = null,
+            btLatencyMs = 12L,
+            isNetConnected = false,
+            isNetAuthenticated = false,
+            isNetReconnecting = false,
+            isNetEncrypted = false,
+            netConnectionError = null,
+            netLatencyMs = null,
+            activeServerIp = "127.0.0.1",
+            language = ResolvedLanguage.EN
+        )
+        assertEquals("Bluetooth: Connected to PC (12ms)", btEn.text)
+        assertEquals(StatusTone.NORMAL, btEn.tone)
+
+        val lanHighEn = ConnectionStatusFormatter.formatTopBarStatus(
+            mode = "lan",
+            isBtConnected = false,
+            isBtConnecting = false,
+            btDeviceName = null,
+            btLatencyMs = null,
+            isNetConnected = true,
+            isNetAuthenticated = true,
+            isNetReconnecting = false,
+            isNetEncrypted = false,
+            netConnectionError = null,
+            netLatencyMs = 1200L,
+            activeServerIp = "192.168.1.20",
+            language = ResolvedLanguage.EN
+        )
+        assertEquals("LAN: Connected (1200ms High Latency) (Plaintext)", lanHighEn.text)
+        assertEquals(StatusTone.HIGH_LATENCY, lanHighEn.tone)
+
+        val usbDialogEn = ConnectionStatusFormatter.formatUsbDialogStatus(
+            isUsbConnected = true,
+            isUsbAuthenticated = true,
+            isNetEncrypted = true,
+            isNetReconnecting = false,
+            connError = null,
+            latencyMs = 1L,
+            language = ResolvedLanguage.EN
+        )
+        assertEquals("Status: Connected (<1ms) [TLS]", usbDialogEn.text)
+
+        val lanDialogEn = ConnectionStatusFormatter.formatLanDialogStatus(
+            isLanConnected = true,
+            isLanAuthenticated = false,
+            isNetEncrypted = true,
+            isNetReconnecting = false,
+            connError = null,
+            latencyMs = null,
+            language = ResolvedLanguage.EN
+        )
+        assertEquals("Status: Verifying pairing key...", lanDialogEn.text)
+        assertEquals(StatusTone.PENDING, lanDialogEn.tone)
+    }
+
+    @Test
+    fun `network client produces english errors and retranslates error on language switch`() {
+        val client = NetworkClient(context = null, initialLanguage = AppLanguage.EN)
+        try {
+            client.serverIp = ""
+            client.connect()
+            assertEquals(AppStrings.EN.netErrEmptyIp, client.connectionError.value)
+
+            client.serverIp = "192.168.1. 10"
+            client.authToken = "tok"
+            client.connect()
+            assertEquals(AppStrings.EN.netErrInvalidIp, client.connectionError.value)
+
+            client.serverIp = "192.168.1.20"
+            client.authToken = ""
+            client.connect()
+            assertEquals(AppStrings.EN.netErrEmptyToken, client.connectionError.value)
+
+            // Live language switch updates the currently displayed error without recreating client
+            client.updateLanguage(AppLanguage.ZH)
+            assertEquals(AppStrings.ZH.netErrEmptyToken, client.connectionError.value)
+        } finally {
+            client.destroy()
+        }
+    }
+
+    @Test
+    fun `network client destroy without connect does not initialize OkHttpClient`() {
+        val client = NetworkClient(context = null)
+        val initializedField = NetworkClient::class.java.getDeclaredField("baseClientInitialized")
+        initializedField.isAccessible = true
+
+        assertFalse(initializedField.getBoolean(client))
+        client.destroy()
+        assertFalse(initializedField.getBoolean(client))
     }
 }

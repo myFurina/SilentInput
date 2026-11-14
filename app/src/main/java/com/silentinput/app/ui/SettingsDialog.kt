@@ -27,7 +27,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.ConnectionStatusFormatter
+import com.silentinput.app.model.ResolvedLanguage
 import com.silentinput.app.model.StatusTone
 import com.silentinput.app.network.NetworkClient
 import com.silentinput.app.viewmodel.MainViewModel
@@ -76,9 +78,13 @@ fun UnifiedConnectionDialog(
 
     val isHapticEnabled by viewModel.isHapticEnabled.collectAsState()
     val isDarkMode by viewModel.isDarkMode.collectAsState()
+    val appLanguage by viewModel.appLanguage.collectAsState()
     val showInlineTrackpadInText by viewModel.showInlineTrackpadInText.collectAsState()
+    val isNaturalScrolling by viewModel.isNaturalScrolling.collectAsState()
     val snippets by viewModel.snippets.collectAsState()
     var moreSettingsExpanded by rememberSaveable { mutableStateOf(false) }
+    val strings = LocalAppStrings.current
+    val resolvedLanguage = LocalResolvedLanguage.current
 
     var selectedTab by rememberSaveable {
         mutableIntStateOf(
@@ -104,7 +110,7 @@ fun UnifiedConnectionDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("设置", fontWeight = FontWeight.Bold) },
+        title = { Text(strings.settings, fontWeight = FontWeight.Bold) },
         text = {
             Column(
                 modifier = Modifier
@@ -117,12 +123,12 @@ fun UnifiedConnectionDialog(
                     Tab(
                         selected = selectedTab == 0,
                         onClick = { selectedTab = 0 },
-                        text = { Text("USB") }
+                        text = { Text(strings.settingsTabUsb) }
                     )
                     Tab(
                         selected = selectedTab == 1,
                         onClick = { selectedTab = 1 },
-                        text = { Text("局域网") }
+                        text = { Text(strings.settingsTabLan) }
                     )
                     Tab(
                         selected = selectedTab == 2,
@@ -131,7 +137,7 @@ fun UnifiedConnectionDialog(
                             onRequestBtPermission()
                             viewModel.refreshBondedDevices()
                         },
-                        text = { Text("蓝牙") }
+                        text = { Text(strings.settingsTabBluetooth) }
                     )
                 }
 
@@ -145,6 +151,7 @@ fun UnifiedConnectionDialog(
                         isTlsEnabled = isTlsEnabled,
                         connError = usbConnError,
                         latencyMs = latencyMs,
+                        resolvedLanguage = resolvedLanguage,
                         onConnect = { viewModel.connectUsb() },
                         onDisconnect = { viewModel.disconnectNetwork() }
                     )
@@ -162,6 +169,7 @@ fun UnifiedConnectionDialog(
                         isNetReconnecting = isLanReconnecting,
                         connError = lanConnError,
                         latencyMs = latencyMs,
+                        resolvedLanguage = resolvedLanguage,
                         certMismatchHost = certMismatchHost,
                         savedCertFingerprint = savedCertFingerprint,
                         pendingCertFingerprint = pendingCertFingerprint,
@@ -191,32 +199,51 @@ fun UnifiedConnectionDialog(
 
                 SectionDivider()
 
+                val langShort = when (appLanguage) {
+                    AppLanguage.SYSTEM -> strings.languageShortSystem
+                    AppLanguage.ZH -> strings.languageShortZh
+                    AppLanguage.EN -> strings.languageShortEn
+                }
                 CollapsibleSection(
-                    title = "更多设置",
-                    summary = "静音 ${if (!isHapticEnabled) "开" else "关"} · ${if (isDarkMode) "深色" else "浅色"} · 短语 ${snippets.size}",
+                    title = strings.moreSettingsTitle,
+                    summary = strings.moreSettingsSummary(!isHapticEnabled, isDarkMode, langShort, snippets.size),
                     expanded = moreSettingsExpanded,
                     onToggle = { moreSettingsExpanded = !moreSettingsExpanded }
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        LanguageSettingRow(
+                            selectedLanguage = appLanguage,
+                            onSelectLanguage = { viewModel.setAppLanguage(it) }
+                        )
+
                         ToggleSettingRow(
-                            title = "静音模式",
-                            subtitle = "关闭按键触感振动",
+                            title = strings.silentModeTitle,
+                            subtitle = strings.silentModeSubtitle,
                             checked = !isHapticEnabled,
                             onCheckedChange = { viewModel.setHapticEnabled(!it) }
                         )
 
                         ToggleSettingRow(
-                            title = "深色模式",
-                            subtitle = "黑色与白色主题切换",
+                            title = strings.darkModeTitle,
+                            subtitle = strings.darkModeSubtitle,
                             checked = isDarkMode,
                             onCheckedChange = { viewModel.toggleDarkMode() }
                         )
 
                         ToggleSettingRow(
-                            title = "文本页内嵌触控板",
-                            subtitle = "文本输入页下方显示触控板（输入法弹出时自动折叠）",
+                            title = strings.inlineTrackpadTitle,
+                            subtitle = strings.inlineTrackpadSubtitle,
                             checked = showInlineTrackpadInText,
                             onCheckedChange = { viewModel.setShowInlineTrackpadInText(it) }
+                        )
+
+                        SectionDivider()
+
+                        ToggleSettingRow(
+                            title = strings.naturalScrollingTitle,
+                            subtitle = strings.naturalScrollingSubtitle,
+                            checked = isNaturalScrolling,
+                            onCheckedChange = { viewModel.setNaturalScrolling(it) }
                         )
 
                         SectionDivider()
@@ -232,7 +259,7 @@ fun UnifiedConnectionDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text("完成")
+                Text(strings.done)
             }
         }
     )
@@ -248,9 +275,11 @@ private fun UsbConnectionTab(
     isTlsEnabled: Boolean,
     connError: String?,
     latencyMs: Long?,
+    resolvedLanguage: ResolvedLanguage,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit
 ) {
+    val strings = LocalAppStrings.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         val statusDisplay = ConnectionStatusFormatter.formatUsbDialogStatus(
             isUsbConnected = isUsbConnected,
@@ -259,7 +288,8 @@ private fun UsbConnectionTab(
             isNetReconnecting = isNetReconnecting,
             connError = connError,
             latencyMs = latencyMs,
-            isUsbConnecting = isUsbConnecting
+            isUsbConnecting = isUsbConnecting,
+            language = resolvedLanguage
         )
         Text(
             text = statusDisplay.text,
@@ -267,11 +297,7 @@ private fun UsbConnectionTab(
             color = statusToneColor(statusDisplay.tone)
         )
         Text(
-            text = if (isTlsEnabled) {
-                "当前协议: TLS 加密 (WSS) · 需与电脑端一致（可在“局域网”页切换）"
-            } else {
-                "当前协议: 明文 (WS) · 需与电脑端一致（可在“局域网”页开启）"
-            },
+            text = if (isTlsEnabled) strings.usbProtocolTls else strings.usbProtocolPlaintext,
             fontSize = 11.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -301,6 +327,7 @@ private fun LanConnectionTab(
     isNetReconnecting: Boolean,
     connError: String?,
     latencyMs: Long?,
+    resolvedLanguage: ResolvedLanguage,
     certMismatchHost: String?,
     savedCertFingerprint: String?,
     pendingCertFingerprint: String?,
@@ -308,12 +335,13 @@ private fun LanConnectionTab(
     onConnect: () -> Unit,
     onDisconnect: () -> Unit
 ) {
+    val strings = LocalAppStrings.current
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         OutlinedTextField(
             value = ip,
             onValueChange = onIpChange,
-            label = { Text("电脑 IP") },
-            placeholder = { Text("请输入电脑 IP 地址") },
+            label = { Text(strings.lanIpLabel) },
+            placeholder = { Text(strings.lanIpPlaceholder) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
@@ -321,8 +349,8 @@ private fun LanConnectionTab(
         OutlinedTextField(
             value = token,
             onValueChange = onTokenChange,
-            label = { Text("配对密钥") },
-            placeholder = { Text("请输入配对密钥") },
+            label = { Text(strings.lanTokenLabel) },
+            placeholder = { Text(strings.lanTokenPlaceholder) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
@@ -333,9 +361,9 @@ private fun LanConnectionTab(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("TLS 传输加密 (WSS)", fontSize = 14.sp)
+                Text(strings.lanTlsTitle, fontSize = 14.sp)
                 Text(
-                    if (isTlsEnabled) "严格端到端加密 (电脑端也需开启 TLS)" else "明文传输模式 (需电脑端同步关闭 TLS)",
+                    if (isTlsEnabled) strings.lanTlsSubtitleOn else strings.lanTlsSubtitleOff,
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -353,7 +381,8 @@ private fun LanConnectionTab(
             isNetReconnecting = isNetReconnecting,
             connError = connError,
             latencyMs = latencyMs,
-            isLanConnecting = isLanConnecting
+            isLanConnecting = isLanConnecting,
+            language = resolvedLanguage
         )
         Text(
             text = statusDisplay.text,
@@ -371,13 +400,16 @@ private fun LanConnectionTab(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
-                        text = "检测到 $certMismatchHost 证书指纹变更",
+                        text = strings.certMismatchTitle(certMismatchHost),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onErrorContainer
                     )
                     Text(
-                        text = "已保存: ${NetworkClient.formatShortFingerprint(savedCertFingerprint)}\n新证书: ${NetworkClient.formatShortFingerprint(pendingCertFingerprint)}",
+                        text = strings.certMismatchDetails(
+                            NetworkClient.formatShortFingerprint(savedCertFingerprint),
+                            NetworkClient.formatShortFingerprint(pendingCertFingerprint)
+                        ),
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onErrorContainer
                     )
@@ -385,7 +417,7 @@ private fun LanConnectionTab(
                         onClick = onTrustNewCert,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("信任新证书并重连")
+                        Text(strings.certTrustAndReconnect)
                     }
                 }
             }
@@ -411,6 +443,7 @@ private fun NetworkConnectButton(
     onConnect: () -> Unit,
     onDisconnect: () -> Unit
 ) {
+    val strings = LocalAppStrings.current
     val isAuthenticating = isConnected && !isAuthenticated
     val isBusyOrActive = isConnected || isConnecting || isReconnecting
     Button(
@@ -427,11 +460,11 @@ private fun NetworkConnectButton(
         }
         Text(
             when {
-                isConnecting -> "正在连接..."
-                isAuthenticating -> "正在验证密钥..."
-                isConnected -> "断开"
-                isReconnecting -> "停止重连"
-                else -> "连接"
+                isConnecting -> strings.btnConnecting
+                isAuthenticating -> strings.btnVerifyingKey
+                isConnected -> strings.btnDisconnect
+                isReconnecting -> strings.btnStopReconnect
+                else -> strings.btnConnect
             }
         )
     }
@@ -457,9 +490,10 @@ private fun BluetoothConnectionTab(
     onConnectDevice: (BluetoothDevice) -> Unit,
     onDisconnect: () -> Unit
 ) {
+    val strings = LocalAppStrings.current
     var pairedExpanded by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(hasBtPermission, isBluetoothEnabled) {
+    LaunchedEffect(hasBtPermission) {
         onRefreshBluetoothState()
     }
 
@@ -479,12 +513,12 @@ private fun BluetoothConnectionTab(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                Text("系统蓝牙", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text(strings.btSystemTitle, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Text(
                     text = when {
-                        !hasBtPermission -> "未授予蓝牙权限 · 点击开关或下方按钮授权"
-                        isBluetoothEnabled -> "已开启 · 已配对 ${bondedDevices.size} 台设备"
-                        else -> "已关闭 · 请开启系统蓝牙"
+                        !hasBtPermission -> strings.btSystemNoPermission
+                        isBluetoothEnabled -> strings.btSystemOnCount(bondedDevices.size)
+                        else -> strings.btSystemOff
                     },
                     fontSize = 11.sp,
                     color = if (hasBtPermission && !isBluetoothEnabled) {
@@ -500,7 +534,7 @@ private fun BluetoothConnectionTab(
             ) {
                 Icon(
                     imageVector = Icons.Default.Refresh,
-                    contentDescription = "刷新蓝牙状态",
+                    contentDescription = strings.btRefreshContentDesc,
                     modifier = Modifier.size(18.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -523,18 +557,18 @@ private fun BluetoothConnectionTab(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
             ) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("需要蓝牙连接权限以与电脑进行通信", fontSize = 12.sp)
+                    Text(strings.btPermissionCardBody, fontSize = 12.sp)
                     Button(
                         onClick = onRequestBtPermission,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("开启蓝牙权限")
+                        Text(strings.btGrantPermissionBtn)
                     }
                 }
             }
         } else if (!isBluetoothEnabled) {
             Text(
-                text = "手机系统蓝牙已关闭，可使用上方开关开启并自动刷新状态",
+                text = strings.btDisabledHint,
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.error
             )
@@ -542,7 +576,7 @@ private fun BluetoothConnectionTab(
             if (isBtConnected) {
                 val latStr = if (btLatency != null) " (${btLatency}ms)" else ""
                 Text(
-                    text = "状态: 已连接至 ${btConnectedName ?: "电脑"}$latStr",
+                    text = strings.btConnectedToLabel(btConnectedName ?: strings.statusFallbackPcName, latStr),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary
@@ -552,7 +586,7 @@ private fun BluetoothConnectionTab(
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                 ) {
-                    Text("断开连接")
+                    Text(strings.btDisconnectBtn)
                 }
             } else if (isBtConnecting) {
                 Row(
@@ -561,7 +595,7 @@ private fun BluetoothConnectionTab(
                 ) {
                     CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                     Text(
-                        text = btStatusMsg ?: "正在连接...",
+                        text = btStatusMsg ?: strings.btConnectingFallback,
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.primary
                     )
@@ -570,7 +604,7 @@ private fun BluetoothConnectionTab(
 
             if (favoriteDevices.isNotEmpty()) {
                 Text(
-                    text = "常用设备",
+                    text = strings.btFavoriteDevicesTitle,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -589,21 +623,21 @@ private fun BluetoothConnectionTab(
                 }
             } else if (bondedDevices.isNotEmpty() && !isBtConnected) {
                 Text(
-                    text = "提示：在下方“已配对设备”中点击星标 ☆，可选择常用设备置顶显示",
+                    text = strings.btFavoriteTip,
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
             CollapsibleSection(
-                title = "已配对设备 (${bondedDevices.size})",
-                summary = if (bondedDevices.isEmpty()) "暂无已配对设备" else "展开以连接或勾选 ☆ 常用设备",
+                title = strings.btPairedDevicesTitle(bondedDevices.size),
+                summary = if (bondedDevices.isEmpty()) strings.btPairedEmptySummary else strings.btPairedNonEmptySummary,
                 expanded = pairedExpanded,
                 onToggle = { pairedExpanded = !pairedExpanded }
             ) {
                 if (bondedDevices.isEmpty()) {
                     Text(
-                        text = "暂无已配对设备。\n请先在手机系统设置中与电脑完成蓝牙配对，再点上方刷新按钮。",
+                        text = strings.btPairedEmptyBody,
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -636,6 +670,7 @@ private fun BluetoothDeviceRow(
     onToggleFavorite: () -> Unit,
     onConnect: () -> Unit
 ) {
+    val strings = LocalAppStrings.current
     val devName = device.name ?: device.address
     val isComputer = device.bluetoothClass?.majorDeviceClass == BluetoothClass.Device.Major.COMPUTER
     Row(
@@ -653,7 +688,7 @@ private fun BluetoothDeviceRow(
         ) {
             Icon(
                 imageVector = if (isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
-                contentDescription = if (isFavorite) "取消常用设备" else "设为常用设备",
+                contentDescription = if (isFavorite) strings.btStarRemoveDesc else strings.btStarAddDesc,
                 modifier = Modifier.size(18.dp),
                 tint = if (isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -668,7 +703,7 @@ private fun BluetoothDeviceRow(
                 if (isLastUsed) {
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "(上次连接)",
+                        text = strings.btLastUsedBadge,
                         fontSize = 10.sp,
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Bold
@@ -676,7 +711,7 @@ private fun BluetoothDeviceRow(
                 }
             }
             Text(
-                text = if (isComputer) "电脑设备 (${device.address})" else device.address,
+                text = if (isComputer) strings.btComputerDevice(device.address) else device.address,
                 fontSize = 10.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -687,7 +722,7 @@ private fun BluetoothDeviceRow(
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
             modifier = Modifier.height(32.dp)
         ) {
-            Text(if (isConnecting) "连接中" else "连接", fontSize = 12.sp)
+            Text(if (isConnecting) strings.btRowConnecting else strings.btRowConnect, fontSize = 12.sp)
         }
     }
 }
@@ -700,6 +735,7 @@ private fun CollapsibleSection(
     onToggle: () -> Unit,
     content: @Composable () -> Unit
 ) {
+    val strings = LocalAppStrings.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
             modifier = Modifier
@@ -722,12 +758,87 @@ private fun CollapsibleSection(
             }
             Icon(
                 imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                contentDescription = if (expanded) "收起" else "展开",
+                contentDescription = if (expanded) strings.collapseDesc else strings.expandDesc,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
         AnimatedVisibility(visible = expanded) {
             content()
+        }
+    }
+}
+
+@Composable
+private fun LanguageSettingRow(
+    selectedLanguage: AppLanguage,
+    onSelectLanguage: (AppLanguage) -> Unit
+) {
+    val strings = LocalAppStrings.current
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(strings.languageSettingTitle, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            LanguageOptionChip(
+                label = strings.languageOptionSystem,
+                selected = selectedLanguage == AppLanguage.SYSTEM,
+                modifier = Modifier.weight(1.45f),
+                onClick = { onSelectLanguage(AppLanguage.SYSTEM) }
+            )
+            LanguageOptionChip(
+                label = strings.languageOptionZh,
+                selected = selectedLanguage == AppLanguage.ZH,
+                modifier = Modifier.weight(0.95f),
+                onClick = { onSelectLanguage(AppLanguage.ZH) }
+            )
+            LanguageOptionChip(
+                label = strings.languageOptionEn,
+                selected = selectedLanguage == AppLanguage.EN,
+                modifier = Modifier.weight(0.85f),
+                onClick = { onSelectLanguage(AppLanguage.EN) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun LanguageOptionChip(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = modifier
+            .height(34.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(8.dp),
+        color = if (selected) {
+            MaterialTheme.colorScheme.primary
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+        }
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 6.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = label,
+                fontSize = 11.sp,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                color = if (selected) {
+                    MaterialTheme.colorScheme.onPrimary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                maxLines = 1,
+                softWrap = false
+            )
         }
     }
 }
@@ -771,10 +882,11 @@ private fun CustomSnippetsSection(
     onAddSnippet: (String) -> Unit,
     onDeleteSnippet: (Int) -> Unit
 ) {
+    val strings = LocalAppStrings.current
     var newSnippetText by rememberSaveable { mutableStateOf("") }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("常用短语", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        Text(strings.snippetsTitle, fontSize = 14.sp, fontWeight = FontWeight.Medium)
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -784,7 +896,7 @@ private fun CustomSnippetsSection(
             OutlinedTextField(
                 value = newSnippetText,
                 onValueChange = { newSnippetText = it },
-                placeholder = { Text("输入新短语...") },
+                placeholder = { Text(strings.snippetsPlaceholder) },
                 singleLine = true,
                 modifier = Modifier.weight(1f)
             )
@@ -797,7 +909,7 @@ private fun CustomSnippetsSection(
                 },
                 enabled = newSnippetText.isNotBlank()
             ) {
-                Text("添加")
+                Text(strings.snippetsAddBtn)
             }
         }
 
@@ -818,7 +930,7 @@ private fun CustomSnippetsSection(
                     ) {
                         Icon(
                             Icons.Default.Close,
-                            contentDescription = "删除",
+                            contentDescription = strings.snippetsDeleteDesc,
                             modifier = Modifier.size(16.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )

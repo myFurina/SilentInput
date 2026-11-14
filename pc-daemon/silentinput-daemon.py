@@ -31,11 +31,17 @@ import silentinput_config
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 MAX_WS_FRAME_SIZE = 1024 * 1024  # 1 MiB
 MAX_WS_HEADERS = 64
+MAX_WS_CONNECTIONS = 32
+WS_IDLE_TIMEOUT_SECONDS = 30.0
+BT_IDLE_TIMEOUT_SECONDS = 30.0
 AUTH_MAX_FAILURES = 5
 AUTH_LOCKOUT_SECONDS = 60.0
+AUTH_FAILURE_TTL_SECONDS = 600.0
+AUTH_FAILURE_MAX_ENTRIES = 1024
 
-# Rate-limiting state: peer_ip -> (consecutive_failures, locked_until_monotonic)
-_auth_failures: dict[str, tuple[int, float]] = {}
+# Rate-limiting state: peer_ip -> (consecutive_failures, locked_until_monotonic, last_updated_monotonic)
+_auth_failures: dict[str, tuple[int, float, float]] = {}
+_active_ws_connections = 0
 _paste_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
 
 def _get_paste_lock() -> asyncio.Lock:
@@ -46,33 +52,66 @@ def _get_paste_lock() -> asyncio.Lock:
         _paste_locks[loop] = lock
     return lock
 
+def _prune_auth_failures(now: float | None = None):
+    if not _auth_failures:
+        return
+    if now is None:
+        now = time.monotonic()
+    expired = [
+        ip for ip, (_count, locked_until, last_updated) in _auth_failures.items()
+        if (locked_until > 0 and now >= locked_until)
+        or (locked_until <= 0 and (now - last_updated) >= AUTH_FAILURE_TTL_SECONDS)
+    ]
+    for ip in expired:
+        _auth_failures.pop(ip, None)
+
 def _is_auth_locked(peer_ip: str) -> bool:
     if not peer_ip:
         return False
+    now = time.monotonic()
+    _prune_auth_failures(now)
     entry = _auth_failures.get(peer_ip)
     if not entry:
         return False
-    _, locked_until = entry
-    if locked_until > 0:
-        if time.monotonic() < locked_until:
-            return True
-        _auth_failures.pop(peer_ip, None)
-    return False
+    _, locked_until, _ = entry
+    return locked_until > 0 and now < locked_until
 
 def _record_auth_failure(peer_ip: str) -> bool:
     if not peer_ip:
         return False
-    count, _ = _auth_failures.get(peer_ip, (0, 0.0))
-    count += 1
+    now = time.monotonic()
+    _prune_auth_failures(now)
+    entry = _auth_failures.get(peer_ip)
+    if entry is None and len(_auth_failures) >= AUTH_FAILURE_MAX_ENTRIES:
+        while len(_auth_failures) >= AUTH_FAILURE_MAX_ENTRIES:
+            oldest_ip = min(_auth_failures, key=lambda ip: _auth_failures[ip][2])
+            _auth_failures.pop(oldest_ip, None)
+    count = (entry[0] if entry else 0) + 1
     if count >= AUTH_MAX_FAILURES:
-        _auth_failures[peer_ip] = (count, time.monotonic() + AUTH_LOCKOUT_SECONDS)
+        _auth_failures[peer_ip] = (count, now + AUTH_LOCKOUT_SECONDS, now)
         return True
-    _auth_failures[peer_ip] = (count, 0.0)
+    _auth_failures[peer_ip] = (count, 0.0, now)
     return False
 
 def _clear_auth_failures(peer_ip: str):
     if peer_ip:
         _auth_failures.pop(peer_ip, None)
+
+def _enable_tcp_keepalive(writer):
+    """Enable OS-level TCP keepalive on accepted sockets when supported."""
+    try:
+        sock = writer.get_extra_info("socket")
+        if sock is None:
+            return
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 15)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+        if hasattr(socket, "TCP_KEEPCNT"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+    except Exception:
+        pass
 
 def _safe_round_int(value) -> int:
     if value is None or isinstance(value, bool):
@@ -354,6 +393,12 @@ async def emit_key_combination(combo_str: str):
         if mod in wtype_mods:
             wtype_cmd.extend(["-M", wtype_mods[mod]])
     target_key = parts[-1]
+    is_single_alnum = len(target_key) == 1 and target_key.isascii() and target_key.isalnum()
+    if target_key.startswith("-") or (
+        target_key not in wtype_key_map and target_key not in KEY_MAP and not is_single_alnum
+    ):
+        print(f"[SilentInput] Warning: ignoring invalid fallback key '{combo_str}'.", file=sys.stderr)
+        return
     wtype_cmd.extend(["-k", wtype_key_map.get(target_key, target_key)])
 
     fallback_cmds = [wtype_cmd]
@@ -759,13 +804,12 @@ def _release_held_mouse_buttons(conn_token: object | None = None):
         _emit_uinput_events(events)
 
 async def handle_client(reader, writer):
-    config = await asyncio.to_thread(silentinput_config.load_config)
+    global _active_ws_connections
     peer = writer.get_extra_info("peername")
     peer_ip = peer[0] if peer else ""
 
-    # 1. Custom Access Control Check (Whitelist / Blacklist)
-    if not silentinput_config.is_ip_allowed(peer_ip, config):
-        print(f"[SilentInput] Access REJECTED for {peer}: blocked by custom IP policy.")
+    if _active_ws_connections >= MAX_WS_CONNECTIONS:
+        print(f"[SilentInput] Access REJECTED for {peer}: too many active connections.")
         try:
             writer.close()
             await writer.wait_closed()
@@ -773,91 +817,98 @@ async def handle_client(reader, writer):
             pass
         return
 
-    is_localhost = peer_ip in ("127.0.0.1", "::1", "localhost")
-
-    if not is_localhost and _is_auth_locked(peer_ip):
-        print(f"[SilentInput] Access REJECTED for {peer}: temporarily rate-limited.")
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
-        return
-
-    # 2. Determine initial auth state
-    if is_localhost and config.get("allow_usb_unauthenticated", True):
-        authenticated = True
-        print(f"[SilentInput] New connection from {peer} (Local/USB: Auto-authenticated)")
-    else:
-        authenticated = False
-        print(f"[SilentInput] New connection from {peer} (Wireless: Requires auth token)")
-
-    try:
-        first_line = await asyncio.wait_for(reader.readline(), timeout=10.0)
-    except Exception:
-        first_line = b""
-
-    if not first_line:
-        writer.close()
-        return
-
-    first_str = first_line.decode("utf-8", errors="ignore")
-    if not first_str.startswith("GET "):
-        # Reject non-WebSocket / HTTP POST / Raw TCP requests
-        try:
-            writer.write(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
-            await writer.drain()
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
-        return
-
-    ok = await ws_handshake(reader, writer, first_str)
-    if not ok:
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
-        return
-
+    _active_ws_connections += 1
     conn_token = object()
-    auth_deadline = time.monotonic() + 15.0
-    while True:
-        try:
-            if not authenticated:
-                remaining = auth_deadline - time.monotonic()
-                if remaining <= 0:
-                    print(f"[SilentInput] Unauthenticated handshake/auth timeout for {peer}")
-                    break
-                try:
-                    msg_str = await asyncio.wait_for(ws_recv_frame(reader, writer), timeout=remaining)
-                except asyncio.TimeoutError:
-                    print(f"[SilentInput] Unauthenticated handshake/auth timeout for {peer}")
-                    break
-            else:
-                msg_str = await ws_recv_frame(reader, writer)
-            if msg_str is None:
-                break
-            if not msg_str:
-                continue
-            authenticated, should_close = await process_message(
-                msg_str, writer, True, authenticated, config, peer_ip=peer_ip, conn_token=conn_token
-            )
-            if should_close:
-                break
-        except Exception as e:
-            print(f"[SilentInput] WS stream error: {e}")
-            break
-
-    _release_held_mouse_buttons(conn_token)
-    print(f"[SilentInput] Connection closed for {peer}")
+    handshake_started = False
     try:
-        writer.close()
-        await writer.wait_closed()
-    except Exception:
-        pass
+        _enable_tcp_keepalive(writer)
+        config = await asyncio.to_thread(silentinput_config.load_config)
+
+        # 1. Custom Access Control Check (Whitelist / Blacklist)
+        if not silentinput_config.is_ip_allowed(peer_ip, config):
+            print(f"[SilentInput] Access REJECTED for {peer}: blocked by custom IP policy.")
+            return
+
+        is_localhost = peer_ip in ("127.0.0.1", "::1", "localhost")
+
+        if not is_localhost and _is_auth_locked(peer_ip):
+            print(f"[SilentInput] Access REJECTED for {peer}: temporarily rate-limited.")
+            return
+
+        # 2. Determine initial auth state
+        if is_localhost and config.get("allow_usb_unauthenticated", True):
+            authenticated = True
+            print(f"[SilentInput] New connection from {peer} (Local/USB: Auto-authenticated)")
+        else:
+            authenticated = False
+            print(f"[SilentInput] New connection from {peer} (Wireless: Requires auth token)")
+
+        try:
+            first_line = await asyncio.wait_for(reader.readline(), timeout=10.0)
+        except Exception:
+            first_line = b""
+
+        if not first_line:
+            return
+
+        first_str = first_line.decode("utf-8", errors="ignore")
+        if not first_str.startswith("GET "):
+            # Reject non-WebSocket / HTTP POST / Raw TCP requests
+            try:
+                writer.write(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                await writer.drain()
+            except Exception:
+                pass
+            return
+
+        ok = await ws_handshake(reader, writer, first_str)
+        if not ok:
+            return
+
+        handshake_started = True
+        auth_deadline = time.monotonic() + 15.0
+        while True:
+            try:
+                if not authenticated:
+                    remaining = auth_deadline - time.monotonic()
+                    if remaining <= 0:
+                        print(f"[SilentInput] Unauthenticated handshake/auth timeout for {peer}")
+                        break
+                    try:
+                        msg_str = await asyncio.wait_for(ws_recv_frame(reader, writer), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        print(f"[SilentInput] Unauthenticated handshake/auth timeout for {peer}")
+                        break
+                else:
+                    try:
+                        msg_str = await asyncio.wait_for(
+                            ws_recv_frame(reader, writer), timeout=WS_IDLE_TIMEOUT_SECONDS
+                        )
+                    except asyncio.TimeoutError:
+                        print(f"[SilentInput] Authenticated WS idle timeout for {peer}")
+                        break
+                if msg_str is None:
+                    break
+                if not msg_str:
+                    continue
+                authenticated, should_close = await process_message(
+                    msg_str, writer, True, authenticated, config, peer_ip=peer_ip, conn_token=conn_token
+                )
+                if should_close:
+                    break
+            except Exception as e:
+                print(f"[SilentInput] WS stream error: {e}")
+                break
+    finally:
+        _active_ws_connections = max(0, _active_ws_connections - 1)
+        _release_held_mouse_buttons(conn_token)
+        if handshake_started:
+            print(f"[SilentInput] Connection closed for {peer}")
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
 
 async def maintain_adb_reverse(port: int):
     """Periodically ensure adb reverse tcp:PORT tcp:PORT is active when phone is connected."""
@@ -906,41 +957,49 @@ def _is_bt_address_paired(mac_addr: str) -> bool:
     return False
 
 async def handle_bt_client(reader, writer, peer_name: str):
-    config = await asyncio.to_thread(silentinput_config.load_config)
-    print(f"[SilentInput] Bluetooth client connected: {peer_name}")
     conn_token = object()
-    # Bluetooth connections are authenticated via BlueZ OS-level device pairing check
-    authenticated = True
-
-    while True:
-        try:
-            line = await reader.readline()
-            if not line:
-                break
-            msg_str = line.decode("utf-8", errors="ignore").strip()
-            if msg_str:
-                authenticated, should_close = await process_message(
-                    msg_str,
-                    writer,
-                    is_websocket=False,
-                    is_authenticated=authenticated,
-                    config=config,
-                    peer_ip=peer_name,
-                    conn_token=conn_token,
-                )
-                if should_close:
-                    break
-        except Exception as e:
-            print(f"[SilentInput] Bluetooth stream error: {e}")
-            break
-
-    _release_held_mouse_buttons(conn_token)
-    print(f"[SilentInput] Bluetooth connection closed for {peer_name}")
+    connected_logged = False
     try:
-        writer.close()
-        await writer.wait_closed()
-    except Exception:
-        pass
+        config = await asyncio.to_thread(silentinput_config.load_config)
+        print(f"[SilentInput] Bluetooth client connected: {peer_name}")
+        connected_logged = True
+        # Bluetooth connections are authenticated via BlueZ OS-level device pairing check
+        authenticated = True
+
+        while True:
+            try:
+                try:
+                    line = await asyncio.wait_for(reader.readline(), timeout=BT_IDLE_TIMEOUT_SECONDS)
+                except asyncio.TimeoutError:
+                    print(f"[SilentInput] Bluetooth idle timeout for {peer_name}")
+                    break
+                if not line:
+                    break
+                msg_str = line.decode("utf-8", errors="ignore").strip()
+                if msg_str:
+                    authenticated, should_close = await process_message(
+                        msg_str,
+                        writer,
+                        is_websocket=False,
+                        is_authenticated=authenticated,
+                        config=config,
+                        peer_ip=peer_name,
+                        conn_token=conn_token,
+                    )
+                    if should_close:
+                        break
+            except Exception as e:
+                print(f"[SilentInput] Bluetooth stream error: {e}")
+                break
+    finally:
+        _release_held_mouse_buttons(conn_token)
+        if connected_logged:
+            print(f"[SilentInput] Bluetooth connection closed for {peer_name}")
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
 
 _bt_dbus_refs = []
 

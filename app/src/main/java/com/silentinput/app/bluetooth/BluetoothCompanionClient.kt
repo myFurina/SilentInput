@@ -13,6 +13,8 @@ import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.silentinput.app.model.AppLanguage
+import com.silentinput.app.model.AppStrings
 import com.silentinput.app.model.ProtocolPayloads
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -26,7 +28,10 @@ import java.io.OutputStream
 import java.util.UUID
 
 @SuppressLint("MissingPermission")
-class BluetoothCompanionClient(private val context: Context) {
+class BluetoothCompanionClient(
+    private val context: Context,
+    initialLanguage: AppLanguage = AppLanguage.ZH
+) {
 
     companion object {
         private const val TAG = "BtCompanionClient"
@@ -51,7 +56,32 @@ class BluetoothCompanionClient(private val context: Context) {
     private val _latencyMs = MutableStateFlow<Long?>(null)
     val latencyMs = _latencyMs.asStateFlow()
 
-    private val _statusMessage = MutableStateFlow<String?>("未连接")
+    @Volatile
+    var appLanguage: AppLanguage = initialLanguage
+
+    private var lastStatusFormatter: ((AppStrings) -> String) = { it.btStatusDisconnected }
+
+    private fun currentStrings(): AppStrings = AppStrings.forLanguage(appLanguage)
+
+    private fun setStatusMessage(formatter: (AppStrings) -> String) {
+        lastStatusFormatter = formatter
+        _statusMessage.value = formatter(currentStrings())
+    }
+
+    fun updateLanguage(language: AppLanguage) {
+        synchronized(stateLock) {
+            appLanguage = language
+            _statusMessage.value = lastStatusFormatter(currentStrings())
+        }
+    }
+
+    fun refreshLanguageIfSystem() {
+        if (appLanguage == AppLanguage.SYSTEM) {
+            updateLanguage(AppLanguage.SYSTEM)
+        }
+    }
+
+    private val _statusMessage = MutableStateFlow<String?>(AppStrings.forLanguage(initialLanguage).btStatusDisconnected)
     val statusMessage = _statusMessage.asStateFlow()
 
     private val _isBluetoothEnabled = MutableStateFlow(bluetoothAdapter?.isEnabled == true)
@@ -179,7 +209,8 @@ class BluetoothCompanionClient(private val context: Context) {
         synchronized(stateLock) {
             disconnectLocked(resetStatus = false)
             _isConnecting.value = true
-            _statusMessage.value = "正在连接 ${device.name ?: device.address}..."
+            val devLabel = device.name ?: device.address
+            setStatusMessage { it.btStatusConnecting(devLabel) }
 
             connectJob = clientScope.launch {
                 var activeSocket: BluetoothSocket? = null
@@ -232,9 +263,10 @@ class BluetoothCompanionClient(private val context: Context) {
 
                         _isConnected.value = true
                         _isConnecting.value = false
-                        _connectedDeviceName.value = device.name ?: device.address
+                        val devLabel = device.name ?: device.address
+                        _connectedDeviceName.value = devLabel
                         _connectedDeviceAddress.value = device.address
-                        _statusMessage.value = "已连接到 ${device.name ?: device.address}"
+                        setStatusMessage { it.btStatusConnected(devLabel) }
                         Log.d(TAG, "Bluetooth RFCOMM connected successfully to ${device.name}")
 
                         startWriterLocked(signal, out)
@@ -246,7 +278,7 @@ class BluetoothCompanionClient(private val context: Context) {
                         _isConnecting.value = false
                         _connectedDeviceName.value = null
                         _connectedDeviceAddress.value = null
-                        _statusMessage.value = "连接失败，请确认电脑端已启动服务并处于蓝牙已配对状态"
+                        setStatusMessage { it.btStatusConnectFailed }
                     }
                 }
             }
@@ -345,7 +377,10 @@ class BluetoothCompanionClient(private val context: Context) {
                 "auth_result" -> {
                     val status = json.optString("status")
                     if (status != "ok") {
-                        _statusMessage.value = "认证失败: ${json.optString("message", "密钥错误")}"
+                        val serverMsg = json.optString("message", "").takeIf { it.isNotBlank() }
+                        synchronized(stateLock) {
+                            setStatusMessage { it.btStatusAuthFailed(serverMsg) }
+                        }
                     }
                 }
             }
@@ -405,7 +440,7 @@ class BluetoothCompanionClient(private val context: Context) {
             _latencyMs.value = null
             pingPendingTimestamp = null
             if (wasConnectedOrConnecting) {
-                _statusMessage.value = "连接已断开"
+                setStatusMessage { it.btStatusConnectionLost }
             }
             pingJob?.cancel()
             pingJob = null
@@ -427,7 +462,7 @@ class BluetoothCompanionClient(private val context: Context) {
         _latencyMs.value = null
         pingPendingTimestamp = null
         if (resetStatus) {
-            _statusMessage.value = "未连接"
+            setStatusMessage { it.btStatusDisconnected }
         }
         pingJob?.cancel()
         pingJob = null
