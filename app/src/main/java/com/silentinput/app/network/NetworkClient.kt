@@ -131,6 +131,9 @@ class NetworkClient(
     private val _isEncrypted = MutableStateFlow(false)
     val isEncrypted = _isEncrypted.asStateFlow()
 
+    private val _supportsUnicodeDirectTyping = MutableStateFlow(true)
+    val supportsUnicodeDirectTyping = _supportsUnicodeDirectTyping.asStateFlow()
+
     private val _certMismatchHost = MutableStateFlow<String?>(null)
     val certMismatchHost = _certMismatchHost.asStateFlow()
 
@@ -307,6 +310,7 @@ class NetworkClient(
                     _pendingCertFingerprint.value = null
                     _savedCertFingerprint.value = null
                     _isEncrypted.value = useTls
+                    _supportsUnicodeDirectTyping.value = true
 
                     if (isUsb) {
                         _isAuthenticated.value = true
@@ -321,6 +325,8 @@ class NetworkClient(
                 // On 127.0.0.1, also send token if configured so allow_usb_unauthenticated=false still succeeds.
                 if (tokenSnapshot.isNotBlank()) {
                     webSocket.send(ProtocolPayloads.buildAuthJson(tokenSnapshot))
+                } else if (isUsb) {
+                    webSocket.send(ProtocolPayloads.buildGetStatusJson())
                 }
             }
 
@@ -348,6 +354,10 @@ class NetworkClient(
                                 synchronized(stateLock) {
                                     if (this@NetworkClient.webSocket !== webSocket) return
                                     _isAuthenticated.value = true
+                                    if (json.has("unicode_direct_typing")) {
+                                        _supportsUnicodeDirectTyping.value =
+                                            json.optBoolean("unicode_direct_typing", true)
+                                    }
                                     setConnectionError(null)
                                 }
                             } else {
@@ -364,6 +374,15 @@ class NetworkClient(
                                         if (tooManyAttempts) s.netErrTooManyAttempts else s.netErrWrongToken
                                     }
                                     disconnectSocketOnlyLocked()
+                                }
+                            }
+                        }
+                        "status" -> {
+                            synchronized(stateLock) {
+                                if (this@NetworkClient.webSocket !== webSocket) return
+                                if (json.has("unicode_direct_typing")) {
+                                    _supportsUnicodeDirectTyping.value =
+                                        json.optBoolean("unicode_direct_typing", true)
                                 }
                             }
                         }
@@ -448,6 +467,7 @@ class NetworkClient(
         _isAuthenticated.value = false
         _latencyMs.value = null
         _isEncrypted.value = false
+        _supportsUnicodeDirectTyping.value = true
         stopPingLoopLocked()
 
         // Auto reconnect with exponential backoff if app is expected to stay connected
@@ -599,6 +619,7 @@ class NetworkClient(
         _isAuthenticated.value = false
         _latencyMs.value = null
         _isEncrypted.value = false
+        _supportsUnicodeDirectTyping.value = true
     }
 
     fun disconnect() {

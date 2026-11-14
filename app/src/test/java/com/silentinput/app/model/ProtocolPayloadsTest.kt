@@ -15,6 +15,14 @@ class ProtocolPayloadsTest {
     }
 
     @Test
+    fun `buildGetStatusJson builds get_status request`() {
+        assertEquals(
+            """{"type":"get_status"}""",
+            ProtocolPayloads.buildGetStatusJson()
+        )
+    }
+
+    @Test
     fun `buildPingJson formats timestamp`() {
         assertEquals(
             """{"type":"ping","t":123456789}""",
@@ -55,6 +63,12 @@ class ProtocolPayloadsTest {
         assertEquals(
             """{"type":"paste","content":"ls -la","mode":"gui","enter":true}""",
             withEnter
+        )
+
+        val directKeys = ProtocolPayloads.buildPasteJson("pwd", enter = true, mode = "keys")
+        assertEquals(
+            """{"type":"paste","content":"pwd","mode":"keys","enter":true}""",
+            directKeys
         )
     }
 

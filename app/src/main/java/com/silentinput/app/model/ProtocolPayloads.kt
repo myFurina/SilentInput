@@ -10,6 +10,10 @@ object ProtocolPayloads {
         return """{"type":"auth","token":${quoteJson(token)}}"""
     }
 
+    fun buildGetStatusJson(): String {
+        return """{"type":"get_status"}"""
+    }
+
     fun buildPingJson(timestampMs: Long): String {
         return """{"type":"ping","t":$timestampMs}"""
     }

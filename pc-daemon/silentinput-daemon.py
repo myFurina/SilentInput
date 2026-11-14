@@ -160,8 +160,17 @@ try:
         "alt": ecodes.KEY_LEFTALT, "super": ecodes.KEY_LEFTMETA, "win": ecodes.KEY_LEFTMETA,
         "up": ecodes.KEY_UP, "down": ecodes.KEY_DOWN,
         "left": ecodes.KEY_LEFT, "right": ecodes.KEY_RIGHT,
-        "minus": ecodes.KEY_MINUS, "equal": ecodes.KEY_EQUAL,
-        "slash": ecodes.KEY_SLASH, "backslash": ecodes.KEY_BACKSLASH,
+        "minus": ecodes.KEY_MINUS, "-": ecodes.KEY_MINUS,
+        "equal": ecodes.KEY_EQUAL, "=": ecodes.KEY_EQUAL,
+        "slash": ecodes.KEY_SLASH, "/": ecodes.KEY_SLASH,
+        "backslash": ecodes.KEY_BACKSLASH, "\\": ecodes.KEY_BACKSLASH,
+        "[": ecodes.KEY_LEFTBRACE, "leftbrace": ecodes.KEY_LEFTBRACE, "lbracket": ecodes.KEY_LEFTBRACE,
+        "]": ecodes.KEY_RIGHTBRACE, "rightbrace": ecodes.KEY_RIGHTBRACE, "rbracket": ecodes.KEY_RIGHTBRACE,
+        ";": ecodes.KEY_SEMICOLON, "semicolon": ecodes.KEY_SEMICOLON,
+        "'": ecodes.KEY_APOSTROPHE, "apostrophe": ecodes.KEY_APOSTROPHE, "quote": ecodes.KEY_APOSTROPHE,
+        "`": ecodes.KEY_GRAVE, "grave": ecodes.KEY_GRAVE, "backtick": ecodes.KEY_GRAVE,
+        ",": ecodes.KEY_COMMA, "comma": ecodes.KEY_COMMA,
+        ".": ecodes.KEY_DOT, "dot": ecodes.KEY_DOT, "period": ecodes.KEY_DOT,
         "f1": ecodes.KEY_F1, "f2": ecodes.KEY_F2, "f3": ecodes.KEY_F3, "f4": ecodes.KEY_F4,
         "f5": ecodes.KEY_F5, "f6": ecodes.KEY_F6, "f7": ecodes.KEY_F7, "f8": ecodes.KEY_F8,
         "f9": ecodes.KEY_F9, "f10": ecodes.KEY_F10, "f11": ecodes.KEY_F11, "f12": ecodes.KEY_F12,
@@ -332,31 +341,104 @@ async def copy_to_wayland_clipboard(text: str) -> bool:
         print(f"[SilentInput] Error writing to clipboard: {e}", file=sys.stderr)
         return False
 
+def _has_graphical_session() -> bool:
+    """Detect whether an active Wayland or X11 graphical session is available."""
+    uid = os.getuid()
+    runtime_dir_str = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{uid}"
+    runtime_dir = Path(runtime_dir_str)
+
+    wayland_display = os.environ.get("WAYLAND_DISPLAY", "").strip()
+    if wayland_display:
+        sock_path = Path(wayland_display) if "/" in wayland_display else (runtime_dir / wayland_display)
+        try:
+            if sock_path.is_socket():
+                return True
+        except OSError:
+            pass
+    else:
+        try:
+            for p in runtime_dir.glob("wayland-*"):
+                if not p.name.endswith(".lock") and p.is_socket():
+                    return True
+        except OSError:
+            pass
+
+    x_display = os.environ.get("DISPLAY", "").strip()
+    if x_display:
+        if x_display.startswith(":"):
+            disp_num = x_display[1:].split(".", 1)[0]
+            if disp_num.isdigit():
+                try:
+                    x_sock = Path("/tmp/.X11-unix") / f"X{disp_num}"
+                    if x_sock.is_socket():
+                        return True
+                except OSError:
+                    pass
+        else:
+            return True
+
+    return False
+
+
+async def _emit_uinput_char(ch: str) -> bool:
+    """Emit a single ASCII character from CHAR_MAP via virtual uinput keyboard."""
+    keycode, requires_shift = CHAR_MAP[ch]
+    press = []
+    if requires_shift:
+        press.append((evdev.ecodes.EV_KEY, evdev.ecodes.KEY_LEFTSHIFT, 1))
+    press.append((evdev.ecodes.EV_KEY, keycode, 1))
+    if not _emit_uinput_events(press):
+        return False
+    await asyncio.sleep(0.002)
+    release = [(evdev.ecodes.EV_KEY, keycode, 0)]
+    if requires_shift:
+        release.append((evdev.ecodes.EV_KEY, evdev.ecodes.KEY_LEFTSHIFT, 0))
+    if not _emit_uinput_events(release):
+        return False
+    await asyncio.sleep(0.002)
+    return True
+
+
 async def type_text(text: str) -> bool:
     """
     Directly emit keyboard events for each character using virtual uinput hardware keyboard.
-    Guaranteed to work natively in any Linux terminal (bash, zsh, vim, nano, Ptyxis),
-    GUI app, and password prompt without needing clipboard or paste shortcuts.
+    ASCII characters are typed directly via CHAR_MAP; non-ASCII characters use Ctrl+Shift+U
+    Unicode hex input when a graphical desktop session is available, or are skipped safely
+    in headless TTY environments.
     """
     if not ensure_uinput_device() or evdev is None:
         return False
 
+    graphical: bool | None = None
+    skipped_unicode = 0
+
     for ch in text:
         if ch in CHAR_MAP:
-            keycode, requires_shift = CHAR_MAP[ch]
-            press = []
-            if requires_shift:
-                press.append((evdev.ecodes.EV_KEY, evdev.ecodes.KEY_LEFTSHIFT, 1))
-            press.append((evdev.ecodes.EV_KEY, keycode, 1))
-            if not _emit_uinput_events(press):
+            if not await _emit_uinput_char(ch):
                 return False
-            await asyncio.sleep(0.002)
-            release = [(evdev.ecodes.EV_KEY, keycode, 0)]
-            if requires_shift:
-                release.append((evdev.ecodes.EV_KEY, evdev.ecodes.KEY_LEFTSHIFT, 0))
-            if not _emit_uinput_events(release):
+            continue
+
+        if graphical is None:
+            graphical = _has_graphical_session()
+
+        if not graphical:
+            skipped_unicode += 1
+            continue
+
+        # Emit Ctrl+Shift+U -> hex codepoint -> Enter for Unicode direct typing on Wayland/X11
+        await emit_key_combination("ctrl+shift+u")
+        await asyncio.sleep(0.025)
+        for hex_ch in f"{ord(ch):x}":
+            if not await _emit_uinput_char(hex_ch):
                 return False
-            await asyncio.sleep(0.002)
+        await emit_key_combination("enter")
+        await asyncio.sleep(0.020)
+
+    if skipped_unicode > 0:
+        print(
+            f"[SilentInput] Warning: skipped {skipped_unicode} non-ASCII character(s) in headless mode.",
+            file=sys.stderr,
+        )
     return True
 
 async def emit_key_combination(combo_str: str):
@@ -383,7 +465,17 @@ async def emit_key_combination(combo_str: str):
         "pageup": "Prior", "pagedown": "Next",
         "print": "Print", "printscreen": "Print", "prtsc": "Print", "sysrq": "Print",
         "up": "Up", "down": "Down", "left": "Left", "right": "Right",
-        "minus": "minus", "equal": "equal", "slash": "slash", "backslash": "backslash",
+        "minus": "minus", "-": "minus",
+        "equal": "equal", "=": "equal",
+        "slash": "slash", "/": "slash",
+        "backslash": "backslash", "\\": "backslash",
+        "[": "bracketleft", "leftbrace": "bracketleft", "lbracket": "bracketleft",
+        "]": "bracketright", "rightbrace": "bracketright", "rbracket": "bracketright",
+        ";": "semicolon", "semicolon": "semicolon",
+        "'": "apostrophe", "apostrophe": "apostrophe", "quote": "apostrophe",
+        "`": "grave", "grave": "grave", "backtick": "grave",
+        ",": "comma", "comma": "comma",
+        ".": "period", "dot": "period", "period": "period",
     }
     for i in range(1, 13):
         wtype_key_map[f"f{i}"] = f"F{i}"
@@ -634,14 +726,20 @@ async def process_message(
             "type": "status",
             "version": "1.0.20",
             "authenticated": is_authenticated,
-            "access_control_mode": config.get("access_control_mode", "whitelist")
+            "access_control_mode": config.get("access_control_mode", "whitelist"),
+            "unicode_direct_typing": _has_graphical_session(),
         })
         return is_authenticated, False
 
     # Authentication Handshake (Required for wireless; pre-trusted USB/Bluetooth never downgraded)
     if msg_type == "auth":
         if is_authenticated:
-            await send_response(writer, is_websocket, {"type": "auth_result", "status": "ok", "message": "Authenticated"})
+            await send_response(writer, is_websocket, {
+                "type": "auth_result",
+                "status": "ok",
+                "message": "Authenticated",
+                "unicode_direct_typing": _has_graphical_session(),
+            })
             return True, False
 
         if _is_auth_locked(peer_ip):
@@ -658,7 +756,12 @@ async def process_message(
         if expected and token and hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
             _clear_auth_failures(peer_ip)
             print("[SilentInput] Authentication SUCCESS via auth token")
-            await send_response(writer, is_websocket, {"type": "auth_result", "status": "ok", "message": "Authenticated"})
+            await send_response(writer, is_websocket, {
+                "type": "auth_result",
+                "status": "ok",
+                "message": "Authenticated",
+                "unicode_direct_typing": _has_graphical_session(),
+            })
             return True, False
         else:
             locked_now = _record_auth_failure(peer_ip)
@@ -691,9 +794,10 @@ async def process_message(
         async with _get_paste_lock():
             if mode == "keys" or paste_mode == "keys":
                 print(f"[SilentInput] Direct typing {len(content)} chars via virtual hardware keyboard")
+                ends_with_unicode = bool(content and content[-1] not in CHAR_MAP and _has_graphical_session())
                 await type_text(content)
                 if enter_after:
-                    await asyncio.sleep(0.015)
+                    await asyncio.sleep(0.04 if ends_with_unicode else 0.015)
                     await emit_key_combination("enter")
             else:
                 # Clipboard injection: Completely bypasses Chinese/Pinyin IME!

@@ -798,6 +798,150 @@ class TestDaemonProtocolAsync(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(ok)
                 self.assertEqual(msg_off, "Autostart disabled")
 
+    def test_has_graphical_session_detection(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rt_dir = Path(tmpdir)
+            lock_file = rt_dir / "wayland-0.lock"
+            lock_file.write_text("", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(rt_dir)}, clear=True):
+                self.assertFalse(silentinput_daemon._has_graphical_session())
+
+            # Non-existent local X11 display socket should stay headless
+            with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(rt_dir), "DISPLAY": ":99"}, clear=True):
+                self.assertFalse(silentinput_daemon._has_graphical_session())
+
+            # Real unix socket named wayland-0 triggers graphical session detection
+            sock_path = rt_dir / "wayland-0"
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                srv.bind(str(sock_path))
+                with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(rt_dir)}, clear=True):
+                    self.assertTrue(silentinput_daemon._has_graphical_session())
+                with mock.patch.dict(
+                    os.environ,
+                    {"XDG_RUNTIME_DIR": str(rt_dir), "WAYLAND_DISPLAY": "wayland-0"},
+                    clear=True,
+                ):
+                    self.assertTrue(silentinput_daemon._has_graphical_session())
+            finally:
+                srv.close()
+
+    async def test_type_text_adaptive_unicode_desktop_vs_headless(self):
+        emitted = []
+        combos = []
+
+        async def fake_emit_combo(combo):
+            combos.append(combo)
+
+        def fake_emit_events(events):
+            emitted.append(list(events))
+            return True
+
+        fake_dev = mock.MagicMock()
+        with mock.patch.object(silentinput_daemon, "uinput_device", fake_dev), \
+             mock.patch.object(silentinput_daemon, "ensure_uinput_device", return_value=True), \
+             mock.patch.object(silentinput_daemon, "_emit_uinput_events", side_effect=fake_emit_events), \
+             mock.patch.object(silentinput_daemon, "emit_key_combination", side_effect=fake_emit_combo):
+            # Desktop mode: "A中" -> ASCII 'A', then ctrl+shift+u + hex '4e2d' + enter
+            with mock.patch.object(silentinput_daemon, "_has_graphical_session", return_value=True):
+                ok = await silentinput_daemon.type_text("A中")
+                self.assertTrue(ok)
+            self.assertEqual(combos, ["ctrl+shift+u", "enter"])
+            pressed_codes = [ev[0][1] if ev[0][1] != silentinput_daemon.evdev.ecodes.KEY_LEFTSHIFT else ev[1][1] for ev in emitted[::2]]
+            ec = silentinput_daemon.evdev.ecodes
+            self.assertEqual(
+                pressed_codes,
+                [ec.KEY_A, ec.KEY_4, ec.KEY_E, ec.KEY_2, ec.KEY_D],
+            )
+
+            # Headless mode: "hi中文!" -> skips Chinese without Ctrl+Shift+U, types only 'h', 'i', '!'
+            emitted.clear()
+            combos.clear()
+            with mock.patch.object(silentinput_daemon, "_has_graphical_session", return_value=False):
+                ok = await silentinput_daemon.type_text("hi中文!")
+                self.assertTrue(ok)
+            self.assertEqual(combos, [])
+            headless_codes = [ev[-1][1] for ev in emitted[::2]]
+            self.assertEqual(headless_codes, [ec.KEY_H, ec.KEY_I, ec.KEY_1])
+
+    async def test_process_message_exposes_unicode_direct_typing(self):
+        writer = _FakeWriter()
+        cfg = {"access_control_mode": "whitelist", "whitelist": [], "auth_token": "secret-tok"}
+        with mock.patch.object(silentinput_daemon, "_has_graphical_session", return_value=False):
+            authed, _ = await silentinput_daemon.process_message(
+                json.dumps({"type": "get_status"}), writer, False, False, cfg, "127.0.0.1"
+            )
+            self.assertFalse(authed)
+            status_payload = json.loads(bytes(writer.buf).decode("utf-8").splitlines()[-1])
+            self.assertEqual(status_payload["type"], "status")
+            self.assertFalse(status_payload["unicode_direct_typing"])
+
+            writer.buf.clear()
+            authed, _ = await silentinput_daemon.process_message(
+                json.dumps({"type": "auth", "token": "secret-tok"}), writer, False, False, cfg, "192.168.1.50"
+            )
+            self.assertTrue(authed)
+            auth_payload = json.loads(bytes(writer.buf).decode("utf-8").splitlines()[-1])
+            self.assertEqual(auth_payload["type"], "auth_result")
+            self.assertEqual(auth_payload["status"], "ok")
+            self.assertFalse(auth_payload["unicode_direct_typing"])
+
+        writer.buf.clear()
+        with mock.patch.object(silentinput_daemon, "_has_graphical_session", return_value=True):
+            await silentinput_daemon.process_message(
+                json.dumps({"type": "get_status"}), writer, False, True, cfg, "127.0.0.1"
+            )
+            status_payload = json.loads(bytes(writer.buf).decode("utf-8").splitlines()[-1])
+            self.assertTrue(status_payload["unicode_direct_typing"])
+
+    async def test_landscape_punctuation_key_map_and_wtype_fallback(self):
+        ec = silentinput_daemon.evdev.ecodes
+        expected_map = {
+            "[": ec.KEY_LEFTBRACE,
+            "lbracket": ec.KEY_LEFTBRACE,
+            "]": ec.KEY_RIGHTBRACE,
+            "rbracket": ec.KEY_RIGHTBRACE,
+            ";": ec.KEY_SEMICOLON,
+            "semicolon": ec.KEY_SEMICOLON,
+            "'": ec.KEY_APOSTROPHE,
+            "apostrophe": ec.KEY_APOSTROPHE,
+            "`": ec.KEY_GRAVE,
+            "grave": ec.KEY_GRAVE,
+            ",": ec.KEY_COMMA,
+            ".": ec.KEY_DOT,
+            "-": ec.KEY_MINUS,
+            "=": ec.KEY_EQUAL,
+            "/": ec.KEY_SLASH,
+            "\\": ec.KEY_BACKSLASH,
+        }
+        for name, code in expected_map.items():
+            self.assertEqual(silentinput_daemon.KEY_MAP.get(name), code)
+
+        calls = []
+
+        async def fake_exec(*cmd, **kwargs):
+            calls.append(cmd)
+            return types.SimpleNamespace(wait=mock.AsyncMock(return_value=0))
+
+        with mock.patch.object(silentinput_daemon, "ensure_uinput_device", return_value=False), \
+             mock.patch.object(silentinput_daemon, "HAVE_UINPUT", False), \
+             mock.patch.object(silentinput_daemon.asyncio, "create_subprocess_exec", side_effect=fake_exec):
+            for key_name in ("[", "]", ";", "'", "`", ",", ".", "ctrl+["):
+                await silentinput_daemon.emit_key_combination(key_name)
+        self.assertEqual(
+            calls,
+            [
+                ("wtype", "-k", "bracketleft"),
+                ("wtype", "-k", "bracketright"),
+                ("wtype", "-k", "semicolon"),
+                ("wtype", "-k", "apostrophe"),
+                ("wtype", "-k", "grave"),
+                ("wtype", "-k", "comma"),
+                ("wtype", "-k", "period"),
+                ("wtype", "-M", "ctrl", "-k", "bracketleft"),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

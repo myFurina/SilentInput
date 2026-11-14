@@ -18,6 +18,7 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -45,6 +46,7 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -56,6 +58,7 @@ import com.silentinput.app.ui.theme.pressScale
 fun TextSenderScreen(
     isConnected: Boolean,
     isHapticEnabled: Boolean = false,
+    supportsUnicodeDirectTyping: Boolean = true,
     inputText: String,
     onInputTextChange: (String) -> Unit,
     targetMode: String,
@@ -133,6 +136,22 @@ fun TextSenderScreen(
                     color = MaterialTheme.colorScheme.primary
                 )
 
+                val isDirectMode = targetMode == "keys"
+                val nonAsciiCount = remember(inputText, isDirectMode) {
+                    if (!isDirectMode) {
+                        0
+                    } else {
+                        inputText.count { ch ->
+                            ch != '\n' && ch != '\r' && ch != '\t' && ch.code !in 0x20..0x7E
+                        }
+                    }
+                }
+                val hasDirectHeadlessError =
+                    isDirectMode && !supportsUnicodeDirectTyping && nonAsciiCount > 0
+                val hasDirectLargeUnicodeWarning =
+                    isDirectMode && supportsUnicodeDirectTyping && nonAsciiCount > 60
+                val sendEnabled = inputText.isNotBlank() && isConnected && !hasDirectHeadlessError
+
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = onInputTextChange,
@@ -141,9 +160,34 @@ fun TextSenderScreen(
                         .heightIn(min = 90.dp, max = 150.dp),
                     shape = RoundedCornerShape(12.dp),
                     placeholder = { Text(strings.txtPlaceholder) },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    isError = hasDirectHeadlessError,
+                    supportingText = if (isDirectMode) {
+                        {
+                            val msg = when {
+                                hasDirectHeadlessError -> strings.txtDirectHeadlessUnsupportedError
+                                !supportsUnicodeDirectTyping -> strings.txtDirectHeadlessHint
+                                hasDirectLargeUnicodeWarning -> strings.txtDirectLargeUnicodeWarning(nonAsciiCount)
+                                else -> strings.txtDirectDesktopHint
+                            }
+                            Text(
+                                text = msg,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (hasDirectHeadlessError) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
+                    } else {
+                        null
+                    },
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = if (isDirectMode) KeyboardType.Ascii else KeyboardType.Text,
+                        imeAction = ImeAction.Send
+                    ),
                     keyboardActions = KeyboardActions(onSend = {
-                        if (inputText.isNotBlank() && isConnected) {
+                        if (sendEnabled) {
                             sendText(inputText)
                         }
                     }),
@@ -172,10 +216,15 @@ fun TextSenderScreen(
                 // Target Mode Selector & Options Row
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
                         TargetModeChip(
                             label = strings.txtTargetTerminal,
                             selected = targetMode == "terminal",
@@ -185,6 +234,11 @@ fun TextSenderScreen(
                             label = strings.txtTargetApp,
                             selected = targetMode == "gui",
                             onClick = { onTargetModeChange("gui") }
+                        )
+                        TargetModeChip(
+                            label = strings.txtTargetDirect,
+                            selected = targetMode == "keys",
+                            onClick = { onTargetModeChange("keys") }
                         )
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -225,7 +279,6 @@ fun TextSenderScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val sendInteraction = remember { MutableInteractionSource() }
-                    val sendEnabled = inputText.isNotBlank() && isConnected
                     Button(
                         onClick = { sendText(inputText) },
                         enabled = sendEnabled,

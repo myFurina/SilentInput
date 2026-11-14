@@ -1,8 +1,12 @@
 package com.silentinput.app
 
 import android.Manifest
+import android.app.Activity
 import android.bluetooth.BluetoothAdapter
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -30,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -41,6 +46,7 @@ import com.silentinput.app.model.AppStrings
 import com.silentinput.app.model.ConnectionStatusFormatter
 import com.silentinput.app.model.StatusTone
 import com.silentinput.app.ui.KeyboardScreen
+import com.silentinput.app.ui.LandscapeKeyboardScreen
 import com.silentinput.app.ui.LocalAppStrings
 import com.silentinput.app.ui.LocalResolvedLanguage
 import com.silentinput.app.ui.MoreSettingsScreen
@@ -177,6 +183,7 @@ fun MainAppScaffold(
     val activeServerIp by viewModel.activeServerIp.collectAsState()
     val isCurrentConnected by viewModel.isCurrentModeConnected.collectAsState()
     val isAnyConnected by viewModel.isAnyConnected.collectAsState()
+    val supportsUnicodeDirectTyping by viewModel.supportsUnicodeDirectTyping.collectAsState()
 
     val isBtConnected by viewModel.isBtConnected.collectAsState()
     val isBtConnecting by viewModel.isBtConnecting.collectAsState()
@@ -206,6 +213,20 @@ fun MainAppScaffold(
     var showConfigDialog by rememberSaveable { mutableStateOf(false) }
     var showMoreSettingsPage by rememberSaveable { mutableStateOf(false) }
     var returnToConfigDialogOnBack by rememberSaveable { mutableStateOf(false) }
+    var showLandscapeKeyboard by rememberSaveable { mutableStateOf(false) }
+
+    val context = LocalContext.current
+    val activity = remember(context) { context.findActivity() }
+    DisposableEffect(activity, showLandscapeKeyboard) {
+        activity?.requestedOrientation = if (showLandscapeKeyboard) {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+        onDispose {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
 
     val topBarStatus = ConnectionStatusFormatter.formatTopBarStatus(
         mode = currentMode,
@@ -238,6 +259,15 @@ fun MainAppScaffold(
                 showMoreSettingsPage = false
                 returnToConfigDialogOnBack = false
             }
+        )
+        return
+    }
+
+    if (showLandscapeKeyboard) {
+        LandscapeKeyboardScreen(
+            isHapticEnabled = isHapticEnabled,
+            onSendKey = { viewModel.sendKey(it) },
+            onExit = { showLandscapeKeyboard = false }
         )
         return
     }
@@ -363,7 +393,8 @@ fun MainAppScaffold(
                 when (selectedTab) {
                     0 -> KeyboardScreen(
                         isHapticEnabled = isHapticEnabled,
-                        onSendKey = { viewModel.sendKey(it) }
+                        onSendKey = { viewModel.sendKey(it) },
+                        onOpenLandscapeKeyboard = { showLandscapeKeyboard = true }
                     )
                     1 -> TrackpadScreen(
                         sensitivity = trackpadSensitivity,
@@ -381,6 +412,7 @@ fun MainAppScaffold(
                     2 -> TextSenderScreen(
                         isConnected = isAnyConnected,
                         isHapticEnabled = isHapticEnabled,
+                        supportsUnicodeDirectTyping = supportsUnicodeDirectTyping,
                         inputText = longTextInput,
                         onInputTextChange = { viewModel.updateLongTextInput(it) },
                         targetMode = sendTargetMode,
@@ -421,4 +453,10 @@ fun MainAppScaffold(
             )
         }
     }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

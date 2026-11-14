@@ -25,6 +25,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -38,6 +39,7 @@ import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.silentinput.app.model.ProtocolPayloads
@@ -48,7 +50,8 @@ import kotlinx.coroutines.delay
 @Composable
 fun KeyboardScreen(
     isHapticEnabled: Boolean = false,
-    onSendKey: (String) -> Unit
+    onSendKey: (String) -> Unit,
+    onOpenLandscapeKeyboard: () -> Unit = {}
 ) {
     val view = LocalView.current
     val strings = LocalAppStrings.current
@@ -272,40 +275,80 @@ fun KeyboardScreen(
             animationSpec = tween(SilentMotion.DURATION_EXPAND_MS, easing = FastOutSlowInEasing),
             label = "miniKbToggleArrow"
         )
-        OutlinedButton(
-            onClick = {
-                triggerHaptic()
-                showFullKeyboard = !showFullKeyboard
-            },
-            interactionSource = toggleInteractionSource,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(38.dp)
-                .pressScale(toggleInteractionSource, pressedScale = 0.98f),
-            shape = RoundedCornerShape(10.dp),
-            colors = ButtonDefaults.outlinedButtonColors(containerColor = toggleContainerColor),
-            border = BorderStroke(1.dp, toggleBorderColor),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+        val landscapeInteractionSource = remember { MutableInteractionSource() }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                imageVector = Icons.Default.Keyboard,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = if (showFullKeyboard) strings.kbCollapseMiniFull else strings.kbExpandMiniFull,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium
-            )
-            Spacer(modifier = Modifier.weight(1f))
-            Icon(
-                imageVector = Icons.Default.KeyboardArrowDown,
-                contentDescription = null,
+            OutlinedButton(
+                onClick = {
+                    triggerHaptic()
+                    showFullKeyboard = !showFullKeyboard
+                },
+                interactionSource = toggleInteractionSource,
                 modifier = Modifier
-                    .size(18.dp)
-                    .graphicsLayer { rotationZ = toggleArrowRotation }
-            )
+                    .weight(1f)
+                    .height(38.dp)
+                    .pressScale(toggleInteractionSource, pressedScale = 0.98f),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.outlinedButtonColors(containerColor = toggleContainerColor),
+                border = BorderStroke(1.dp, toggleBorderColor),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Keyboard,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (showFullKeyboard) strings.kbCollapseMiniFull else strings.kbExpandMiniFull,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(18.dp)
+                        .graphicsLayer { rotationZ = toggleArrowRotation }
+                )
+            }
+
+            OutlinedButton(
+                onClick = {
+                    triggerHaptic()
+                    onOpenLandscapeKeyboard()
+                },
+                interactionSource = landscapeInteractionSource,
+                modifier = Modifier
+                    .height(38.dp)
+                    .pressScale(landscapeInteractionSource, pressedScale = 0.96f),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ScreenRotation,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(modifier = Modifier.width(5.dp))
+                Text(
+                    text = strings.kbLandscapeBtn,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1
+                )
+            }
         }
 
         AnimatedVisibility(

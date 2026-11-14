@@ -56,6 +56,9 @@ class BluetoothCompanionClient(
     private val _latencyMs = MutableStateFlow<Long?>(null)
     val latencyMs = _latencyMs.asStateFlow()
 
+    private val _supportsUnicodeDirectTyping = MutableStateFlow(true)
+    val supportsUnicodeDirectTyping = _supportsUnicodeDirectTyping.asStateFlow()
+
     @Volatile
     var appLanguage: AppLanguage = initialLanguage
 
@@ -263,6 +266,7 @@ class BluetoothCompanionClient(
 
                         _isConnected.value = true
                         _isConnecting.value = false
+                        _supportsUnicodeDirectTyping.value = true
                         val devLabel = device.name ?: device.address
                         _connectedDeviceName.value = devLabel
                         _connectedDeviceAddress.value = device.address
@@ -272,6 +276,7 @@ class BluetoothCompanionClient(
                         startWriterLocked(signal, out)
                         startReaderLocked()
                         startPingLoopLocked()
+                        sendRaw(ProtocolPayloads.buildGetStatusJson())
                     } else {
                         try { activeSocket?.close() } catch (_: Exception) {}
                         _isConnected.value = false
@@ -376,11 +381,22 @@ class BluetoothCompanionClient(
                 }
                 "auth_result" -> {
                     val status = json.optString("status")
-                    if (status != "ok") {
+                    if (status == "ok") {
+                        if (json.has("unicode_direct_typing")) {
+                            _supportsUnicodeDirectTyping.value =
+                                json.optBoolean("unicode_direct_typing", true)
+                        }
+                    } else {
                         val serverMsg = json.optString("message", "").takeIf { it.isNotBlank() }
                         synchronized(stateLock) {
                             setStatusMessage { it.btStatusAuthFailed(serverMsg) }
                         }
+                    }
+                }
+                "status" -> {
+                    if (json.has("unicode_direct_typing")) {
+                        _supportsUnicodeDirectTyping.value =
+                            json.optBoolean("unicode_direct_typing", true)
                     }
                 }
             }
@@ -438,6 +454,7 @@ class BluetoothCompanionClient(
             _connectedDeviceName.value = null
             _connectedDeviceAddress.value = null
             _latencyMs.value = null
+            _supportsUnicodeDirectTyping.value = true
             pingPendingTimestamp = null
             if (wasConnectedOrConnecting) {
                 setStatusMessage { it.btStatusConnectionLost }
@@ -460,6 +477,7 @@ class BluetoothCompanionClient(
         _connectedDeviceName.value = null
         _connectedDeviceAddress.value = null
         _latencyMs.value = null
+        _supportsUnicodeDirectTyping.value = true
         pingPendingTimestamp = null
         if (resetStatus) {
             setStatusMessage { it.btStatusDisconnected }

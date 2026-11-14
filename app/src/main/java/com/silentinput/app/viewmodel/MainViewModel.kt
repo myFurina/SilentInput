@@ -167,6 +167,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (mode == "bluetooth") btConn else netReady
     }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
+    val supportsUnicodeDirectTyping: StateFlow<Boolean> = combine(
+        connectionMode,
+        isBtConnected,
+        btClient.supportsUnicodeDirectTyping,
+        isNetReady,
+        networkClient.supportsUnicodeDirectTyping
+    ) { mode, btConn, btSupports, netReady, netSupports ->
+        when {
+            mode == "bluetooth" && btConn -> btSupports
+            mode != "bluetooth" && netReady -> netSupports
+            else -> true
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
     init {
         networkClient.serverIp = _activeServerIp.value
         networkClient.serverPort = prefs.getInt(KEY_SERVER_PORT, NetworkClient.DEFAULT_PORT)
