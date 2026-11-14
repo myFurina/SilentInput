@@ -3,10 +3,28 @@ package com.silentinput.app.ui
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -14,7 +32,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -24,6 +41,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -32,7 +50,11 @@ import com.silentinput.app.model.ConnectionStatusFormatter
 import com.silentinput.app.model.ResolvedLanguage
 import com.silentinput.app.model.StatusTone
 import com.silentinput.app.network.NetworkClient
+import com.silentinput.app.ui.theme.SilentMotion
+import com.silentinput.app.ui.theme.pressScale
 import com.silentinput.app.viewmodel.MainViewModel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 internal fun statusToneColor(tone: StatusTone) = when (tone) {
@@ -97,6 +119,23 @@ fun UnifiedConnectionDialog(
     }
     var ipInput by rememberSaveable { mutableStateOf(savedLanIp) }
     var tokenInput by rememberSaveable { mutableStateOf(savedToken) }
+    val dialogScrollState = rememberScrollState()
+    val coroutineScope = rememberCoroutineScope()
+    var prevMoreExpanded by remember { mutableStateOf(moreSettingsExpanded) }
+
+    LaunchedEffect(moreSettingsExpanded) {
+        if (moreSettingsExpanded && !prevMoreExpanded) {
+            delay(100)
+            val targetScroll = (dialogScrollState.value + 300).coerceAtMost(dialogScrollState.maxValue)
+            if (targetScroll > dialogScrollState.value) {
+                dialogScrollState.animateScrollTo(
+                    value = targetScroll,
+                    animationSpec = tween(280, easing = FastOutSlowInEasing)
+                )
+            }
+        }
+        prevMoreExpanded = moreSettingsExpanded
+    }
 
     val isUsbTarget = activeServerIp == "127.0.0.1"
     val isUsbConnected = isNetConnected && isUsbTarget
@@ -115,7 +154,7 @@ fun UnifiedConnectionDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
+                    .verticalScroll(dialogScrollState)
                     .padding(top = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
@@ -141,60 +180,87 @@ fun UnifiedConnectionDialog(
                     )
                 }
 
-                when (selectedTab) {
-                    0 -> UsbConnectionTab(
-                        isUsbConnected = isUsbConnected,
-                        isUsbAuthenticated = isNetAuthenticated,
-                        isUsbConnecting = isUsbConnecting,
-                        isNetEncrypted = isNetEncrypted,
-                        isNetReconnecting = isUsbReconnecting,
-                        isTlsEnabled = isTlsEnabled,
-                        connError = usbConnError,
-                        latencyMs = latencyMs,
-                        resolvedLanguage = resolvedLanguage,
-                        onConnect = { viewModel.connectUsb() },
-                        onDisconnect = { viewModel.disconnectNetwork() }
-                    )
-                    1 -> LanConnectionTab(
-                        ip = ipInput,
-                        onIpChange = { ipInput = it },
-                        token = tokenInput,
-                        onTokenChange = { tokenInput = it },
-                        isTlsEnabled = isTlsEnabled,
-                        onToggleTls = { viewModel.toggleTlsEncryption(it) },
-                        isLanConnected = isLanConnected,
-                        isLanAuthenticated = isNetAuthenticated,
-                        isLanConnecting = isLanConnecting,
-                        isNetEncrypted = isNetEncrypted,
-                        isNetReconnecting = isLanReconnecting,
-                        connError = lanConnError,
-                        latencyMs = latencyMs,
-                        resolvedLanguage = resolvedLanguage,
-                        certMismatchHost = certMismatchHost,
-                        savedCertFingerprint = savedCertFingerprint,
-                        pendingCertFingerprint = pendingCertFingerprint,
-                        onTrustNewCert = { viewModel.trustNewCertificateAndReconnect() },
-                        onConnect = { viewModel.connectLan(ipInput, tokenInput, isTlsEnabled) },
-                        onDisconnect = { viewModel.disconnectNetwork() }
-                    )
-                    2 -> BluetoothConnectionTab(
-                        hasBtPermission = hasBtPermission,
-                        isBluetoothEnabled = isBtAdapterEnabled,
-                        isBtConnected = isBtConnected,
-                        isBtConnecting = isBtConnecting,
-                        btConnectedName = btConnectedName,
-                        btLatency = btLatency,
-                        btStatusMsg = btStatusMsg,
-                        bondedDevices = bondedDevices,
-                        favoriteBtAddresses = favoriteBtAddresses,
-                        lastBtAddress = lastBtAddress,
-                        onRequestBtPermission = onRequestBtPermission,
-                        onToggleBluetoothSystem = onToggleBluetoothSystem,
-                        onRefreshBluetoothState = { viewModel.refreshBluetoothState() },
-                        onToggleFavoriteDevice = { viewModel.toggleFavoriteBtDevice(it) },
-                        onConnectDevice = { viewModel.connectBluetooth(it) },
-                        onDisconnect = { viewModel.disconnectBluetooth() }
-                    )
+                AnimatedContent(
+                    targetState = selectedTab,
+                    transitionSpec = {
+                        SilentMotion.directionalTabTransition(
+                            forward = targetState > initialState,
+                            slideDivisor = 6
+                        ).using(
+                            SizeTransform(clip = false) { _, _ ->
+                                tween(SilentMotion.DURATION_EXPAND_MS, easing = SilentMotion.EmphasizedDecelerateEasing)
+                            }
+                        )
+                    },
+                    label = "settingsTabContent"
+                ) { tab ->
+                    when (tab) {
+                        0 -> UsbConnectionTab(
+                            isUsbConnected = isUsbConnected,
+                            isUsbAuthenticated = isNetAuthenticated,
+                            isUsbConnecting = isUsbConnecting,
+                            isNetEncrypted = isNetEncrypted,
+                            isNetReconnecting = isUsbReconnecting,
+                            isTlsEnabled = isTlsEnabled,
+                            connError = usbConnError,
+                            latencyMs = latencyMs,
+                            resolvedLanguage = resolvedLanguage,
+                            onConnect = { viewModel.connectUsb() },
+                            onDisconnect = { viewModel.disconnectNetwork() }
+                        )
+                        1 -> LanConnectionTab(
+                            ip = ipInput,
+                            onIpChange = { ipInput = it },
+                            token = tokenInput,
+                            onTokenChange = { tokenInput = it },
+                            isTlsEnabled = isTlsEnabled,
+                            onToggleTls = { viewModel.toggleTlsEncryption(it) },
+                            isLanConnected = isLanConnected,
+                            isLanAuthenticated = isNetAuthenticated,
+                            isLanConnecting = isLanConnecting,
+                            isNetEncrypted = isNetEncrypted,
+                            isNetReconnecting = isLanReconnecting,
+                            connError = lanConnError,
+                            latencyMs = latencyMs,
+                            resolvedLanguage = resolvedLanguage,
+                            certMismatchHost = certMismatchHost,
+                            savedCertFingerprint = savedCertFingerprint,
+                            pendingCertFingerprint = pendingCertFingerprint,
+                            onTrustNewCert = { viewModel.trustNewCertificateAndReconnect() },
+                            onConnect = { viewModel.connectLan(ipInput, tokenInput, isTlsEnabled) },
+                            onDisconnect = { viewModel.disconnectNetwork() }
+                        )
+                        else -> BluetoothConnectionTab(
+                            hasBtPermission = hasBtPermission,
+                            isBluetoothEnabled = isBtAdapterEnabled,
+                            isBtConnected = isBtConnected,
+                            isBtConnecting = isBtConnecting,
+                            btConnectedName = btConnectedName,
+                            btLatency = btLatency,
+                            btStatusMsg = btStatusMsg,
+                            bondedDevices = bondedDevices,
+                            favoriteBtAddresses = favoriteBtAddresses,
+                            lastBtAddress = lastBtAddress,
+                            onRequestBtPermission = onRequestBtPermission,
+                            onToggleBluetoothSystem = onToggleBluetoothSystem,
+                            onRefreshBluetoothState = { viewModel.refreshBluetoothState() },
+                            onToggleFavoriteDevice = { viewModel.toggleFavoriteBtDevice(it) },
+                            onConnectDevice = { viewModel.connectBluetooth(it) },
+                            onDisconnect = { viewModel.disconnectBluetooth() },
+                            onExpandPairedDevices = {
+                                coroutineScope.launch {
+                                    delay(100)
+                                    val target = (dialogScrollState.value + 220).coerceAtMost(dialogScrollState.maxValue)
+                                    if (target > dialogScrollState.value) {
+                                        dialogScrollState.animateScrollTo(
+                                            value = target,
+                                            animationSpec = tween(260, easing = FastOutSlowInEasing)
+                                        )
+                                    }
+                                }
+                            }
+                        )
+                    }
                 }
 
                 SectionDivider()
@@ -250,7 +316,16 @@ fun UnifiedConnectionDialog(
 
                         CustomSnippetsSection(
                             snippets = snippets,
-                            onAddSnippet = { viewModel.addSnippet(it) },
+                            onAddSnippet = {
+                                viewModel.addSnippet(it)
+                                coroutineScope.launch {
+                                    delay(80)
+                                    dialogScrollState.animateScrollTo(
+                                        value = dialogScrollState.maxValue,
+                                        animationSpec = tween(240, easing = FastOutSlowInEasing)
+                                    )
+                                }
+                            },
                             onDeleteSnippet = { viewModel.deleteSnippet(it) }
                         )
                     }
@@ -291,10 +366,15 @@ private fun UsbConnectionTab(
             isUsbConnecting = isUsbConnecting,
             language = resolvedLanguage
         )
+        val statusColor by animateColorAsState(
+            targetValue = statusToneColor(statusDisplay.tone),
+            animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+            label = "usbStatusColor"
+        )
         Text(
             text = statusDisplay.text,
             fontSize = 13.sp,
-            color = statusToneColor(statusDisplay.tone)
+            color = statusColor
         )
         Text(
             text = if (isTlsEnabled) strings.usbProtocolTls else strings.usbProtocolPlaintext,
@@ -362,11 +442,17 @@ private fun LanConnectionTab(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(strings.lanTlsTitle, fontSize = 14.sp)
-                Text(
-                    if (isTlsEnabled) strings.lanTlsSubtitleOn else strings.lanTlsSubtitleOff,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                AnimatedContent(
+                    targetState = isTlsEnabled,
+                    transitionSpec = { fadeIn(tween(150)) togetherWith fadeOut(tween(110)) },
+                    label = "lanTlsSubtitle"
+                ) { tlsOn ->
+                    Text(
+                        if (tlsOn) strings.lanTlsSubtitleOn else strings.lanTlsSubtitleOff,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             Switch(
                 checked = isTlsEnabled,
@@ -384,40 +470,51 @@ private fun LanConnectionTab(
             isLanConnecting = isLanConnecting,
             language = resolvedLanguage
         )
+        val lanStatusColor by animateColorAsState(
+            targetValue = statusToneColor(statusDisplay.tone),
+            animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+            label = "lanStatusColor"
+        )
         Text(
             text = statusDisplay.text,
             fontSize = 13.sp,
-            color = statusToneColor(statusDisplay.tone)
+            color = lanStatusColor
         )
 
-        if (certMismatchHost != null) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
-            ) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+        AnimatedVisibility(
+            visible = certMismatchHost != null,
+            enter = SilentMotion.expandSectionTransition(),
+            exit = SilentMotion.collapseSectionTransition()
+        ) {
+            if (certMismatchHost != null) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
                 ) {
-                    Text(
-                        text = strings.certMismatchTitle(certMismatchHost),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onErrorContainer
-                    )
-                    Text(
-                        text = strings.certMismatchDetails(
-                            NetworkClient.formatShortFingerprint(savedCertFingerprint),
-                            NetworkClient.formatShortFingerprint(pendingCertFingerprint)
-                        ),
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onErrorContainer
-                    )
-                    Button(
-                        onClick = onTrustNewCert,
-                        modifier = Modifier.fillMaxWidth()
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Text(strings.certTrustAndReconnect)
+                        Text(
+                            text = strings.certMismatchTitle(certMismatchHost),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            text = strings.certMismatchDetails(
+                                NetworkClient.formatShortFingerprint(savedCertFingerprint),
+                                NetworkClient.formatShortFingerprint(pendingCertFingerprint)
+                            ),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Button(
+                            onClick = onTrustNewCert,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(strings.certTrustAndReconnect)
+                        }
                     }
                 }
             }
@@ -446,17 +543,28 @@ private fun NetworkConnectButton(
     val strings = LocalAppStrings.current
     val isAuthenticating = isConnected && !isAuthenticated
     val isBusyOrActive = isConnected || isConnecting || isReconnecting
+    val interactionSource = remember { MutableInteractionSource() }
+    val showSpinner = isConnecting || isAuthenticating
     Button(
         onClick = { if (isBusyOrActive) onDisconnect() else onConnect() },
-        modifier = Modifier.fillMaxWidth()
+        interactionSource = interactionSource,
+        modifier = Modifier
+            .fillMaxWidth()
+            .pressScale(interactionSource, pressedScale = 0.97f)
     ) {
-        if (isConnecting || isAuthenticating) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(16.dp),
-                strokeWidth = 2.dp,
-                color = MaterialTheme.colorScheme.onPrimary
-            )
-            Spacer(modifier = Modifier.width(8.dp))
+        AnimatedVisibility(
+            visible = showSpinner,
+            enter = fadeIn(tween(150)) + expandHorizontally(expandFrom = Alignment.Start),
+            exit = fadeOut(tween(110)) + shrinkHorizontally(shrinkTowards = Alignment.Start)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.onPrimary
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            }
         }
         Text(
             when {
@@ -488,10 +596,17 @@ private fun BluetoothConnectionTab(
     onRefreshBluetoothState: () -> Unit,
     onToggleFavoriteDevice: (String) -> Unit,
     onConnectDevice: (BluetoothDevice) -> Unit,
-    onDisconnect: () -> Unit
+    onDisconnect: () -> Unit,
+    onExpandPairedDevices: () -> Unit
 ) {
     val strings = LocalAppStrings.current
     var pairedExpanded by rememberSaveable { mutableStateOf(false) }
+    var refreshSpinCount by remember { mutableIntStateOf(0) }
+    val refreshRotation by animateFloatAsState(
+        targetValue = refreshSpinCount * 360f,
+        animationSpec = tween(450, easing = FastOutSlowInEasing),
+        label = "btRefreshRotation"
+    )
 
     LaunchedEffect(hasBtPermission) {
         onRefreshBluetoothState()
@@ -501,7 +616,10 @@ private fun BluetoothConnectionTab(
         bondedDevices.filter { favoriteBtAddresses.contains(it.address) }
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(
+        modifier = Modifier.animateContentSize(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
         // System Bluetooth toggle & refresh inside the Bluetooth tab
         Row(
             modifier = Modifier
@@ -529,13 +647,18 @@ private fun BluetoothConnectionTab(
                 )
             }
             IconButton(
-                onClick = onRefreshBluetoothState,
+                onClick = {
+                    refreshSpinCount++
+                    onRefreshBluetoothState()
+                },
                 modifier = Modifier.size(34.dp)
             ) {
                 Icon(
                     imageVector = Icons.Default.Refresh,
                     contentDescription = strings.btRefreshContentDesc,
-                    modifier = Modifier.size(18.dp),
+                    modifier = Modifier
+                        .size(18.dp)
+                        .graphicsLayer { rotationZ = refreshRotation },
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -573,43 +696,51 @@ private fun BluetoothConnectionTab(
                 color = MaterialTheme.colorScheme.error
             )
         } else {
-            if (isBtConnected) {
-                val latStr = if (btLatency != null) " (${btLatency}ms)" else ""
-                Text(
-                    text = strings.btConnectedToLabel(btConnectedName ?: strings.statusFallbackPcName, latStr),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Button(
-                    onClick = onDisconnect,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text(strings.btDisconnectBtn)
-                }
-            } else if (isBtConnecting) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+            Column(
+                modifier = Modifier.animateContentSize(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (isBtConnected) {
+                    val latStr = if (btLatency != null) " (${btLatency}ms)" else ""
                     Text(
-                        text = btStatusMsg ?: strings.btConnectingFallback,
-                        fontSize = 12.sp,
+                        text = strings.btConnectedToLabel(btConnectedName ?: strings.statusFallbackPcName, latStr),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.primary
                     )
+                    Button(
+                        onClick = onDisconnect,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Text(strings.btDisconnectBtn)
+                    }
+                } else if (isBtConnecting) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Text(
+                            text = btStatusMsg ?: strings.btConnectingFallback,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             }
 
-            if (favoriteDevices.isNotEmpty()) {
-                Text(
-                    text = strings.btFavoriteDevicesTitle,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(
+                modifier = Modifier.animateContentSize(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                if (favoriteDevices.isNotEmpty()) {
+                    Text(
+                        text = strings.btFavoriteDevicesTitle,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     favoriteDevices.forEach { dev ->
                         BluetoothDeviceRow(
                             device = dev,
@@ -620,20 +751,26 @@ private fun BluetoothConnectionTab(
                             onConnect = { onConnectDevice(dev) }
                         )
                     }
+                } else if (bondedDevices.isNotEmpty() && !isBtConnected) {
+                    Text(
+                        text = strings.btFavoriteTip,
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-            } else if (bondedDevices.isNotEmpty() && !isBtConnected) {
-                Text(
-                    text = strings.btFavoriteTip,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
 
             CollapsibleSection(
                 title = strings.btPairedDevicesTitle(bondedDevices.size),
                 summary = if (bondedDevices.isEmpty()) strings.btPairedEmptySummary else strings.btPairedNonEmptySummary,
                 expanded = pairedExpanded,
-                onToggle = { pairedExpanded = !pairedExpanded }
+                onToggle = {
+                    val willExpand = !pairedExpanded
+                    pairedExpanded = willExpand
+                    if (willExpand) {
+                        onExpandPairedDevices()
+                    }
+                }
             ) {
                 if (bondedDevices.isEmpty()) {
                     Text(
@@ -673,6 +810,21 @@ private fun BluetoothDeviceRow(
     val strings = LocalAppStrings.current
     val devName = device.name ?: device.address
     val isComputer = device.bluetoothClass?.majorDeviceClass == BluetoothClass.Device.Major.COMPUTER
+    val starColor by animateColorAsState(
+        targetValue = if (isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+        label = "btStarColor"
+    )
+    val starScale by animateFloatAsState(
+        targetValue = if (isFavorite) 1.12f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "btStarScale"
+    )
+    val connectInteraction = remember { MutableInteractionSource() }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -689,8 +841,13 @@ private fun BluetoothDeviceRow(
             Icon(
                 imageVector = if (isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
                 contentDescription = if (isFavorite) strings.btStarRemoveDesc else strings.btStarAddDesc,
-                modifier = Modifier.size(18.dp),
-                tint = if (isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                modifier = Modifier
+                    .size(18.dp)
+                    .graphicsLayer {
+                        scaleX = starScale
+                        scaleY = starScale
+                    },
+                tint = starColor
             )
         }
         Column(modifier = Modifier.weight(1f).padding(horizontal = 4.dp)) {
@@ -719,8 +876,11 @@ private fun BluetoothDeviceRow(
         Button(
             onClick = onConnect,
             enabled = !isConnecting,
+            interactionSource = connectInteraction,
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-            modifier = Modifier.height(32.dp)
+            modifier = Modifier
+                .height(32.dp)
+                .pressScale(connectInteraction, pressedScale = 0.95f, enabled = !isConnecting)
         ) {
             Text(if (isConnecting) strings.btRowConnecting else strings.btRowConnect, fontSize = 12.sp)
         }
@@ -736,6 +896,11 @@ private fun CollapsibleSection(
     content: @Composable () -> Unit
 ) {
     val strings = LocalAppStrings.current
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = tween(SilentMotion.DURATION_EXPAND_MS, easing = FastOutSlowInEasing),
+        label = "collapsibleArrowRotation"
+    )
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
             modifier = Modifier
@@ -748,7 +913,17 @@ private fun CollapsibleSection(
         ) {
             Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                 Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                if (!expanded && summary.isNotBlank()) {
+                AnimatedVisibility(
+                    visible = !expanded && summary.isNotBlank(),
+                    enter = fadeIn(tween(160)) + expandVertically(
+                        expandFrom = Alignment.Top,
+                        animationSpec = tween(180, easing = SilentMotion.EmphasizedDecelerateEasing)
+                    ),
+                    exit = fadeOut(tween(100)) + shrinkVertically(
+                        shrinkTowards = Alignment.Top,
+                        animationSpec = tween(140, easing = SilentMotion.EmphasizedAccelerateEasing)
+                    )
+                ) {
                     Text(
                         text = summary,
                         fontSize = 11.sp,
@@ -757,12 +932,17 @@ private fun CollapsibleSection(
                 }
             }
             Icon(
-                imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                imageVector = Icons.Default.KeyboardArrowDown,
                 contentDescription = if (expanded) strings.collapseDesc else strings.expandDesc,
+                modifier = Modifier.graphicsLayer { rotationZ = arrowRotation },
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        AnimatedVisibility(visible = expanded) {
+        AnimatedVisibility(
+            visible = expanded,
+            enter = SilentMotion.expandSectionTransition(),
+            exit = SilentMotion.collapseSectionTransition()
+        ) {
             content()
         }
     }
@@ -809,17 +989,37 @@ private fun LanguageOptionChip(
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
-    Surface(
-        modifier = modifier
-            .height(34.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(8.dp),
-        color = if (selected) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val containerColor by animateColorAsState(
+        targetValue = if (selected) {
             MaterialTheme.colorScheme.primary
         } else {
             MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
-        }
+        },
+        animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+        label = "langChipBg"
+    )
+    val contentColor by animateColorAsState(
+        targetValue = if (selected) {
+            MaterialTheme.colorScheme.onPrimary
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+        animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+        label = "langChipFg"
+    )
+    Surface(
+        modifier = modifier
+            .height(34.dp)
+            .pressScale(interactionSource, pressedScale = 0.96f)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                onClick = onClick
+            ),
+        shape = RoundedCornerShape(8.dp),
+        color = containerColor
     ) {
         Box(
             modifier = Modifier
@@ -831,11 +1031,7 @@ private fun LanguageOptionChip(
                 text = label,
                 fontSize = 11.sp,
                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                color = if (selected) {
-                    MaterialTheme.colorScheme.onPrimary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
+                color = contentColor,
                 maxLines = 1,
                 softWrap = false
             )
@@ -851,7 +1047,11 @@ private fun ToggleSettingRow(
     onCheckedChange: (Boolean) -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onCheckedChange(!checked) }
+            .padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
@@ -900,6 +1100,8 @@ private fun CustomSnippetsSection(
                 singleLine = true,
                 modifier = Modifier.weight(1f)
             )
+            val addInteraction = remember { MutableInteractionSource() }
+            val addEnabled = newSnippetText.isNotBlank()
             Button(
                 onClick = {
                     if (newSnippetText.isNotBlank()) {
@@ -907,13 +1109,18 @@ private fun CustomSnippetsSection(
                         newSnippetText = ""
                     }
                 },
-                enabled = newSnippetText.isNotBlank()
+                enabled = addEnabled,
+                interactionSource = addInteraction,
+                modifier = Modifier.pressScale(addInteraction, pressedScale = 0.95f, enabled = addEnabled)
             ) {
                 Text(strings.snippetsAddBtn)
             }
         }
 
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(
+            modifier = Modifier.animateContentSize(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
             snippets.forEachIndexed { index, item ->
                 Row(
                     modifier = Modifier

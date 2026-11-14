@@ -1,10 +1,18 @@
 package com.silentinput.app.ui
 
 import android.view.HapticFeedbackConstants
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -18,6 +26,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.silentinput.app.model.TrackpadAccumulator
+import com.silentinput.app.ui.theme.SilentMotion
+import com.silentinput.app.ui.theme.pressScale
 import kotlin.math.hypot
 
 @Composable
@@ -67,29 +77,56 @@ fun TrackpadScreen(
                 .padding(bottom = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            val dragSelectInteraction = remember { MutableInteractionSource() }
+            val dragSelectEnabled = isConnected || isLeftHeld
+            val dragSelectContainer by animateColorAsState(
+                targetValue = if (isLeftHeld) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+                label = "dragSelectBg"
+            )
+            val dragSelectContent by animateColorAsState(
+                targetValue = if (isLeftHeld) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+                label = "dragSelectFg"
+            )
             Button(
                 onClick = { setLeftHold(!isLeftHeld) },
-                enabled = isConnected || isLeftHeld,
-                modifier = Modifier.weight(1.4f).height(42.dp),
+                enabled = dragSelectEnabled,
+                interactionSource = dragSelectInteraction,
+                modifier = Modifier
+                    .weight(1.4f)
+                    .height(42.dp)
+                    .pressScale(dragSelectInteraction, pressedScale = 0.96f, enabled = dragSelectEnabled),
                 shape = RoundedCornerShape(10.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isLeftHeld) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = if (isLeftHeld) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                    containerColor = dragSelectContainer,
+                    contentColor = dragSelectContent
                 )
             ) {
-                Text(
-                    text = if (isLeftHeld) strings.tpHoldingLeftBtn else strings.tpDragSelectBtn,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+                AnimatedContent(
+                    targetState = isLeftHeld,
+                    transitionSpec = { fadeIn(tween(150)) togetherWith fadeOut(tween(110)) },
+                    label = "dragSelectText"
+                ) { held ->
+                    Text(
+                        text = if (held) strings.tpHoldingLeftBtn else strings.tpDragSelectBtn,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
             }
 
+            val screenshotInteraction = remember { MutableInteractionSource() }
             OutlinedButton(
                 onClick = {
                     if (isHapticEnabled) view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     onSendKey("prtsc")
                 },
-                modifier = Modifier.weight(1f).height(42.dp),
+                interactionSource = screenshotInteraction,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(42.dp)
+                    .pressScale(screenshotInteraction, pressedScale = 0.96f),
                 shape = RoundedCornerShape(10.dp),
                 contentPadding = PaddingValues(horizontal = 8.dp)
             ) {
@@ -126,6 +163,17 @@ fun TrackpadScreen(
                 .height(60.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            val leftBtnInteraction = remember { MutableInteractionSource() }
+            val leftBtnContainer by animateColorAsState(
+                targetValue = if (isLeftHeld) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer,
+                animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+                label = "leftBtnBg"
+            )
+            val leftBtnContent by animateColorAsState(
+                targetValue = if (isLeftHeld) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onPrimaryContainer,
+                animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+                label = "leftBtnFg"
+            )
             Button(
                 onClick = {
                     if (isLeftHeld) {
@@ -135,23 +183,38 @@ fun TrackpadScreen(
                         onMouseClick("left")
                     }
                 },
-                modifier = Modifier.weight(1f).fillMaxHeight(),
+                interactionSource = leftBtnInteraction,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .pressScale(leftBtnInteraction, pressedScale = 0.96f),
                 shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+                colors = ButtonDefaults.buttonColors(containerColor = leftBtnContainer)
             ) {
-                Text(
-                    text = if (isLeftHeld) strings.tpReleaseLeftBtn else strings.tpLeftBtn,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                )
+                AnimatedContent(
+                    targetState = isLeftHeld,
+                    transitionSpec = { fadeIn(tween(150)) togetherWith fadeOut(tween(110)) },
+                    label = "leftBtnText"
+                ) { held ->
+                    Text(
+                        text = if (held) strings.tpReleaseLeftBtn else strings.tpLeftBtn,
+                        fontWeight = FontWeight.Bold,
+                        color = leftBtnContent
+                    )
+                }
             }
 
+            val rightBtnInteraction = remember { MutableInteractionSource() }
             Button(
                 onClick = {
                     if (isHapticEnabled) view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     onMouseClick("right")
                 },
-                modifier = Modifier.weight(1f).fillMaxHeight(),
+                interactionSource = rightBtnInteraction,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .pressScale(rightBtnInteraction, pressedScale = 0.96f),
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
             ) {
@@ -211,6 +274,21 @@ fun TrackpadSurface(
         triggerHaptic()
         currentOnMouseClick(btnStr)
     }
+
+    val borderWidth by animateDpAsState(
+        targetValue = if (isLeftHeld) 2.dp else 1.dp,
+        animationSpec = tween(200),
+        label = "trackpadBorderWidth"
+    )
+    val borderColor by animateColorAsState(
+        targetValue = if (isLeftHeld) {
+            MaterialTheme.colorScheme.primary
+        } else {
+            MaterialTheme.colorScheme.outline.copy(alpha = 0.16f)
+        },
+        animationSpec = tween(200),
+        label = "trackpadBorderColor"
+    )
 
     Card(
         modifier = modifier
@@ -276,20 +354,26 @@ fun TrackpadSurface(
                 }
             },
         shape = RoundedCornerShape(16.dp),
-        border = if (isLeftHeld) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+        border = BorderStroke(borderWidth, borderColor),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         Box(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = resolvedHintText,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                lineHeight = 22.sp
-            )
+            AnimatedContent(
+                targetState = resolvedHintText,
+                transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(120)) },
+                label = "trackpadHintText"
+            ) { textToShow ->
+                Text(
+                    text = textToShow,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    lineHeight = 22.sp
+                )
+            }
         }
     }
 }

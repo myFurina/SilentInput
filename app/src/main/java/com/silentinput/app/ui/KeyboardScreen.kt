@@ -1,9 +1,22 @@
 package com.silentinput.app.ui
 
 import android.view.HapticFeedbackConstants
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -14,13 +27,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.onClick
@@ -30,6 +43,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.silentinput.app.model.ProtocolPayloads
+import com.silentinput.app.ui.theme.SilentMotion
+import com.silentinput.app.ui.theme.pressScale
+import kotlinx.coroutines.delay
 
 @Composable
 fun KeyboardScreen(
@@ -49,6 +65,22 @@ fun KeyboardScreen(
     var superActive by rememberSaveable { mutableStateOf(false) }
     var showFullKeyboard by rememberSaveable { mutableStateOf(false) }
     var miniKeyboardTab by rememberSaveable { mutableIntStateOf(0) } // 0: A-Z/0-9, 1: F1-F12/Nav
+    val scrollState = rememberScrollState()
+    var prevShowFullKeyboard by remember { mutableStateOf(showFullKeyboard) }
+
+    LaunchedEffect(showFullKeyboard) {
+        if (showFullKeyboard && !prevShowFullKeyboard) {
+            delay(90)
+            val targetScroll = (scrollState.value + 220).coerceAtMost(scrollState.maxValue)
+            if (targetScroll > scrollState.value) {
+                scrollState.animateScrollTo(
+                    value = targetScroll,
+                    animationSpec = tween(260, easing = FastOutSlowInEasing)
+                )
+            }
+        }
+        prevShowFullKeyboard = showFullKeyboard
+    }
 
     fun triggerHaptic() {
         if (isHapticEnabled) {
@@ -81,7 +113,7 @@ fun KeyboardScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scrollState)
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -186,7 +218,11 @@ fun KeyboardScreen(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary
             )
-            if (activeModifiersPrefix.isNotEmpty()) {
+            AnimatedVisibility(
+                visible = activeModifiersPrefix.isNotEmpty(),
+                enter = fadeIn(tween(150)) + expandHorizontally(expandFrom = Alignment.End),
+                exit = fadeOut(tween(110)) + shrinkHorizontally(shrinkTowards = Alignment.End)
+            ) {
                 Text(
                     text = strings.kbModifiersTapHint,
                     style = MaterialTheme.typography.labelSmall,
@@ -214,15 +250,43 @@ fun KeyboardScreen(
         }
 
         // Collapsible Mini Full Keyboard Toggle
+        val toggleInteractionSource = remember { MutableInteractionSource() }
+        val toggleContainerColor by animateColorAsState(
+            targetValue = if (showFullKeyboard) {
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+            } else {
+                MaterialTheme.colorScheme.surface
+            },
+            animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+            label = "miniKbToggleBg"
+        )
+        val toggleBorderColor by animateColorAsState(
+            targetValue = if (showFullKeyboard) {
+                MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+            } else {
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+            },
+            animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+            label = "miniKbToggleBorder"
+        )
+        val toggleArrowRotation by animateFloatAsState(
+            targetValue = if (showFullKeyboard) 180f else 0f,
+            animationSpec = tween(SilentMotion.DURATION_EXPAND_MS, easing = FastOutSlowInEasing),
+            label = "miniKbToggleArrow"
+        )
         OutlinedButton(
             onClick = {
                 triggerHaptic()
                 showFullKeyboard = !showFullKeyboard
             },
+            interactionSource = toggleInteractionSource,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(38.dp),
+                .height(38.dp)
+                .pressScale(toggleInteractionSource, pressedScale = 0.98f),
             shape = RoundedCornerShape(10.dp),
+            colors = ButtonDefaults.outlinedButtonColors(containerColor = toggleContainerColor),
+            border = BorderStroke(1.dp, toggleBorderColor),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
         ) {
             Icon(
@@ -231,20 +295,34 @@ fun KeyboardScreen(
                 modifier = Modifier.size(16.dp)
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = if (showFullKeyboard) strings.kbCollapseMiniFull else strings.kbExpandMiniFull,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium
-            )
+            AnimatedContent(
+                targetState = showFullKeyboard,
+                transitionSpec = {
+                    fadeIn(tween(150)) togetherWith fadeOut(tween(110))
+                },
+                label = "miniKbToggleText"
+            ) { expanded ->
+                Text(
+                    text = if (expanded) strings.kbCollapseMiniFull else strings.kbExpandMiniFull,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
             Spacer(modifier = Modifier.weight(1f))
             Icon(
-                imageVector = if (showFullKeyboard) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                imageVector = Icons.Default.KeyboardArrowDown,
                 contentDescription = null,
-                modifier = Modifier.size(18.dp)
+                modifier = Modifier
+                    .size(18.dp)
+                    .graphicsLayer { rotationZ = toggleArrowRotation }
             )
         }
 
-        AnimatedVisibility(visible = showFullKeyboard) {
+        AnimatedVisibility(
+            visible = showFullKeyboard,
+            enter = SilentMotion.expandSectionTransition(),
+            exit = SilentMotion.collapseSectionTransition()
+        ) {
             MiniFullKeyboardPanel(
                 selectedTab = miniKeyboardTab,
                 onSelectTab = { miniKeyboardTab = it },
@@ -277,6 +355,29 @@ fun KeyboardScreen(
 }
 
 private data class MiniKeySpec(val label: String, val code: String, val weight: Float = 1f)
+
+private val MINI_NUMBER_ROW = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
+    .map { MiniKeySpec(it, it) }
+private val MINI_QWERTY_TOP = listOf("Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P")
+    .map { MiniKeySpec(it, it.lowercase()) }
+private val MINI_QWERTY_MID = listOf("A", "S", "D", "F", "G", "H", "J", "K", "L")
+    .map { MiniKeySpec(it, it.lowercase()) }
+private val MINI_QWERTY_BOT = listOf("Z", "X", "C", "V", "B", "N", "M")
+    .map { MiniKeySpec(it, it.lowercase()) } + listOf(
+    MiniKeySpec("-", "minus"),
+    MiniKeySpec("=", "equal"),
+    MiniKeySpec("/", "slash")
+)
+private val MINI_F_ROW_1 = (1..6).map { MiniKeySpec("F$it", "f$it") }
+private val MINI_F_ROW_2 = (7..12).map { MiniKeySpec("F$it", "f$it") }
+private val MINI_NAV_ROW = listOf(
+    MiniKeySpec("Home", "home"),
+    MiniKeySpec("End", "end"),
+    MiniKeySpec("PgUp", "pageup"),
+    MiniKeySpec("PgDn", "pagedown"),
+    MiniKeySpec("Ins", "insert"),
+    MiniKeySpec("\\", "backslash")
+)
 
 @Composable
 private fun MiniFullKeyboardPanel(
@@ -313,49 +414,43 @@ private fun MiniFullKeyboardPanel(
                 )
             }
 
-            if (selectedTab == 0) {
-                val numberRow = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
-                    .map { MiniKeySpec(it, it) }
-                val qwertyTop = listOf("Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P")
-                    .map { MiniKeySpec(it, it.lowercase()) }
-                val qwertyMid = listOf("A", "S", "D", "F", "G", "H", "J", "K", "L")
-                    .map { MiniKeySpec(it, it.lowercase()) }
-                val qwertyBot = listOf("Z", "X", "C", "V", "B", "N", "M")
-                    .map { MiniKeySpec(it, it.lowercase()) } + listOf(
-                    MiniKeySpec("-", "minus"),
-                    MiniKeySpec("=", "equal"),
-                    MiniKeySpec("/", "slash")
-                )
-
-                MiniKeyRow(numberRow, onKeyPress)
-                MiniKeyRow(qwertyTop, onKeyPress)
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
-                    qwertyMid.forEach { key ->
-                        MiniKeyboardKey(
-                            label = key.label,
-                            modifier = Modifier.weight(key.weight),
-                            onClick = { onKeyPress(key.code) }
-                        )
+            AnimatedContent(
+                targetState = selectedTab,
+                transitionSpec = {
+                    SilentMotion.directionalTabTransition(
+                        forward = targetState > initialState,
+                        slideDivisor = 8
+                    ).using(
+                        SizeTransform(clip = false) { _, _ ->
+                            tween(200, easing = FastOutSlowInEasing)
+                        }
+                    )
+                },
+                label = "miniKeyboardTabContent"
+            ) { tab ->
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    if (tab == 0) {
+                        MiniKeyRow(MINI_NUMBER_ROW, onKeyPress)
+                        MiniKeyRow(MINI_QWERTY_TOP, onKeyPress)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            MINI_QWERTY_MID.forEach { key ->
+                                MiniKeyboardKey(
+                                    label = key.label,
+                                    modifier = Modifier.weight(key.weight),
+                                    onClick = { onKeyPress(key.code) }
+                                )
+                            }
+                        }
+                        MiniKeyRow(MINI_QWERTY_BOT, onKeyPress)
+                    } else {
+                        MiniKeyRow(MINI_F_ROW_1, onKeyPress, spacing = 5.dp, fontSize = 12.sp)
+                        MiniKeyRow(MINI_F_ROW_2, onKeyPress, spacing = 5.dp, fontSize = 12.sp)
+                        MiniKeyRow(MINI_NAV_ROW, onKeyPress, spacing = 5.dp, fontSize = 11.sp)
                     }
                 }
-                MiniKeyRow(qwertyBot, onKeyPress)
-            } else {
-                val fRow1 = (1..6).map { MiniKeySpec("F$it", "f$it") }
-                val fRow2 = (7..12).map { MiniKeySpec("F$it", "f$it") }
-                val navRow = listOf(
-                    MiniKeySpec("Home", "home"),
-                    MiniKeySpec("End", "end"),
-                    MiniKeySpec("PgUp", "pageup"),
-                    MiniKeySpec("PgDn", "pagedown"),
-                    MiniKeySpec("Ins", "insert"),
-                    MiniKeySpec("\\", "backslash")
-                )
-                MiniKeyRow(fRow1, onKeyPress, spacing = 5.dp, fontSize = 12.sp)
-                MiniKeyRow(fRow2, onKeyPress, spacing = 5.dp, fontSize = 12.sp)
-                MiniKeyRow(navRow, onKeyPress, spacing = 5.dp, fontSize = 11.sp)
             }
         }
     }
@@ -368,24 +463,39 @@ private fun MiniTabChip(
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
-    Surface(
+    val interactionSource = remember { MutableInteractionSource() }
+    val containerColor by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+        animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+        label = "miniTabChipBg"
+    )
+    val contentColor by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+        label = "miniTabChipFg"
+    )
+    val shape = RoundedCornerShape(6.dp)
+    Box(
         modifier = modifier
             .height(28.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(6.dp),
-        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+            .pressScale(interactionSource, pressedScale = 0.96f)
+            .clip(shape)
+            .background(containerColor, shape)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
     ) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(
-                text = label,
-                fontSize = 11.sp,
-                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                softWrap = false
-            )
-        }
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            color = contentColor,
+            maxLines = 1,
+            softWrap = false
+        )
     }
 }
 
@@ -419,25 +529,29 @@ private fun MiniKeyboardKey(
     onClick: () -> Unit
 ) {
     val shape = RoundedCornerShape(6.dp)
-    Surface(
+    val interactionSource = remember { MutableInteractionSource() }
+    Box(
         modifier = modifier
             .height(36.dp)
+            .pressScale(interactionSource, pressedScale = 0.93f)
             .clip(shape)
-            .clickable(onClick = onClick),
-        shape = shape,
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+            .background(MaterialTheme.colorScheme.surfaceVariant, shape)
+            .border(0.5.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f), shape)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
     ) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(
-                text = label,
-                fontSize = fontSize,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                softWrap = false
-            )
-        }
+        Text(
+            text = label,
+            fontSize = fontSize,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            softWrap = false
+        )
     }
 }
 
@@ -453,6 +567,7 @@ private fun RepeatableArrowButton(
         modifier = Modifier
             .width(90.dp)
             .height(46.dp)
+            .pressScale(interactionSource, pressedScale = 0.94f)
             .clip(shape)
             .semantics(mergeDescendants = true) {
                 role = Role.Button
@@ -484,6 +599,7 @@ fun QuickActionButton(
     Card(
         modifier = modifier
             .height(58.dp)
+            .pressScale(interactionSource, pressedScale = 0.95f)
             .clip(shape)
             .then(
                 if (isRepeatable) {
@@ -495,7 +611,11 @@ fun QuickActionButton(
                         .indication(interactionSource, LocalIndication.current)
                         .repeatOnPress(interactionSource = interactionSource, cancelOnDrag = cancelOnDrag, onRepeat = onClick)
                 } else {
-                    Modifier.clickable(onClick = onClick)
+                    Modifier.clickable(
+                        interactionSource = interactionSource,
+                        indication = LocalIndication.current,
+                        onClick = onClick
+                    )
                 }
             ),
         shape = shape,
@@ -525,13 +645,27 @@ fun QuickActionButton(
 
 @Composable
 fun ModifierToggleButton(text: String, isActive: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val containerColor by animateColorAsState(
+        targetValue = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+        animationSpec = tween(160),
+        label = "modifierBgColor"
+    )
+    val contentColor by animateColorAsState(
+        targetValue = if (isActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+        animationSpec = tween(160),
+        label = "modifierTextColor"
+    )
     Button(
         onClick = onClick,
-        modifier = modifier.height(48.dp),
+        interactionSource = interactionSource,
+        modifier = modifier
+            .height(48.dp)
+            .pressScale(interactionSource, pressedScale = 0.95f),
         shape = RoundedCornerShape(8.dp),
         colors = ButtonDefaults.buttonColors(
-            containerColor = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-            contentColor = if (isActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+            containerColor = containerColor,
+            contentColor = contentColor
         )
     ) {
         Text(text = text, fontWeight = FontWeight.Bold)

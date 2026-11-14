@@ -10,6 +10,16 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -22,6 +32,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
@@ -40,6 +51,7 @@ import com.silentinput.app.ui.TextSenderScreen
 import com.silentinput.app.ui.TrackpadScreen
 import com.silentinput.app.ui.UnifiedConnectionDialog
 import com.silentinput.app.ui.theme.SilentInputTheme
+import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.viewmodel.MainViewModel
 import java.util.Locale
 
@@ -215,15 +227,29 @@ fun MainAppScaffold(
 
     Scaffold(
         topBar = {
+            val settingsIconRotation by animateFloatAsState(
+                targetValue = if (showConfigDialog) 45f else 0f,
+                animationSpec = tween(SilentMotion.DURATION_STATE_MS, easing = FastOutSlowInEasing),
+                label = "settingsIconRotation"
+            )
             TopAppBar(
                 title = {
-                    Column(modifier = Modifier.clickable { showConfigDialog = true }) {
+                    Column(
+                        modifier = Modifier
+                            .clickable { showConfigDialog = true }
+                            .animateContentSize(animationSpec = tween(SilentMotion.DURATION_STATE_MS))
+                    ) {
                         Text("SilentInput", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                        val statusColor = when (topBarStatus.tone) {
+                        val rawStatusColor = when (topBarStatus.tone) {
                             StatusTone.ERROR, StatusTone.HIGH_LATENCY -> MaterialTheme.colorScheme.error
                             StatusTone.PENDING -> MaterialTheme.colorScheme.primary
                             StatusTone.NORMAL -> MaterialTheme.colorScheme.onSurfaceVariant
                         }
+                        val statusColor by animateColorAsState(
+                            targetValue = rawStatusColor,
+                            animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+                            label = "topBarStatusColor"
+                        )
                         Text(
                             text = topBarStatus.text,
                             fontSize = 11.sp,
@@ -233,7 +259,11 @@ fun MainAppScaffold(
                 },
                 actions = {
                     IconButton(onClick = { showConfigDialog = true }) {
-                        Icon(Icons.Default.Settings, contentDescription = strings.settings)
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = strings.settings,
+                            modifier = Modifier.graphicsLayer { rotationZ = settingsIconRotation }
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -243,29 +273,43 @@ fun MainAppScaffold(
         },
         bottomBar = {
             NavigationBar {
-                NavigationBarItem(
-                    selected = selectedTab == 0,
-                    onClick = { selectedTab = 0 },
-                    icon = { Icon(Icons.Default.Keyboard, contentDescription = strings.tabKeyboard) },
-                    label = { Text(strings.tabKeyboard) }
+                val navTabs = listOf(
+                    Triple(0, Icons.Default.Keyboard, strings.tabKeyboard),
+                    Triple(1, Icons.Default.Mouse, strings.tabTrackpad),
+                    Triple(2, Icons.Default.Edit, strings.tabText)
                 )
-                NavigationBarItem(
-                    selected = selectedTab == 1,
-                    onClick = { selectedTab = 1 },
-                    icon = { Icon(Icons.Default.Mouse, contentDescription = strings.tabTrackpad) },
-                    label = { Text(strings.tabTrackpad) }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 2,
-                    onClick = { selectedTab = 2 },
-                    icon = { Icon(Icons.Default.Edit, contentDescription = strings.tabText) },
-                    label = { Text(strings.tabText) }
-                )
+                navTabs.forEach { (tabIndex, iconVector, tabLabel) ->
+                    val selected = selectedTab == tabIndex
+                    val iconScale by animateFloatAsState(
+                        targetValue = if (selected) 1.08f else 1.0f,
+                        animationSpec = tween(SilentMotion.DURATION_STATE_MS, easing = FastOutSlowInEasing),
+                        label = "navIconScale"
+                    )
+                    NavigationBarItem(
+                        selected = selected,
+                        onClick = { selectedTab = tabIndex },
+                        icon = {
+                            Icon(
+                                imageVector = iconVector,
+                                contentDescription = tabLabel,
+                                modifier = Modifier.graphicsLayer {
+                                    scaleX = iconScale
+                                    scaleY = iconScale
+                                }
+                            )
+                        },
+                        label = { Text(tabLabel) }
+                    )
+                }
             }
         }
     ) { innerPadding ->
         Column(modifier = Modifier.padding(innerPadding)) {
-            if (!isCurrentConnected) {
+            AnimatedVisibility(
+                visible = !isCurrentConnected,
+                enter = SilentMotion.expandSectionTransition(),
+                exit = SilentMotion.collapseSectionTransition()
+            ) {
                 Surface(
                     color = MaterialTheme.colorScheme.primaryContainer,
                     modifier = Modifier
@@ -277,15 +321,26 @@ fun MainAppScaffold(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(
-                            text = when (currentMode) {
-                                "bluetooth" -> strings.bannerBtDisconnected
-                                "lan" -> strings.bannerLanDisconnected
-                                else -> strings.bannerUsbDisconnected
+                        AnimatedContent(
+                            targetState = currentMode,
+                            transitionSpec = {
+                                fadeIn(tween(SilentMotion.DURATION_STATE_MS)) togetherWith
+                                    fadeOut(tween(120))
                             },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
+                            modifier = Modifier.weight(1f),
+                            label = "disconnectedBannerText"
+                        ) { mode ->
+                            Text(
+                                text = when (mode) {
+                                    "bluetooth" -> strings.bannerBtDisconnected
+                                    "lan" -> strings.bannerLanDisconnected
+                                    else -> strings.bannerUsbDisconnected
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = strings.bannerSettingsAction,
                             style = MaterialTheme.typography.labelMedium,
@@ -297,46 +352,55 @@ fun MainAppScaffold(
             }
 
             Box(modifier = Modifier.weight(1f)) {
-                when (selectedTab) {
-                    0 -> KeyboardScreen(
-                        isHapticEnabled = isHapticEnabled,
-                        onSendKey = { viewModel.sendKey(it) }
-                    )
-                    1 -> TrackpadScreen(
-                        sensitivity = trackpadSensitivity,
-                        onSensitivityChange = { viewModel.updateTrackpadSensitivity(it) },
-                        naturalScrolling = isNaturalScrolling,
-                        isHapticEnabled = isHapticEnabled,
-                        isConnected = isAnyConnected,
-                        isLeftHeld = isLeftMouseHeld,
-                        onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },
-                        onMouseClick = { viewModel.sendMouseClick(it) },
-                        onMouseScroll = { viewModel.sendMouseScroll(it) },
-                        onLeftMouseHoldChange = { viewModel.setLeftMouseHold(it) },
-                        onSendKey = { viewModel.sendKey(it) }
-                    )
-                    2 -> TextSenderScreen(
-                        isConnected = isAnyConnected,
-                        isHapticEnabled = isHapticEnabled,
-                        inputText = longTextInput,
-                        onInputTextChange = { viewModel.updateLongTextInput(it) },
-                        targetMode = sendTargetMode,
-                        onTargetModeChange = { viewModel.setSendTargetMode(it) },
-                        clearOnSend = clearOnSend,
-                        onClearOnSendChange = { viewModel.setClearOnSend(it) },
-                        enterOnSend = enterOnSend,
-                        onEnterOnSendChange = { viewModel.setEnterOnSend(it) },
-                        snippets = snippets,
-                        showInlineTrackpad = showInlineTrackpadInText,
-                        trackpadSensitivity = trackpadSensitivity,
-                        naturalScrolling = isNaturalScrolling,
-                        onSendText = { viewModel.sendTextPaste(it) },
-                        onSendKey = { viewModel.sendKey(it) },
-                        onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },
-                        onMouseClick = { viewModel.sendMouseClick(it) },
-                        onMouseScroll = { viewModel.sendMouseScroll(it) },
-                        onOpenSettings = { showConfigDialog = true }
-                    )
+                AnimatedContent(
+                    targetState = selectedTab,
+                    modifier = Modifier.fillMaxSize(),
+                    transitionSpec = {
+                        SilentMotion.directionalTabTransition(forward = targetState > initialState)
+                    },
+                    label = "mainTabTransition"
+                ) { targetTab ->
+                    when (targetTab) {
+                        0 -> KeyboardScreen(
+                            isHapticEnabled = isHapticEnabled,
+                            onSendKey = { viewModel.sendKey(it) }
+                        )
+                        1 -> TrackpadScreen(
+                            sensitivity = trackpadSensitivity,
+                            onSensitivityChange = { viewModel.updateTrackpadSensitivity(it) },
+                            naturalScrolling = isNaturalScrolling,
+                            isHapticEnabled = isHapticEnabled,
+                            isConnected = isAnyConnected,
+                            isLeftHeld = isLeftMouseHeld,
+                            onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },
+                            onMouseClick = { viewModel.sendMouseClick(it) },
+                            onMouseScroll = { viewModel.sendMouseScroll(it) },
+                            onLeftMouseHoldChange = { viewModel.setLeftMouseHold(it) },
+                            onSendKey = { viewModel.sendKey(it) }
+                        )
+                        2 -> TextSenderScreen(
+                            isConnected = isAnyConnected,
+                            isHapticEnabled = isHapticEnabled,
+                            inputText = longTextInput,
+                            onInputTextChange = { viewModel.updateLongTextInput(it) },
+                            targetMode = sendTargetMode,
+                            onTargetModeChange = { viewModel.setSendTargetMode(it) },
+                            clearOnSend = clearOnSend,
+                            onClearOnSendChange = { viewModel.setClearOnSend(it) },
+                            enterOnSend = enterOnSend,
+                            onEnterOnSendChange = { viewModel.setEnterOnSend(it) },
+                            snippets = snippets,
+                            showInlineTrackpad = showInlineTrackpadInText,
+                            trackpadSensitivity = trackpadSensitivity,
+                            naturalScrolling = isNaturalScrolling,
+                            onSendText = { viewModel.sendTextPaste(it) },
+                            onSendKey = { viewModel.sendKey(it) },
+                            onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },
+                            onMouseClick = { viewModel.sendMouseClick(it) },
+                            onMouseScroll = { viewModel.sendMouseScroll(it) },
+                            onOpenSettings = { showConfigDialog = true }
+                        )
+                    }
                 }
             }
         }
