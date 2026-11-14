@@ -130,7 +130,7 @@ fun KeyboardScreen(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            QuickActionButton(strings.kbImeSwitch, Modifier.weight(1f), isPrimaryHighlight = true) {
+            QuickActionButton(strings.kbImeSwitch, Modifier.weight(1f)) {
                 sendDirectShortcut("shift")
             }
             QuickActionButton(strings.kbSpace, Modifier.weight(1f)) {

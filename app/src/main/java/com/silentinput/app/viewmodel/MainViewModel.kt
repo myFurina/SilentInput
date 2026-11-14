@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.silentinput.app.bluetooth.BluetoothCompanionClient
 import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.ConnectionStatusFormatter
+import com.silentinput.app.model.ImeSwitchShortcut
 import com.silentinput.app.network.NetworkClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -38,6 +39,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_APP_LANGUAGE = "app_language"
         private const val KEY_TEXT_INLINE_TRACKPAD = "text_inline_trackpad"
         private const val KEY_NATURAL_SCROLLING = "natural_scrolling"
+        private const val KEY_IME_SWITCH_SHORTCUT = "ime_switch_shortcut"
         private const val KEY_TRACKPAD_SENSITIVITY = "trackpad_sensitivity"
         private const val KEY_SEND_TARGET_MODE = "send_target_mode"
         private const val KEY_CLEAR_ON_SEND = "clear_on_send"
@@ -107,6 +109,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isNaturalScrolling = MutableStateFlow(prefs.getBoolean(KEY_NATURAL_SCROLLING, true))
     val isNaturalScrolling: StateFlow<Boolean> = _isNaturalScrolling.asStateFlow()
+
+    private val _imeSwitchKey = MutableStateFlow(
+        ImeSwitchShortcut.normalize(
+            prefs.getString(KEY_IME_SWITCH_SHORTCUT, ImeSwitchShortcut.DEFAULT)
+                ?: ImeSwitchShortcut.DEFAULT
+        )
+    )
+    val imeSwitchKey: StateFlow<String> = _imeSwitchKey.asStateFlow()
 
     private val _trackpadSensitivity = MutableStateFlow(
         prefs.getFloat(KEY_TRACKPAD_SENSITIVITY, 0.6f).coerceIn(0.1f, 2.0f)
@@ -450,6 +460,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setNaturalScrolling(enabled: Boolean) {
         _isNaturalScrolling.value = enabled
         prefs.edit().putBoolean(KEY_NATURAL_SCROLLING, enabled).apply()
+    }
+
+    fun setImeSwitchKey(rawShortcut: String) {
+        val normalized = ImeSwitchShortcut.normalize(rawShortcut)
+        _imeSwitchKey.value = normalized
+        prefs.edit().putString(KEY_IME_SWITCH_SHORTCUT, normalized).apply()
     }
 
     fun setAppLanguage(language: AppLanguage) {

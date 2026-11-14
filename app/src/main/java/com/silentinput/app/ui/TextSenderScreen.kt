@@ -16,8 +16,13 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -50,10 +55,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.silentinput.app.model.ImeSwitchShortcut
 import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.ui.theme.pressScale
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun TextSenderScreen(
     isConnected: Boolean,
@@ -71,6 +77,8 @@ fun TextSenderScreen(
     showInlineTrackpad: Boolean = true,
     trackpadSensitivity: Float = 0.6f,
     naturalScrolling: Boolean = true,
+    imeSwitchKey: String = ImeSwitchShortcut.DEFAULT,
+    onImeSwitchKeyChange: (String) -> Unit = {},
     onSendText: (String) -> Unit,
     onSendKey: (String) -> Unit,
     onMouseMove: (dx: Float, dy: Float) -> Unit,
@@ -354,12 +362,85 @@ fun TextSenderScreen(
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Text(
-                            text = strings.txtCursorEditTitle,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = strings.txtCursorEditTitle,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (imeSwitchKey.isNotBlank()) {
+                                var showImeMenu by remember { mutableStateOf(false) }
+                                Box {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(MaterialTheme.colorScheme.surface)
+                                            .border(
+                                                BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                                RoundedCornerShape(8.dp)
+                                            )
+                                            .combinedClickable(
+                                                onClick = { sendKey(imeSwitchKey) },
+                                                onLongClick = {
+                                                    if (isHapticEnabled) {
+                                                        view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                                                    }
+                                                    showImeMenu = true
+                                                }
+                                            )
+                                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = strings.imeSwitchQuickChip(ImeSwitchShortcut.formatLabel(imeSwitchKey)),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1
+                                        )
+                                    }
+                                    DropdownMenu(
+                                        expanded = showImeMenu,
+                                        onDismissRequest = { showImeMenu = false }
+                                    ) {
+                                        ImeSwitchShortcut.PRESETS.forEach { preset ->
+                                            val isSelected = ImeSwitchShortcut.normalize(imeSwitchKey) == preset
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        text = ImeSwitchShortcut.formatLabel(preset),
+                                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                                    )
+                                                },
+                                                onClick = {
+                                                    onImeSwitchKeyChange(preset)
+                                                    showImeMenu = false
+                                                }
+                                            )
+                                        }
+                                        DropdownMenuItem(
+                                            text = { Text(strings.imeSwitchPresetOff) },
+                                            onClick = {
+                                                onImeSwitchKeyChange("")
+                                                showImeMenu = false
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text(strings.imeSwitchQuickMenuSettings) },
+                                            onClick = {
+                                                showImeMenu = false
+                                                onOpenSettings()
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)

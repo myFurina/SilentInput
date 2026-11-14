@@ -5,10 +5,12 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -58,6 +60,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.silentinput.app.model.ImeSwitchShortcut
 import com.silentinput.app.model.ProtocolPayloads
 import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.ui.theme.pressScale
@@ -65,6 +68,7 @@ import com.silentinput.app.ui.theme.pressScale
 @Composable
 fun LandscapeKeyboardScreen(
     isHapticEnabled: Boolean,
+    imeSwitchKey: String = ImeSwitchShortcut.DEFAULT,
     onSendKey: (String) -> Unit,
     onExit: () -> Unit
 ) {
@@ -104,6 +108,22 @@ fun LandscapeKeyboardScreen(
         altActive = false
         shiftActive = false
         superActive = false
+    }
+
+    fun handleModifierClick(keyCode: String, isActive: Boolean, setActive: (Boolean) -> Unit) {
+        if (isActive) {
+            triggerHaptic()
+            setActive(false)
+        } else {
+            sendKeyWithModifiers(keyCode)
+        }
+    }
+
+    fun handleModifierLongClick(isActive: Boolean, setActive: (Boolean) -> Unit) {
+        if (isHapticEnabled) {
+            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        }
+        setActive(!isActive)
     }
 
     val hasAnyModifier = ctrlActive || altActive || shiftActive || superActive
@@ -150,6 +170,15 @@ fun LandscapeKeyboardScreen(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    if (imeSwitchKey.isNotBlank()) {
+                        LandscapeUtilityKey(
+                            label = strings.imeSwitchQuickChip(ImeSwitchShortcut.formatLabel(imeSwitchKey)),
+                            onClick = {
+                                triggerHaptic()
+                                onSendKey(imeSwitchKey)
+                            }
+                        )
+                    }
                     LandscapeUtilityKey(label = "Ins", onClick = { sendKeyWithModifiers("insert") })
                     LandscapeUtilityKey(label = "Home", onClick = { sendKeyWithModifiers("home") })
                     LandscapeUtilityKey(label = "PgUp", onClick = { sendKeyWithModifiers("pageup") })
@@ -321,8 +350,10 @@ fun LandscapeKeyboardScreen(
                     active = shiftActive,
                     weight = 1.9f,
                     onClick = {
-                        triggerHaptic()
-                        shiftActive = !shiftActive
+                        handleModifierClick("shift", shiftActive) { shiftActive = it }
+                    },
+                    onLongClick = {
+                        handleModifierLongClick(shiftActive) { shiftActive = it }
                     }
                 )
                 val row4Keys = listOf("z", "x", "c", "v", "b", "n", "m", ",", ".", "/")
@@ -364,8 +395,10 @@ fun LandscapeKeyboardScreen(
                     active = ctrlActive,
                     weight = 1.3f,
                     onClick = {
-                        triggerHaptic()
-                        ctrlActive = !ctrlActive
+                        handleModifierClick("ctrl", ctrlActive) { ctrlActive = it }
+                    },
+                    onLongClick = {
+                        handleModifierLongClick(ctrlActive) { ctrlActive = it }
                     }
                 )
                 LandscapeModifierKey(
@@ -373,8 +406,10 @@ fun LandscapeKeyboardScreen(
                     active = superActive,
                     weight = 1.1f,
                     onClick = {
-                        triggerHaptic()
-                        superActive = !superActive
+                        handleModifierClick("super", superActive) { superActive = it }
+                    },
+                    onLongClick = {
+                        handleModifierLongClick(superActive) { superActive = it }
                     }
                 )
                 LandscapeModifierKey(
@@ -382,8 +417,10 @@ fun LandscapeKeyboardScreen(
                     active = altActive,
                     weight = 1.1f,
                     onClick = {
-                        triggerHaptic()
-                        altActive = !altActive
+                        handleModifierClick("alt", altActive) { altActive = it }
+                    },
+                    onLongClick = {
+                        handleModifierLongClick(altActive) { altActive = it }
                     }
                 )
                 LandscapeKey(
@@ -519,12 +556,14 @@ private fun RowScope.LandscapeRepeatableKey(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RowScope.LandscapeModifierKey(
     label: String,
     active: Boolean,
     weight: Float,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val bgColor by animateColorAsState(
@@ -545,33 +584,40 @@ private fun RowScope.LandscapeModifierKey(
         animationSpec = tween(SilentMotion.DURATION_STATE_MS),
         label = "landscapeModContent"
     )
+    val shape = RoundedCornerShape(8.dp)
 
-    Surface(
+    Box(
+        contentAlignment = Alignment.Center,
         modifier = Modifier
             .weight(weight)
             .fillMaxHeight()
-            .pressScale(interactionSource, pressedScale = 0.93f),
-        shape = RoundedCornerShape(8.dp),
-        color = bgColor,
-        contentColor = contentColor,
-        border = if (active) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)),
-        onClick = onClick,
-        interactionSource = interactionSource
-    ) {
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 2.dp)
-        ) {
-            Text(
-                text = label,
-                fontSize = 11.sp,
-                fontWeight = if (active) FontWeight.Bold else FontWeight.SemiBold,
-                maxLines = 1,
-                softWrap = false
+            .pressScale(interactionSource, pressedScale = 0.93f)
+            .clip(shape)
+            .background(bgColor)
+            .then(
+                if (active) {
+                    Modifier
+                } else {
+                    Modifier.border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f), shape)
+                }
             )
-        }
+            .semantics { role = Role.Button }
+            .combinedClickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
+            .padding(horizontal = 2.dp)
+    ) {
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            fontWeight = if (active) FontWeight.Bold else FontWeight.SemiBold,
+            color = contentColor,
+            maxLines = 1,
+            softWrap = false
+        )
     }
 }
 

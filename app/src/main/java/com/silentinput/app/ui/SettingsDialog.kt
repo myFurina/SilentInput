@@ -28,8 +28,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -40,11 +43,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.ConnectionStatusFormatter
+import com.silentinput.app.model.ImeSwitchShortcut
 import com.silentinput.app.model.ResolvedLanguage
 import com.silentinput.app.model.StatusTone
 import com.silentinput.app.network.NetworkClient
@@ -306,10 +314,12 @@ fun MoreSettingsScreen(
     val appLanguage by viewModel.appLanguage.collectAsState()
     val showInlineTrackpadInText by viewModel.showInlineTrackpadInText.collectAsState()
     val isNaturalScrolling by viewModel.isNaturalScrolling.collectAsState()
+    val imeSwitchKey by viewModel.imeSwitchKey.collectAsState()
     val snippets by viewModel.snippets.collectAsState()
     val strings = LocalAppStrings.current
     val scrollState = rememberScrollState()
     val coroutineScope = rememberCoroutineScope()
+    var showHelpDialog by rememberSaveable { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -408,6 +418,11 @@ fun MoreSettingsScreen(
                         checked = isNaturalScrolling,
                         onCheckedChange = { viewModel.setNaturalScrolling(it) }
                     )
+                    SectionDivider()
+                    ImeSwitchSettingRow(
+                        selectedShortcut = imeSwitchKey,
+                        onSelectShortcut = { viewModel.setImeSwitchKey(it) }
+                    )
                 }
             }
 
@@ -434,7 +449,17 @@ fun MoreSettingsScreen(
                     )
                 }
             }
+
+            MoreSettingsEntryRow(
+                title = strings.helpEntryTitle,
+                summary = strings.helpEntrySubtitle,
+                onClick = { showHelpDialog = true }
+            )
         }
+    }
+
+    if (showHelpDialog) {
+        HelpAndAboutDialog(onDismiss = { showHelpDialog = false })
     }
 }
 
@@ -1078,6 +1103,120 @@ private fun LanguageOptionChip(
 }
 
 @Composable
+private fun ImeSwitchSettingRow(
+    selectedShortcut: String,
+    onSelectShortcut: (String) -> Unit
+) {
+    val strings = LocalAppStrings.current
+    val normalized = ImeSwitchShortcut.normalize(selectedShortcut)
+    val isCustomSaved = normalized.isNotBlank() && !ImeSwitchShortcut.isPreset(normalized)
+    var showCustomInput by rememberSaveable { mutableStateOf(isCustomSaved) }
+    var customDraft by rememberSaveable { mutableStateOf(if (isCustomSaved) normalized else "") }
+
+    LaunchedEffect(normalized) {
+        if (normalized.isNotBlank() && !ImeSwitchShortcut.isPreset(normalized)) {
+            showCustomInput = true
+            customDraft = normalized
+        } else {
+            showCustomInput = false
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column {
+            Text(strings.imeSwitchTitle, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text(
+                strings.imeSwitchSubtitle,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            ImeSwitchShortcut.PRESETS.take(3).forEach { preset ->
+                LanguageOptionChip(
+                    label = ImeSwitchShortcut.formatLabel(preset),
+                    selected = !showCustomInput && normalized == preset,
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        showCustomInput = false
+                        onSelectShortcut(preset)
+                    }
+                )
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            ImeSwitchShortcut.PRESETS.drop(3).forEach { preset ->
+                LanguageOptionChip(
+                    label = ImeSwitchShortcut.formatLabel(preset),
+                    selected = !showCustomInput && normalized == preset,
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        showCustomInput = false
+                        onSelectShortcut(preset)
+                    }
+                )
+            }
+            LanguageOptionChip(
+                label = strings.imeSwitchPresetCustom,
+                selected = showCustomInput || isCustomSaved,
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    showCustomInput = true
+                    if (customDraft.isBlank() && normalized.isNotBlank()) {
+                        customDraft = normalized
+                    }
+                }
+            )
+            LanguageOptionChip(
+                label = strings.imeSwitchPresetOff,
+                selected = !showCustomInput && normalized.isBlank(),
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    showCustomInput = false
+                    onSelectShortcut("")
+                }
+            )
+        }
+        AnimatedVisibility(visible = showCustomInput) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = customDraft,
+                    onValueChange = { customDraft = it },
+                    placeholder = { Text(strings.imeSwitchCustomPlaceholder) },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f)
+                )
+                val saveEnabled = ImeSwitchShortcut.normalize(customDraft).isNotBlank()
+                val saveInteraction = remember { MutableInteractionSource() }
+                Button(
+                    onClick = {
+                        val cleaned = ImeSwitchShortcut.normalize(customDraft)
+                        if (cleaned.isNotBlank()) {
+                            onSelectShortcut(cleaned)
+                        }
+                    },
+                    enabled = saveEnabled,
+                    interactionSource = saveInteraction,
+                    modifier = Modifier.pressScale(saveInteraction, pressedScale = 0.95f, enabled = saveEnabled)
+                ) {
+                    Text(strings.imeSwitchSaveBtn)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ToggleSettingRow(
     title: String,
     subtitle: String,
@@ -1181,6 +1320,189 @@ private fun CustomSnippetsSection(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+private const val GITHUB_REPO_URL = "https://github.com/myFurina/SilentInput"
+private const val GITHUB_RELEASES_URL = "$GITHUB_REPO_URL/releases"
+private const val GITHUB_ISSUES_URL = "$GITHUB_REPO_URL/issues"
+
+@Composable
+private fun HelpAndAboutDialog(onDismiss: () -> Unit) {
+    val strings = LocalAppStrings.current
+    val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    val clipboardManager = LocalClipboardManager.current
+    val coroutineScope = rememberCoroutineScope()
+    val versionName = remember(context) {
+        runCatching {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull()?.takeIf { it.isNotBlank() } ?: "1.0"
+    }
+    var copiedUrl by remember { mutableStateOf<String?>(null) }
+
+    val links = listOf(
+        strings.helpRepoLabel to GITHUB_REPO_URL,
+        strings.helpReleasesLabel to GITHUB_RELEASES_URL,
+        strings.helpIssuesLabel to GITHUB_ISSUES_URL
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = strings.helpDialogTitle,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = strings.helpVersionLicense(versionName),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = strings.helpProjectSummary,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = strings.helpLinksTitle,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    links.forEach { (label, url) ->
+                        HelpLinkRow(
+                            label = label,
+                            url = url,
+                            isCopied = copiedUrl == url,
+                            onCopy = {
+                                clipboardManager.setText(AnnotatedString(url))
+                                copiedUrl = url
+                                coroutineScope.launch {
+                                    delay(1600)
+                                    if (copiedUrl == url) copiedUrl = null
+                                }
+                            },
+                            onOpen = {
+                                runCatching { uriHandler.openUri(url) }
+                            }
+                        )
+                    }
+                }
+
+                SectionDivider()
+
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = strings.helpTipsTitle,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = strings.helpTipsBody,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 18.sp
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(strings.done)
+            }
+        }
+    )
+}
+
+@Composable
+private fun HelpLinkRow(
+    label: String,
+    url: String,
+    isCopied: Boolean,
+    onCopy: () -> Unit,
+    onOpen: () -> Unit
+) {
+    val strings = LocalAppStrings.current
+    val shape = RoundedCornerShape(10.dp)
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .clickable(onClick = onOpen),
+        shape = shape,
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = if (isCopied) "$label · ${strings.helpCopiedFeedback}" else label,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (isCopied) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = url,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(
+                onClick = onCopy,
+                modifier = Modifier.size(30.dp)
+            ) {
+                Icon(
+                    imageVector = if (isCopied) Icons.Default.Check else Icons.Default.ContentCopy,
+                    contentDescription = strings.helpCopyAction,
+                    modifier = Modifier.size(16.dp),
+                    tint = if (isCopied) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(
+                onClick = onOpen,
+                modifier = Modifier.size(30.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.OpenInNew,
+                    contentDescription = strings.helpOpenAction,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }

@@ -203,6 +203,7 @@ fun MainAppScaffold(
     val isNaturalScrolling by viewModel.isNaturalScrolling.collectAsState()
     val isLeftMouseHeld by viewModel.isLeftMouseHeld.collectAsState()
     val showInlineTrackpadInText by viewModel.showInlineTrackpadInText.collectAsState()
+    val imeSwitchKey by viewModel.imeSwitchKey.collectAsState()
     val snippets by viewModel.snippets.collectAsState()
     val longTextInput by viewModel.longTextInput.collectAsState()
     val sendTargetMode by viewModel.sendTargetMode.collectAsState()
@@ -266,6 +267,7 @@ fun MainAppScaffold(
     if (showLandscapeKeyboard) {
         LandscapeKeyboardScreen(
             isHapticEnabled = isHapticEnabled,
+            imeSwitchKey = imeSwitchKey,
             onSendKey = { viewModel.sendKey(it) },
             onExit = { showLandscapeKeyboard = false }
         )
@@ -425,6 +427,8 @@ fun MainAppScaffold(
                         showInlineTrackpad = showInlineTrackpadInText,
                         trackpadSensitivity = trackpadSensitivity,
                         naturalScrolling = isNaturalScrolling,
+                        imeSwitchKey = imeSwitchKey,
+                        onImeSwitchKeyChange = { viewModel.setImeSwitchKey(it) },
                         onSendText = { viewModel.sendTextPaste(it) },
                         onSendKey = { viewModel.sendKey(it) },
                         onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },
