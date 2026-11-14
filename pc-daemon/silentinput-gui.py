@@ -32,7 +32,21 @@ def _is_zh_locale() -> bool:
     return True
 
 
+def resolve_gui_is_zh(lang_pref: str | None) -> bool:
+    if lang_pref == "zh":
+        return True
+    if lang_pref == "en":
+        return False
+    return _is_zh_locale()
+
+
 _IS_ZH = _is_zh_locale()
+
+
+def _set_gui_language(lang_pref: str | None) -> bool:
+    global _IS_ZH
+    _IS_ZH = resolve_gui_is_zh(lang_pref)
+    return _IS_ZH
 
 
 def _t(zh: str, en: str) -> str:
@@ -50,17 +64,31 @@ class SilentInputApp(Adw.Application):
 
 class MainWindow(Adw.ApplicationWindow):
     def __init__(self, app):
+        self.config = silentinput_config.load_config()
+        _set_gui_language(self.config.get("gui_language", "system"))
         super().__init__(application=app, title=_t("SilentInput 控制中心", "SilentInput Control Center"))
         self.set_default_size(540, 720)
 
-        self.config = silentinput_config.load_config()
         self._probe_in_flight = False
         self._service_action_count = 0
         self._autostart_action_count = 0
         self._config_generation = 0
         self._acl_save_timer_id = None
         self._status_timer_id = None
+        self._rendered_ips = []
+        self.ip_rows = []
         self.connect("close-request", self.on_close_request)
+
+        self._build_ui()
+
+        # Initial refresh and periodic status update timer
+        self.update_status()
+        self._status_timer_id = GLib.timeout_add_seconds(3, self.update_status)
+
+    def _build_ui(self):
+        self.set_title(_t("SilentInput 控制中心", "SilentInput Control Center"))
+        self._rendered_ips = []
+        self.ip_rows = []
 
         # Build UI layout
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -101,7 +129,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         self.token_row = Adw.ActionRow(title=_t("配对密钥", "Pairing Key"))
         token_val = self.config.get("auth_token", "")
-        exp_txt = silentinput_config.get_token_status_text(self.config)
+        exp_txt = silentinput_config.get_token_status_text(self.config, is_zh=_IS_ZH)
         self.token_row.set_subtitle(f"{token_val}  ({exp_txt})")
 
         btn_copy_token = Gtk.Button.new_from_icon_name("edit-copy-symbolic")
@@ -188,6 +216,16 @@ class MainWindow(Adw.ApplicationWindow):
         actions_group = Adw.PreferencesGroup(title=_t("操作与维护", "Actions & Maintenance"))
         page.add(actions_group)
 
+        self.lang_row = Adw.ComboRow(title=_t("界面语言", "Interface Language"))
+        self.lang_labels = [_t("跟随系统", "Follow System"), "简体中文", "English"]
+        self.lang_keys = ["system", "zh", "en"]
+        self.lang_row.set_model(Gtk.StringList.new(self.lang_labels))
+        current_lang = self.config.get("gui_language", "system")
+        sel_lang_idx = self.lang_keys.index(current_lang) if current_lang in self.lang_keys else 0
+        self.lang_row.set_selected(sel_lang_idx)
+        self.lang_row.connect("notify::selected", self.on_language_changed)
+        actions_group.add(self.lang_row)
+
         restart_row = Adw.ActionRow(title=_t("重启服务", "Restart Service"))
         btn_restart = Gtk.Button(label=_t("重启", "Restart"))
         btn_restart.set_valign(Gtk.Align.CENTER)
@@ -211,9 +249,19 @@ class MainWindow(Adw.ApplicationWindow):
         uninstall_row.add_suffix(btn_uninstall)
         actions_group.add(uninstall_row)
 
-        # Initial refresh and periodic status update timer
-        self.update_status()
-        self._status_timer_id = GLib.timeout_add_seconds(3, self.update_status)
+    def on_language_changed(self, combo_row, param):
+        idx = combo_row.get_selected()
+        if 0 <= idx < len(self.lang_keys):
+            new_lang = self.lang_keys[idx]
+            if new_lang == self.config.get("gui_language", "system"):
+                return
+            self._config_generation += 1
+            self.config["gui_language"] = new_lang
+            silentinput_config.save_config(self.config)
+            _set_gui_language(new_lang)
+            self._build_ui()
+            self.update_status()
+            self.show_toast(_t("界面语言已切换", "Interface language updated"))
 
     def on_close_request(self, _win):
         if self._status_timer_id is not None:
@@ -254,6 +302,12 @@ class MainWindow(Adw.ApplicationWindow):
         return False
 
     def _sync_config_widgets(self):
+        cfg_lang = self.config.get("gui_language", "system")
+        lang_idx = self.lang_keys.index(cfg_lang) if cfg_lang in self.lang_keys else 0
+        self.lang_row.handler_block_by_func(self.on_language_changed)
+        self.lang_row.set_selected(lang_idx)
+        self.lang_row.handler_unblock_by_func(self.on_language_changed)
+
         exp = self.config.get("token_expire_mode", "never")
         exp_idx = self.expire_keys.index(exp) if exp in self.expire_keys else 0
         self.expire_row.handler_block_by_func(self.on_expire_mode_changed)
@@ -380,6 +434,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def on_autostart_toggled(self, switch_row, param):
         active = switch_row.get_active()
+        cur_is_zh = _IS_ZH
         self._autostart_action_count += 1
         self.autostart_row.set_subtitle(
             _t("正在开启开机启动...", "Enabling autostart...") if active else _t("正在关闭开机启动...", "Disabling autostart...")
@@ -388,7 +443,7 @@ class MainWindow(Adw.ApplicationWindow):
         def _worker():
             ok, msg = False, ""
             try:
-                ok, msg = silentinput_config.set_autostart_enabled(active)
+                ok, msg = silentinput_config.set_autostart_enabled(active, is_zh=cur_is_zh)
             finally:
                 def _done():
                     self._autostart_action_count = max(0, self._autostart_action_count - 1)
@@ -434,7 +489,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def update_token_display(self):
         token = self.config.get("auth_token", "")
-        exp_txt = silentinput_config.get_token_status_text(self.config)
+        exp_txt = silentinput_config.get_token_status_text(self.config, is_zh=_IS_ZH)
         self.token_row.set_subtitle(f"{token}  ({exp_txt})")
 
     def on_usb_auth_changed(self, switch_row, param):

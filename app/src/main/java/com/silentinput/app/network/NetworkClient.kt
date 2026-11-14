@@ -352,11 +352,7 @@ class NetworkClient(
                                 }
                             } else {
                                 val serverMsg = json.optString("message", "")
-                                val errFormatter: (AppStrings) -> String = if (serverMsg.contains("Too many", ignoreCase = true)) {
-                                    { it.netErrTooManyAttempts }
-                                } else {
-                                    { it.netErrWrongToken }
-                                }
+                                val tooManyAttempts = serverMsg.contains("Too many", ignoreCase = true)
                                 Log.w(TAG, "Authentication failed: $serverMsg")
                                 synchronized(stateLock) {
                                     if (this@NetworkClient.webSocket !== webSocket) return
@@ -364,7 +360,9 @@ class NetworkClient(
                                     _isReconnecting.value = false
                                     reconnectJob?.cancel()
                                     reconnectJob = null
-                                    setConnectionError(errFormatter)
+                                    setConnectionError { s ->
+                                        if (tooManyAttempts) s.netErrTooManyAttempts else s.netErrWrongToken
+                                    }
                                     disconnectSocketOnlyLocked()
                                 }
                             }
@@ -401,23 +399,21 @@ class NetworkClient(
                     val isTofuMismatch = _certMismatchHost.value != null ||
                         t.message?.contains("TOFU_CERT_MISMATCH") == true ||
                         t.cause?.message?.contains("TOFU_CERT_MISMATCH") == true
-                    val errFormatter: (AppStrings) -> String = when {
-                        isTofuMismatch -> {
-                            shouldBeConnected = false
-                            { it.netErrTofuMismatch }
-                        }
-                        useTls && (t is javax.net.ssl.SSLException || t.message?.contains("SSL", ignoreCase = true) == true) ->
-                            { it.netErrTlsHandshakeFailed }
-                        !useTls && (t.message?.contains("CLEARTEXT", ignoreCase = true) == true) ->
-                            { it.netErrCleartextBlocked }
-                        t is java.net.ConnectException ->
-                            { it.netErrConnectFailedHost }
-                        t is java.net.SocketTimeoutException ->
-                            { it.netErrTimeout }
-                        else ->
-                            { s -> t.message ?: s.netErrGenericFailed }
+                    if (isTofuMismatch) {
+                        shouldBeConnected = false
                     }
-                    setConnectionError(errFormatter)
+                    setConnectionError { s ->
+                        when {
+                            isTofuMismatch -> s.netErrTofuMismatch
+                            useTls && (t is javax.net.ssl.SSLException || t.message?.contains("SSL", ignoreCase = true) == true) ->
+                                s.netErrTlsHandshakeFailed
+                            !useTls && (t.message?.contains("CLEARTEXT", ignoreCase = true) == true) ->
+                                s.netErrCleartextBlocked
+                            t is java.net.ConnectException -> s.netErrConnectFailedHost
+                            t is java.net.SocketTimeoutException -> s.netErrTimeout
+                            else -> t.message ?: s.netErrGenericFailed
+                        }
+                    }
                     handleDisconnectedLocked()
                 }
             }
@@ -434,13 +430,9 @@ class NetworkClient(
             scopedClient.newWebSocket(request, listener)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to open WebSocket ($url): ${e.message}", e)
-            setConnectionError(
-                if (e is IllegalArgumentException) {
-                    { it.netErrInvalidIp }
-                } else {
-                    { it.netErrOpenFailed(e.message) }
-                }
-            )
+            setConnectionError { s ->
+                if (e is IllegalArgumentException) s.netErrInvalidIp else s.netErrOpenFailed(e.message)
+            }
             _isConnecting.value = false
             _isReconnecting.value = false
             shouldBeConnected = false

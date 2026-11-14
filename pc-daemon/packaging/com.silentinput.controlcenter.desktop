@@ -1,7 +1,8 @@
 [Desktop Entry]
-Name=SilentInput 控制中心
-Name[en]=SilentInput Control Center
-Comment=静音输入伴侣 PC 服务与设置
+Name=SilentInput Control Center
+Name[zh_CN]=SilentInput 控制中心
+Comment=SilentInput PC companion service and settings
+Comment[zh_CN]=静音输入伴侣 PC 服务与设置
 Exec=/usr/bin/python3 /usr/lib/silentinput/silentinput-gui.py
 Icon=com.silentinput.controlcenter
 Terminal=false

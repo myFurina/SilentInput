@@ -41,6 +41,7 @@ DEFAULT_CONFIG = {
     "access_control_mode": "whitelist", # "whitelist", "blacklist", "all", "localhost_only"
     "whitelist": ["127.0.0.1", "10.*", "192.168.*", "100.*", "172.16.*"],
     "blacklist": [],
+    "gui_language": "system",  # "system", "zh", "en"
 }
 
 def ensure_config_dir():
@@ -59,27 +60,38 @@ def get_token_expire_seconds(mode: str) -> int:
     }
     return mapping.get(mode, 0)
 
-def get_token_status_text(config: dict) -> str:
+def get_token_status_text(config: dict, is_zh: bool = True) -> str:
     mode = config.get("token_expire_mode", "never")
     if mode == "never":
-        return "永不过期"
-    
+        return "永不过期" if is_zh else "Never expires"
+
     expire_sec = get_token_expire_seconds(mode)
     created_at = float(config.get("token_created_at", 0.0))
     if created_at <= 0:
         return mode
-        
+
     elapsed = time.time() - created_at
     remaining = expire_sec - elapsed
     if remaining <= 0:
-        return f"{mode} (已到期，下次连接时轮换)"
-    
+        return (
+            f"{mode} (已到期，下次连接时轮换)"
+            if is_zh
+            else f"{mode} (expired, rotates on next connect)"
+        )
+
     hours = int(remaining // 3600)
     minutes = int((remaining % 3600) // 60)
     if hours > 0:
-        return f"{mode} (剩余 {hours}小时{minutes}分)"
-    else:
-        return f"{mode} (剩余 {minutes}分钟)"
+        return (
+            f"{mode} (剩余 {hours}小时{minutes}分)"
+            if is_zh
+            else f"{mode} ({hours}h {minutes}m left)"
+        )
+    return (
+        f"{mode} (剩余 {minutes}分钟)"
+        if is_zh
+        else f"{mode} ({minutes}m left)"
+    )
 
 def check_and_rotate_token(config: dict) -> tuple[bool, dict]:
     """Check if token is expired based on token_expire_mode, rotate if needed"""
@@ -463,7 +475,7 @@ def is_autostart_enabled() -> bool:
     return _xdg_autostart_file().exists()
 
 
-def set_autostart_enabled(enabled: bool) -> tuple[bool, str]:
+def set_autostart_enabled(enabled: bool, is_zh: bool = True) -> tuple[bool, str]:
     """Enable or disable automatic startup at login (via systemd --user or XDG autostart fallback)."""
     if has_active_systemd():
         override_link = _user_wants_override_link()
@@ -493,9 +505,10 @@ def set_autostart_enabled(enabled: bool) -> tuple[bool, str]:
                     text=True,
                 )
                 if res.returncode != 0 and not is_autostart_enabled():
-                    return False, (res.stderr or res.stdout or "启用开机启动失败").strip()
+                    fallback_err = "启用开机启动失败" if is_zh else "Failed to enable autostart"
+                    return False, (res.stderr or res.stdout or fallback_err).strip()
             subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
-            return True, "已启用开机自动启动"
+            return True, "已启用开机自动启动" if is_zh else "Autostart enabled"
 
         subprocess.run(
             ["systemctl", "--user", "disable", SYSTEMD_SERVICE_NAME],
@@ -512,9 +525,9 @@ def set_autostart_enabled(enabled: bool) -> tuple[bool, str]:
                     override_link.unlink(missing_ok=True)
                 override_link.symlink_to("/dev/null")
             except OSError as e:
-                return False, f"关闭开机启动失败: {e}"
+                return False, (f"关闭开机启动失败: {e}" if is_zh else f"Failed to disable autostart: {e}")
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
-        return True, "已关闭开机自动启动"
+        return True, "已关闭开机自动启动" if is_zh else "Autostart disabled"
 
     autostart_file = _xdg_autostart_file()
     try:
@@ -529,11 +542,11 @@ def set_autostart_enabled(enabled: bool) -> tuple[bool, str]:
                 "X-GNOME-Autostart-enabled=true\n",
                 encoding="utf-8",
             )
-            return True, "已启用开机自动启动 (XDG)"
+            return True, "已启用开机自动启动 (XDG)" if is_zh else "Autostart enabled (XDG)"
         autostart_file.unlink(missing_ok=True)
-        return True, "已关闭开机自动启动"
+        return True, "已关闭开机自动启动" if is_zh else "Autostart disabled"
     except OSError as e:
-        return False, f"设置开机启动失败: {e}"
+        return False, (f"设置开机启动失败: {e}" if is_zh else f"Failed to configure autostart: {e}")
 
 def start_daemon_process() -> tuple[bool, str]:
     """Start daemon in background if not already running"""

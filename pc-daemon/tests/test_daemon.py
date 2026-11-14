@@ -767,6 +767,37 @@ class TestDaemonProtocolAsync(unittest.IsolatedAsyncioTestCase):
             await silentinput_daemon.emit_key_combination("unknownlongkey")
             self.assertEqual(calls, [])
 
+    def test_config_i18n_token_status_and_autostart_messages(self):
+        self.assertEqual(
+            silentinput_config.get_token_status_text({"token_expire_mode": "never"}, is_zh=False),
+            "Never expires",
+        )
+        with mock.patch.object(silentinput_config.time, "time", return_value=5000.0):
+            self.assertEqual(
+                silentinput_config.get_token_status_text(
+                    {"token_expire_mode": "1h", "token_created_at": 4900.0},
+                    is_zh=False,
+                ),
+                "1h (58m left)",
+            )
+            self.assertEqual(
+                silentinput_config.get_token_status_text(
+                    {"token_expire_mode": "1h", "token_created_at": 100.0},
+                    is_zh=False,
+                ),
+                "1h (expired, rotates on next connect)",
+            )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            xdg_file = Path(tmpdir) / "autostart" / "com.silentinput.daemon.desktop"
+            with mock.patch.object(silentinput_config, "has_active_systemd", return_value=False), \
+                 mock.patch.object(silentinput_config, "_xdg_autostart_file", return_value=xdg_file):
+                ok, msg_on = silentinput_config.set_autostart_enabled(True, is_zh=False)
+                self.assertTrue(ok)
+                self.assertEqual(msg_on, "Autostart enabled (XDG)")
+                ok, msg_off = silentinput_config.set_autostart_enabled(False, is_zh=False)
+                self.assertTrue(ok)
+                self.assertEqual(msg_off, "Autostart disabled")
+
 
 if __name__ == "__main__":
     unittest.main()
