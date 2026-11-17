@@ -16,7 +16,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -132,6 +131,11 @@ class MainActivity : ComponentActivity() {
         viewModel.setLeftMouseHold(false)
     }
 
+    override fun onStop() {
+        super.onStop()
+        viewModel.onStop()
+    }
+
     private fun requestBluetoothPermission() {
         val permissions = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -173,30 +177,15 @@ fun MainAppScaffold(
 ) {
     val view = LocalView.current
     val strings = LocalAppStrings.current
-    val resolvedLanguage = LocalResolvedLanguage.current
     DisposableEffect(view) {
         view.isSoundEffectsEnabled = false
         onDispose {}
     }
 
     val currentMode by viewModel.connectionMode.collectAsState()
-    val activeServerIp by viewModel.activeServerIp.collectAsState()
     val isCurrentConnected by viewModel.isCurrentModeConnected.collectAsState()
     val isAnyConnected by viewModel.isAnyConnected.collectAsState()
     val supportsUnicodeDirectTyping by viewModel.supportsUnicodeDirectTyping.collectAsState()
-
-    val isBtConnected by viewModel.isBtConnected.collectAsState()
-    val isBtConnecting by viewModel.isBtConnecting.collectAsState()
-    val btDeviceName by viewModel.btConnectedDeviceName.collectAsState()
-    val btLatency by viewModel.btLatencyMs.collectAsState()
-
-    val isNetConnected by viewModel.isNetConnected.collectAsState()
-    val isNetAuthenticated by viewModel.isNetAuthenticated.collectAsState()
-    val isNetConnecting by viewModel.isNetConnecting.collectAsState()
-    val isNetReconnecting by viewModel.isNetReconnecting.collectAsState()
-    val isNetEncrypted by viewModel.isNetEncrypted.collectAsState()
-    val connectionError by viewModel.netConnectionError.collectAsState()
-    val latencyMs by viewModel.netLatencyMs.collectAsState()
 
     val isHapticEnabled by viewModel.isHapticEnabled.collectAsState()
     val trackpadSensitivity by viewModel.trackpadSensitivity.collectAsState()
@@ -228,23 +217,6 @@ fun MainAppScaffold(
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
     }
-
-    val topBarStatus = ConnectionStatusFormatter.formatTopBarStatus(
-        mode = currentMode,
-        isBtConnected = isBtConnected,
-        isBtConnecting = isBtConnecting,
-        btDeviceName = btDeviceName,
-        btLatencyMs = btLatency,
-        isNetConnected = isNetConnected,
-        isNetAuthenticated = isNetAuthenticated,
-        isNetConnecting = isNetConnecting,
-        isNetReconnecting = isNetReconnecting,
-        isNetEncrypted = isNetEncrypted,
-        netConnectionError = connectionError,
-        netLatencyMs = latencyMs,
-        activeServerIp = activeServerIp,
-        language = resolvedLanguage
-    )
 
     if (showMoreSettingsPage) {
         MoreSettingsScreen(
@@ -285,25 +257,11 @@ fun MainAppScaffold(
                 title = {
                     Column(
                         modifier = Modifier
+                            .fillMaxWidth()
                             .clickable { showConfigDialog = true }
-                            .animateContentSize(animationSpec = tween(SilentMotion.DURATION_STATE_MS))
                     ) {
                         Text("SilentInput", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                        val rawStatusColor = when (topBarStatus.tone) {
-                            StatusTone.ERROR, StatusTone.HIGH_LATENCY -> MaterialTheme.colorScheme.error
-                            StatusTone.PENDING -> MaterialTheme.colorScheme.primary
-                            StatusTone.NORMAL -> MaterialTheme.colorScheme.onSurfaceVariant
-                        }
-                        val statusColor by animateColorAsState(
-                            targetValue = rawStatusColor,
-                            animationSpec = tween(SilentMotion.DURATION_STATE_MS),
-                            label = "topBarStatusColor"
-                        )
-                        Text(
-                            text = topBarStatus.text,
-                            fontSize = 11.sp,
-                            color = statusColor
-                        )
+                        TopBarConnectionStatusSubtitle(viewModel = viewModel)
                     }
                 },
                 actions = {
@@ -457,6 +415,62 @@ fun MainAppScaffold(
             )
         }
     }
+}
+
+@Composable
+private fun TopBarConnectionStatusSubtitle(
+    viewModel: MainViewModel
+) {
+    val resolvedLanguage = LocalResolvedLanguage.current
+    val currentMode by viewModel.connectionMode.collectAsState()
+    val activeServerIp by viewModel.activeServerIp.collectAsState()
+
+    val isBtConnected by viewModel.isBtConnected.collectAsState()
+    val isBtConnecting by viewModel.isBtConnecting.collectAsState()
+    val btDeviceName by viewModel.btConnectedDeviceName.collectAsState()
+    val btLatency by viewModel.btLatencyMs.collectAsState()
+
+    val isNetConnected by viewModel.isNetConnected.collectAsState()
+    val isNetAuthenticated by viewModel.isNetAuthenticated.collectAsState()
+    val isNetConnecting by viewModel.isNetConnecting.collectAsState()
+    val isNetReconnecting by viewModel.isNetReconnecting.collectAsState()
+    val isNetEncrypted by viewModel.isNetEncrypted.collectAsState()
+    val connectionError by viewModel.netConnectionError.collectAsState()
+    val latencyMs by viewModel.netLatencyMs.collectAsState()
+
+    val topBarStatus = ConnectionStatusFormatter.formatTopBarStatus(
+        mode = currentMode,
+        isBtConnected = isBtConnected,
+        isBtConnecting = isBtConnecting,
+        btDeviceName = btDeviceName,
+        btLatencyMs = btLatency,
+        isNetConnected = isNetConnected,
+        isNetAuthenticated = isNetAuthenticated,
+        isNetConnecting = isNetConnecting,
+        isNetReconnecting = isNetReconnecting,
+        isNetEncrypted = isNetEncrypted,
+        netConnectionError = connectionError,
+        netLatencyMs = latencyMs,
+        activeServerIp = activeServerIp,
+        language = resolvedLanguage
+    )
+
+    val rawStatusColor = when (topBarStatus.tone) {
+        StatusTone.ERROR, StatusTone.HIGH_LATENCY -> MaterialTheme.colorScheme.error
+        StatusTone.PENDING -> MaterialTheme.colorScheme.primary
+        StatusTone.NORMAL -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val statusColor by animateColorAsState(
+        targetValue = rawStatusColor,
+        animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+        label = "topBarStatusColor"
+    )
+    Text(
+        text = topBarStatus.text,
+        fontSize = 11.sp,
+        color = statusColor,
+        maxLines = 1
+    )
 }
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {

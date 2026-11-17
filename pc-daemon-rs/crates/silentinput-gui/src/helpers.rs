@@ -1,7 +1,6 @@
-use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::fs;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 pub fn parse_ip_list(raw: &str) -> Vec<String> {
     raw.split(',')
@@ -15,62 +14,16 @@ pub fn format_ip_list(items: &[String]) -> String {
     items.join(", ")
 }
 
-/// Read up to last 32 KiB of the daemon log and return the trailing 80 lines.
-pub fn read_log_tail(log_path: &Path, is_zh: bool) -> String {
-    if !log_path.exists() {
-        return if is_zh {
-            "暂无日志".to_string()
-        } else {
-            "No logs yet".to_string()
-        };
-    }
-
-    let Ok(mut file) = File::open(log_path) else {
-        return if is_zh {
-            format!("读取日志失败: {}", log_path.display())
-        } else {
-            format!("Failed to open log file: {}", log_path.display())
-        };
-    };
-
-    const TAIL_BYTES: u64 = 32 * 1024;
-    if let Ok(meta) = file.metadata() {
-        let size = meta.len();
-        if size > TAIL_BYTES {
-            let _ = file.seek(SeekFrom::Start(size - TAIL_BYTES));
-        }
-    }
-
-    let mut raw = Vec::new();
-    if let Err(err) = file.read_to_end(&mut raw) {
-        return if is_zh {
-            format!("读取日志失败: {err}")
-        } else {
-            format!("Failed to read logs: {err}")
-        };
-    }
-
-    let text = String::from_utf8_lossy(&raw);
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.is_empty() {
-        return if is_zh {
-            "日志为空".to_string()
-        } else {
-            "Log is empty".to_string()
-        };
-    }
-    let start = lines.len().saturating_sub(80);
-    lines[start..].join("\n")
-}
-
-/// Query fontconfig for the preferred Chinese sans-serif font family name on Linux.
+/// Query fontconfig for the preferred Chinese sans-serif font family name on Linux (cached).
 pub fn detect_cjk_font_family() -> Option<&'static str> {
-    query_fontconfig_family("sans:lang=zh-cn")
+    static CJK_SANS: OnceLock<Option<&'static str>> = OnceLock::new();
+    *CJK_SANS.get_or_init(|| query_fontconfig_family("sans:lang=zh-cn"))
 }
 
-/// Query fontconfig for the preferred Chinese monospace font family name on Linux.
+/// Query fontconfig for the preferred Chinese monospace font family name on Linux (cached).
 pub fn detect_cjk_mono_font_family() -> Option<&'static str> {
-    query_fontconfig_family("monospace:lang=zh-cn")
+    static CJK_MONO: OnceLock<Option<&'static str>> = OnceLock::new();
+    *CJK_MONO.get_or_init(|| query_fontconfig_family("monospace:lang=zh-cn"))
 }
 
 fn query_fontconfig_family(pattern: &str) -> Option<&'static str> {

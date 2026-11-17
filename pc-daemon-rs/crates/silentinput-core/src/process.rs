@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
-use std::net::{SocketAddr, TcpStream};
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,21 @@ use crate::config::{
     ensure_config_dir_at, load_config_at, open_private_append_file, SilentInputConfig,
 };
 use crate::paths::{SilentInputPaths, SYSTEMD_SERVICE_NAME};
+
+const MAX_ADB_FRAME_LEN: usize = 1024 * 1024;
+
+struct IfAddrsGuard(*mut libc::ifaddrs);
+
+impl Drop for IfAddrsGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: pointer was allocated by `libc::getifaddrs` and is freed once on drop.
+            unsafe {
+                libc::freeifaddrs(self.0);
+            }
+        }
+    }
+}
 
 pub fn resolve_binary(bin_name: &str) -> PathBuf {
     if let Ok(exe) = env::current_exe() {
@@ -37,33 +53,185 @@ pub fn resolve_binary(bin_name: &str) -> PathBuf {
     PathBuf::from(bin_name)
 }
 
+/// Enumerate non-loopback IPv4 interface addresses via `libc::getifaddrs` (zero subprocesses).
 pub fn get_all_host_ips() -> Vec<String> {
-    let Ok(output) = Command::new("ip")
-        .args(["-4", "-o", "addr", "show"])
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !output.status.success() {
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `getifaddrs` initializes `head` on success (return value 0).
+    if unsafe { libc::getifaddrs(&mut head) } != 0 || head.is_null() {
         return Vec::new();
     }
-    let text = String::from_utf8_lossy(&output.stdout);
+    let _guard = IfAddrsGuard(head);
+
     let mut results = Vec::new();
-    for line in text.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 4 {
-            let ip = parts[3].split('/').next().unwrap_or("");
-            if ip.is_empty() || ip == "127.0.0.1" {
-                continue;
-            }
-            let ip_s = ip.to_string();
-            if !results.contains(&ip_s) {
-                results.push(ip_s);
-            }
+    let mut cur = head;
+    while !cur.is_null() {
+        // SAFETY: `cur` walks a valid null-terminated linked list owned by `_guard`.
+        let ifa = unsafe { &*cur };
+        cur = ifa.ifa_next;
+
+        if ifa.ifa_addr.is_null() {
+            continue;
+        }
+        // SAFETY: `ifa_addr` is non-null; reading `sa_family` checks address family before casting.
+        let family = unsafe { (*ifa.ifa_addr).sa_family };
+        if i32::from(family) != libc::AF_INET {
+            continue;
+        }
+        // SAFETY: `sa_family == AF_INET` guarantees `ifa_addr` points to a `sockaddr_in`.
+        let sin = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr_in>() };
+        let ipv4 = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+        if ipv4.is_loopback() || ipv4.is_unspecified() {
+            continue;
+        }
+        let ip_s = ipv4.to_string();
+        if !results.contains(&ip_s) {
+            results.push(ip_s);
         }
     }
     results
+}
+
+/// Encode an ADB host/service command with its 4-hex-digit length prefix.
+pub fn encode_adb_request(cmd: &str) -> String {
+    format!("{:04x}{cmd}", cmd.len())
+}
+
+/// Parse an ADB `host:devices` / `adb devices` payload and return only online `device` serials.
+pub fn parse_adb_online_serials(body: &str) -> Vec<String> {
+    let mut devices = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("List of") {
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, char::is_whitespace);
+        let Some(serial) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let Some(state) = parts.next().map(str::trim) else {
+            continue;
+        };
+        if state.split_whitespace().next() == Some("device") {
+            let serial_s = serial.to_string();
+            if !devices.contains(&serial_s) {
+                devices.push(serial_s);
+            }
+        }
+    }
+    devices
+}
+
+/// Return true if `adb reverse --list` output contains an exact whitespace-separated `target_spec` token.
+pub fn adb_reverse_list_has_spec(output: &str, target_spec: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.split_whitespace().any(|tok| tok == target_spec))
+}
+
+/// Query an ADB server over TCP (`host:devices`) without ever spawning an `adb` child process.
+pub fn query_adb_devices_at(addr: SocketAddr, timeout: Duration) -> Vec<String> {
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, timeout) else {
+        return Vec::new();
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+
+    let req = encode_adb_request("host:devices");
+    if stream.write_all(req.as_bytes()).is_err() || stream.flush().is_err() {
+        return Vec::new();
+    }
+
+    let mut status = [0u8; 4];
+    if stream.read_exact(&mut status).is_err() || &status != b"OKAY" {
+        return Vec::new();
+    }
+
+    let mut len_hex = [0u8; 4];
+    if stream.read_exact(&mut len_hex).is_err() {
+        return Vec::new();
+    }
+    let Ok(len_str) = std::str::from_utf8(&len_hex) else {
+        return Vec::new();
+    };
+    let Ok(payload_len) = usize::from_str_radix(len_str, 16) else {
+        return Vec::new();
+    };
+    if payload_len == 0 || payload_len > MAX_ADB_FRAME_LEN {
+        return Vec::new();
+    }
+
+    let mut body = vec![0u8; payload_len];
+    if stream.read_exact(&mut body).is_err() {
+        return Vec::new();
+    }
+    parse_adb_online_serials(&String::from_utf8_lossy(&body))
+}
+
+/// Resolved ADB server connection target from `ADB_SERVER_SOCKET` / `ANDROID_ADB_SERVER_PORT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdbEndpoint {
+    LocalTcp(SocketAddr),
+    UnsupportedSocket,
+}
+
+fn parse_nonzero_port(raw: &str) -> Option<u16> {
+    let port: u16 = raw.trim().parse().ok()?;
+    (port > 0).then_some(port)
+}
+
+/// Resolve ADB server endpoint from explicit `ANDROID_ADB_SERVER_PORT` and `ADB_SERVER_SOCKET` values.
+pub fn resolve_adb_endpoint_from(
+    android_port: Option<&str>,
+    server_socket: Option<&str>,
+) -> AdbEndpoint {
+    if let Some(raw_socket) = server_socket.map(str::trim).filter(|s| !s.is_empty()) {
+        let Some(rest) = raw_socket.strip_prefix("tcp:") else {
+            return AdbEndpoint::UnsupportedSocket;
+        };
+        if let Some(port) = parse_nonzero_port(rest) {
+            return AdbEndpoint::LocalTcp(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+        }
+        if let Some(port_str) = rest
+            .strip_prefix("localhost:")
+            .or_else(|| rest.strip_prefix("127.0.0.1:"))
+        {
+            if let Some(port) = parse_nonzero_port(port_str) {
+                return AdbEndpoint::LocalTcp(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+            }
+            return AdbEndpoint::UnsupportedSocket;
+        }
+        if let Some(port_str) = rest.strip_prefix("[::1]:") {
+            if let Some(port) = parse_nonzero_port(port_str) {
+                return AdbEndpoint::LocalTcp(SocketAddr::from((Ipv6Addr::LOCALHOST, port)));
+            }
+            return AdbEndpoint::UnsupportedSocket;
+        }
+        return AdbEndpoint::UnsupportedSocket;
+    }
+
+    if let Some(raw_port) = android_port.map(str::trim).filter(|s| !s.is_empty()) {
+        return match parse_nonzero_port(raw_port) {
+            Some(port) => AdbEndpoint::LocalTcp(SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
+            None => AdbEndpoint::UnsupportedSocket,
+        };
+    }
+
+    AdbEndpoint::LocalTcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 5037)))
+}
+
+/// Resolve the active ADB server endpoint from environment variables.
+pub fn resolve_adb_endpoint() -> AdbEndpoint {
+    let android_port = env::var("ANDROID_ADB_SERVER_PORT").ok();
+    let server_socket = env::var("ADB_SERVER_SOCKET").ok();
+    resolve_adb_endpoint_from(android_port.as_deref(), server_socket.as_deref())
+}
+
+/// Query connected USB devices from the configured local ADB TCP endpoint without spawning `adb`.
+pub fn get_connected_usb_devices_if_server_running() -> Vec<String> {
+    match resolve_adb_endpoint() {
+        AdbEndpoint::LocalTcp(addr) => query_adb_devices_at(addr, Duration::from_millis(200)),
+        AdbEndpoint::UnsupportedSocket => Vec::new(),
+    }
 }
 
 pub fn get_connected_usb_devices() -> Vec<String> {
@@ -77,20 +245,7 @@ pub fn get_connected_usb_devices() -> Vec<String> {
     if !output.status.success() {
         return Vec::new();
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut devices = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("List of") {
-            continue;
-        }
-        if let Some((serial, state)) = trimmed.split_once('\t') {
-            if state.trim().starts_with("device") {
-                devices.push(serial.trim().to_string());
-            }
-        }
-    }
-    devices
+    parse_adb_online_serials(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// Find running `silentinput-daemon` (or legacy `silentinput-daemon.py`) PIDs via `/proc` cmdline.

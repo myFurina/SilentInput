@@ -37,6 +37,9 @@ class BluetoothCompanionClient(
         private const val TAG = "BtCompanionClient"
         // Standard Bluetooth Serial Port Profile (SPP) UUID
         val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb")
+        private const val PING_INITIAL_DELAY_MS = 1000L
+        private const val PING_INTERVAL_FOREGROUND_MS = 5000L
+        private const val PING_TIMEOUT_MS = 5000L
     }
 
     private val bluetoothAdapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
@@ -116,9 +119,9 @@ class BluetoothCompanionClient(
     @Volatile
     private var wakeSignal: Channel<Unit>? = null
     @Volatile
-    private var pingPendingTimestamp: Long? = null
+    private var isInBackground = false
     @Volatile
-    private var lastPongTimestamp: Long = 0L
+    private var pingResponseSignal: CompletableDeferred<Unit>? = null
 
     private var receiverRegistered = false
     private val btStateReceiver = object : BroadcastReceiver() {
@@ -275,7 +278,9 @@ class BluetoothCompanionClient(
 
                         startWriterLocked(signal, out)
                         startReaderLocked()
-                        startPingLoopLocked()
+                        if (!isInBackground) {
+                            startPingLoopLocked()
+                        }
                         sendRaw(ProtocolPayloads.buildGetStatusJson())
                     } else {
                         try { activeSocket?.close() } catch (_: Exception) {}
@@ -372,12 +377,14 @@ class BluetoothCompanionClient(
                 "pong" -> {
                     val sentTime = json.optLong("t", 0L)
                     val now = SystemClock.elapsedRealtime()
-                    if (sentTime > 0) {
-                        val rtt = (now - sentTime).coerceAtLeast(0L)
-                        _latencyMs.value = rtt
+                    synchronized(stateLock) {
+                        if (sentTime > 0) {
+                            val rtt = (now - sentTime).coerceAtLeast(0L)
+                            _latencyMs.value = rtt
+                        }
+                        pingResponseSignal?.complete(Unit)
+                        pingResponseSignal = null
                     }
-                    pingPendingTimestamp = null
-                    lastPongTimestamp = now
                 }
                 "auth_result" -> {
                     val status = json.optString("status")
@@ -406,30 +413,55 @@ class BluetoothCompanionClient(
     }
 
     private fun startPingLoopLocked() {
-        pingJob?.cancel()
-        pingPendingTimestamp = null
-        lastPongTimestamp = SystemClock.elapsedRealtime()
+        stopPingLoopLocked()
 
         pingJob = clientScope.launch {
-            while (isActive && _isConnected.value) {
-                val now = SystemClock.elapsedRealtime()
-                val pending = pingPendingTimestamp
-                if (pending != null) {
-                    val waitTime = now - pending
-                    if (waitTime > 5000L) {
-                        Log.w(TAG, "Bluetooth heartbeat timeout (${waitTime}ms), closing dead connection")
-                        onConnectionLost()
-                        break
-                    } else if (waitTime > 400L) {
-                        _latencyMs.value = waitTime
-                    }
-                } else if (now - lastPongTimestamp >= 2000L) {
-                    pingPendingTimestamp = now
-                    sendRaw(ProtocolPayloads.buildPingJson(now))
+            var nextDelay = PING_INITIAL_DELAY_MS
+            while (isActive && !isInBackground && _isConnected.value) {
+                delay(nextDelay)
+                nextDelay = PING_INTERVAL_FOREGROUND_MS
+                if (!isActive || isInBackground || !_isConnected.value) {
+                    break
                 }
-                delay(400L)
+
+                val deferred = CompletableDeferred<Unit>()
+                val sentAt = SystemClock.elapsedRealtime()
+                val canSend = synchronized(stateLock) {
+                    if (isInBackground || !_isConnected.value) {
+                        false
+                    } else {
+                        pingResponseSignal = deferred
+                        true
+                    }
+                }
+                if (!canSend) {
+                    deferred.cancel()
+                    break
+                }
+                sendRaw(ProtocolPayloads.buildPingJson(sentAt))
+
+                val received = withTimeoutOrNull(PING_TIMEOUT_MS) {
+                    deferred.await()
+                }
+                if (received == null && isActive && !isInBackground && _isConnected.value) {
+                    Log.w(TAG, "Bluetooth heartbeat timeout (>${PING_TIMEOUT_MS}ms), closing dead connection")
+                    synchronized(stateLock) {
+                        if (pingResponseSignal === deferred) {
+                            pingResponseSignal = null
+                        }
+                    }
+                    onConnectionLost()
+                    break
+                }
             }
         }
+    }
+
+    private fun stopPingLoopLocked() {
+        pingResponseSignal?.cancel()
+        pingResponseSignal = null
+        pingJob?.cancel()
+        pingJob = null
     }
 
     private fun closeResourcesLocked() {
@@ -455,12 +487,10 @@ class BluetoothCompanionClient(
             _connectedDeviceAddress.value = null
             _latencyMs.value = null
             _supportsUnicodeDirectTyping.value = true
-            pingPendingTimestamp = null
             if (wasConnectedOrConnecting) {
                 setStatusMessage { it.btStatusConnectionLost }
             }
-            pingJob?.cancel()
-            pingJob = null
+            stopPingLoopLocked()
             writeJob?.cancel()
             writeJob = null
             readJob?.cancel()
@@ -478,17 +508,38 @@ class BluetoothCompanionClient(
         _connectedDeviceAddress.value = null
         _latencyMs.value = null
         _supportsUnicodeDirectTyping.value = true
-        pingPendingTimestamp = null
         if (resetStatus) {
             setStatusMessage { it.btStatusDisconnected }
         }
-        pingJob?.cancel()
-        pingJob = null
+        stopPingLoopLocked()
         writeJob?.cancel()
         writeJob = null
         readJob?.cancel()
         readJob = null
         closeResourcesLocked()
+    }
+
+    fun enterBackground() {
+        synchronized(stateLock) {
+            isInBackground = true
+            stopPingLoopLocked()
+        }
+    }
+
+    fun suspendForBackground() {
+        synchronized(stateLock) {
+            if (!isInBackground) return
+            disconnectLocked(resetStatus = true)
+        }
+    }
+
+    fun exitBackground() {
+        synchronized(stateLock) {
+            isInBackground = false
+            if (_isConnected.value) {
+                startPingLoopLocked()
+            }
+        }
     }
 
     fun disconnect() {

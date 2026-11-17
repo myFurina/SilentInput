@@ -5,6 +5,7 @@ mod style;
 use std::process::Command;
 use std::time::Duration;
 
+use iced::keyboard;
 use iced::theme::Mode;
 use iced::widget::{
     button, column, container, opaque, operation, pick_list, row, scrollable, space, text,
@@ -16,20 +17,26 @@ use silentinput_core::config::{
     SilentInputConfig,
 };
 use silentinput_core::i18n::{resolve_gui_is_zh, t};
+use silentinput_core::logs::read_log_tail_at;
 use silentinput_core::paths::SilentInputPaths;
 use silentinput_core::process::{
-    get_all_host_ips, get_connected_usb_devices, get_package_uninstall_command,
+    get_all_host_ips, get_connected_usb_devices_if_server_running, get_package_uninstall_command,
     is_autostart_enabled_at, is_daemon_running_with_config, is_system_package_install,
     service_restart_at, service_start_at, service_stop_at, set_autostart_enabled_at,
 };
 
 use crate::helpers::{
     detect_cjk_font_family, detect_cjk_mono_font_family, format_ip_list, parse_ip_list,
-    perform_user_uninstall, read_log_tail,
+    perform_user_uninstall,
 };
 use crate::i18n::{
     acl_mode_options, expire_options, find_option, language_options, theme_options, PickOption,
 };
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ProbeOptions {
+    include_autostart: bool,
+}
 
 #[derive(Debug, Clone)]
 struct ProbeSnapshot {
@@ -39,7 +46,7 @@ struct ProbeSnapshot {
     config: SilentInputConfig,
     running: bool,
     pid: i32,
-    autostart: bool,
+    autostart: Option<bool>,
     usb_devices: Vec<String>,
     host_ips: Vec<String>,
 }
@@ -53,8 +60,12 @@ enum ModalView {
 
 #[derive(Debug, Clone)]
 enum Message {
+    BootProbe,
     TickProbe,
     ProbeCompleted(Box<ProbeSnapshot>),
+    ProbeFailed,
+    WindowFocused,
+    WindowUnfocused,
     ToggleService(bool),
     ServiceActionFinished(bool, String),
     ToggleAutostart(bool),
@@ -76,6 +87,7 @@ enum Message {
     RestartActionFinished,
     OpenLogs,
     RefreshLogs,
+    LogsLoaded(u64, String),
     CloseModal,
     OpenUninstall,
     StopServiceAndQuit,
@@ -90,6 +102,7 @@ struct ControlCenterState {
     config: SilentInputConfig,
     is_zh: bool,
     system_dark: bool,
+    window_focused: bool,
     mono_font: Font,
     running: bool,
     pid: i32,
@@ -106,10 +119,14 @@ struct ControlCenterState {
     service_gen: u64,
     autostart_gen: u64,
     probe_in_flight: bool,
+    queued_probe: Option<ProbeOptions>,
     toast: Option<String>,
     toast_seq: u64,
     modal: Option<ModalView>,
     log_scroll_id: Id,
+    logs_seq: u64,
+    logs_loading: bool,
+    uninstall_in_flight: bool,
 }
 
 impl ControlCenterState {
@@ -134,6 +151,7 @@ impl ControlCenterState {
             config,
             is_zh,
             system_dark: false,
+            window_focused: true,
             mono_font,
             running: false,
             pid: 0,
@@ -150,17 +168,39 @@ impl ControlCenterState {
             service_gen: 0,
             autostart_gen: 0,
             probe_in_flight: false,
+            queued_probe: None,
             toast: None,
             toast_seq: 0,
             modal: None,
             log_scroll_id: Id::unique(),
+            logs_seq: 0,
+            logs_loading: false,
+            uninstall_in_flight: false,
         };
         (
             state,
             Task::batch([
-                Task::done(Message::TickProbe),
+                Task::done(Message::BootProbe),
                 iced::system::theme().map(Message::SystemThemeChanged),
             ]),
+        )
+    }
+
+    fn load_logs_async(&mut self) -> Task<Message> {
+        self.logs_seq = self.logs_seq.saturating_add(1);
+        self.logs_loading = true;
+        let seq = self.logs_seq;
+        let paths = self.paths.clone();
+        let is_zh = self.is_zh;
+        Task::perform(
+            async move { tokio::task::spawn_blocking(move || read_log_tail_at(&paths, is_zh, 80)).await },
+            move |res| match res {
+                Ok(text) => Message::LogsLoaded(seq, text),
+                Err(_) => Message::LogsLoaded(
+                    seq,
+                    t(is_zh, "读取日志失败", "Failed to read logs").to_string(),
+                ),
+            },
         )
     }
 
@@ -177,10 +217,16 @@ impl ControlCenterState {
         )
     }
 
-    fn run_probe(&mut self) -> Task<Message> {
+    fn request_probe(&mut self, opts: ProbeOptions) -> Task<Message> {
         if self.probe_in_flight {
+            let queued = self.queued_probe.get_or_insert(ProbeOptions::default());
+            queued.include_autostart |= opts.include_autostart;
             return Task::none();
         }
+        self.run_probe_with(opts)
+    }
+
+    fn run_probe_with(&mut self, opts: ProbeOptions) -> Task<Message> {
         self.probe_in_flight = true;
         let paths = self.paths.clone();
         let gen_before = self.config_generation;
@@ -191,8 +237,10 @@ impl ControlCenterState {
                 tokio::task::spawn_blocking(move || {
                     let cfg = load_config_at(&paths);
                     let (running, pid) = is_daemon_running_with_config(&paths, &cfg);
-                    let autostart = is_autostart_enabled_at(&paths);
-                    let usb_devices = get_connected_usb_devices();
+                    let autostart = opts
+                        .include_autostart
+                        .then(|| is_autostart_enabled_at(&paths));
+                    let usb_devices = get_connected_usb_devices_if_server_running();
                     let host_ips = get_all_host_ips();
                     ProbeSnapshot {
                         gen_before,
@@ -210,7 +258,7 @@ impl ControlCenterState {
             },
             |res| match res {
                 Ok(snap) => Message::ProbeCompleted(Box::new(snap)),
-                Err(_) => Message::TickProbe,
+                Err(_) => Message::ProbeFailed,
             },
         )
     }
@@ -226,7 +274,34 @@ impl ControlCenterState {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::TickProbe => self.run_probe(),
+            Message::BootProbe => self.request_probe(ProbeOptions {
+                include_autostart: true,
+            }),
+            Message::TickProbe => self.request_probe(ProbeOptions {
+                include_autostart: false,
+            }),
+            Message::ProbeFailed => {
+                self.probe_in_flight = false;
+                if let Some(queued) = self.queued_probe.take() {
+                    return self.run_probe_with(queued);
+                }
+                Task::none()
+            }
+            Message::WindowFocused => {
+                let was_unfocused = !self.window_focused;
+                self.window_focused = true;
+                if was_unfocused {
+                    self.request_probe(ProbeOptions {
+                        include_autostart: true,
+                    })
+                } else {
+                    Task::none()
+                }
+            }
+            Message::WindowUnfocused => {
+                self.window_focused = false;
+                Task::none()
+            }
             Message::ProbeCompleted(snap) => {
                 self.probe_in_flight = false;
                 if snap.gen_before == self.config_generation && !self.pending_acl_save {
@@ -241,13 +316,19 @@ impl ControlCenterState {
                     self.running = snap.running;
                     self.pid = snap.pid;
                 }
-                if self.autostart_action_count == 0
-                    && snap.autostart_gen_before == self.autostart_gen
-                {
-                    self.autostart = snap.autostart;
+                if let Some(autostart) = snap.autostart {
+                    if self.autostart_action_count == 0
+                        && snap.autostart_gen_before == self.autostart_gen
+                    {
+                        self.autostart = autostart;
+                    }
                 }
                 self.usb_devices = snap.usb_devices;
                 self.host_ips = snap.host_ips;
+
+                if let Some(queued) = self.queued_probe.take() {
+                    return self.run_probe_with(queued);
+                }
                 Task::none()
             }
             Message::ToggleService(enable) => {
@@ -282,7 +363,12 @@ impl ControlCenterState {
                 } else {
                     Task::none()
                 };
-                Task::batch([toast_task, self.run_probe()])
+                Task::batch([
+                    toast_task,
+                    self.request_probe(ProbeOptions {
+                        include_autostart: false,
+                    }),
+                ])
             }
             Message::ToggleAutostart(enable) => {
                 if self.autostart_action_count > 0 {
@@ -306,15 +392,15 @@ impl ControlCenterState {
                     },
                 )
             }
-            Message::AutostartActionFinished(ok, msg) => {
+            Message::AutostartActionFinished(_ok, msg) => {
                 self.autostart_action_count = self.autostart_action_count.saturating_sub(1);
                 let mut tasks = Vec::new();
                 if !msg.is_empty() {
                     tasks.push(self.show_toast(msg));
                 }
-                if !ok {
-                    tasks.push(self.run_probe());
-                }
+                tasks.push(self.request_probe(ProbeOptions {
+                    include_autostart: true,
+                }));
                 Task::batch(tasks)
             }
             Message::CopyToken => {
@@ -451,15 +537,43 @@ impl ControlCenterState {
             Message::RestartActionFinished => {
                 self.service_action_count = self.service_action_count.saturating_sub(1);
                 let toast = self.show_toast(t(self.is_zh, "服务已重启", "Service restarted"));
-                Task::batch([toast, self.run_probe()])
+                Task::batch([
+                    toast,
+                    self.request_probe(ProbeOptions {
+                        include_autostart: false,
+                    }),
+                ])
             }
-            Message::OpenLogs | Message::RefreshLogs => {
-                let text = read_log_tail(&self.paths.log_file(), self.is_zh);
-                self.modal = Some(ModalView::Logs(text));
-                operation::snap_to_end(self.log_scroll_id.clone())
+            Message::OpenLogs => {
+                self.modal = Some(ModalView::Logs(
+                    t(self.is_zh, "正在加载日志...", "Loading logs...").to_string(),
+                ));
+                self.load_logs_async()
+            }
+            Message::RefreshLogs => {
+                if self.logs_loading {
+                    return Task::none();
+                }
+                self.load_logs_async()
+            }
+            Message::LogsLoaded(seq, text) => {
+                if seq != self.logs_seq {
+                    return Task::none();
+                }
+                self.logs_loading = false;
+                if matches!(self.modal, Some(ModalView::Logs(_))) {
+                    self.modal = Some(ModalView::Logs(text));
+                    operation::snap_to_end(self.log_scroll_id.clone())
+                } else {
+                    Task::none()
+                }
             }
             Message::CloseModal => {
+                if self.uninstall_in_flight {
+                    return Task::none();
+                }
                 self.modal = None;
+                self.logs_loading = false;
                 Task::none()
             }
             Message::OpenUninstall => {
@@ -473,6 +587,10 @@ impl ControlCenterState {
                 Task::none()
             }
             Message::StopServiceAndQuit => {
+                if self.uninstall_in_flight {
+                    return Task::none();
+                }
+                self.uninstall_in_flight = true;
                 let paths = self.paths.clone();
                 let toast = self.show_toast(t(self.is_zh, "正在停止服务...", "Stopping service..."));
                 let stop_task = Task::perform(
@@ -487,6 +605,10 @@ impl ControlCenterState {
                 Task::batch([toast, stop_task])
             }
             Message::ConfirmUserUninstall => {
+                if self.uninstall_in_flight {
+                    return Task::none();
+                }
+                self.uninstall_in_flight = true;
                 let toast = self.show_toast(t(self.is_zh, "正在卸载...", "Uninstalling..."));
                 let paths = self.paths.clone();
                 let task = Task::perform(
@@ -506,6 +628,7 @@ impl ControlCenterState {
                 Task::batch([toast, task])
             }
             Message::FinishedAndQuit => {
+                self.uninstall_in_flight = false;
                 self.modal = None;
                 self.flush_acl_if_pending();
                 iced::exit()
@@ -555,10 +678,34 @@ impl ControlCenterState {
     }
 
     fn subscription(&self) -> Subscription<Message> {
+        let probe_interval = if self.window_focused {
+            Duration::from_secs(3)
+        } else {
+            Duration::from_secs(15)
+        };
+
+        let esc_sub = if self.modal.is_some() && !self.uninstall_in_flight {
+            keyboard::listen().filter_map(|event| match event {
+                keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                    ..
+                } => Some(Message::CloseModal),
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+
         Subscription::batch([
-            iced::time::every(Duration::from_secs(3)).map(|_| Message::TickProbe),
+            iced::time::every(probe_interval).map(|_| Message::TickProbe),
             iced::system::theme_changes().map(Message::SystemThemeChanged),
+            window::events().filter_map(|(_id, event)| match event {
+                window::Event::Focused => Some(Message::WindowFocused),
+                window::Event::Unfocused => Some(Message::WindowUnfocused),
+                _ => None,
+            }),
             window::close_requests().map(Message::WindowCloseRequested),
+            esc_sub,
         ])
     }
 
@@ -992,7 +1139,11 @@ impl ControlCenterState {
                             button(text(t(zh, "刷新", "Refresh")).size(12))
                                 .style(style::secondary_button_style)
                                 .padding([5, 10])
-                                .on_press(Message::RefreshLogs),
+                                .on_press_maybe(if self.logs_loading {
+                                    None
+                                } else {
+                                    Some(Message::RefreshLogs)
+                                }),
                             button(text(t(zh, "关闭", "Close")).size(12))
                                 .style(style::primary_button_style)
                                 .padding([5, 12])
@@ -1045,13 +1196,21 @@ impl ControlCenterState {
                                 button(text(t(zh, "关闭", "Close")).size(13))
                                     .style(style::secondary_button_style)
                                     .padding([7, 14])
-                                    .on_press(Message::CloseModal),
+                                    .on_press_maybe(if self.uninstall_in_flight {
+                                        None
+                                    } else {
+                                        Some(Message::CloseModal)
+                                    }),
                                 button(
                                     text(t(zh, "仅停止服务并退出", "Stop Service & Quit")).size(13),
                                 )
                                 .style(style::primary_button_style)
                                 .padding([7, 14])
-                                .on_press(Message::StopServiceAndQuit),
+                                .on_press_maybe(if self.uninstall_in_flight {
+                                    None
+                                } else {
+                                    Some(Message::StopServiceAndQuit)
+                                }),
                             ]
                             .spacing(8),
                         ]
@@ -1079,11 +1238,19 @@ impl ControlCenterState {
                             button(text(t(zh, "取消", "Cancel")).size(13))
                                 .style(style::secondary_button_style)
                                 .padding([7, 14])
-                                .on_press(Message::CloseModal),
+                                .on_press_maybe(if self.uninstall_in_flight {
+                                    None
+                                } else {
+                                    Some(Message::CloseModal)
+                                }),
                             button(text(t(zh, "确认卸载", "Uninstall")).size(13))
                                 .style(style::danger_button_style)
                                 .padding([7, 14])
-                                .on_press(Message::ConfirmUserUninstall),
+                                .on_press_maybe(if self.uninstall_in_flight {
+                                    None
+                                } else {
+                                    Some(Message::ConfirmUserUninstall)
+                                }),
                         ]
                         .spacing(8),
                     ]
@@ -1169,10 +1336,10 @@ mod tests {
     use silentinput_core::config::{load_config_at, save_config_at, SilentInputConfig};
     use silentinput_core::paths::SilentInputPaths;
 
-    use crate::helpers::{parse_ip_list, read_log_tail};
+    use crate::helpers::parse_ip_list;
     use crate::i18n::{find_option, language_options, theme_options};
     use crate::style;
-    use crate::{ControlCenterState, Message, ProbeSnapshot};
+    use crate::{ControlCenterState, Message, ModalView, ProbeOptions, ProbeSnapshot};
 
     fn tmp_paths(tag: &str) -> SilentInputPaths {
         let nanos = std::time::SystemTime::now()
@@ -1208,7 +1375,7 @@ mod tests {
             },
             running: true,
             pid: 1234,
-            autostart: false,
+            autostart: Some(false),
             usb_devices: vec![],
             host_ips: vec!["192.168.1.10".to_string()],
         };
@@ -1228,7 +1395,7 @@ mod tests {
             config: load_config_at(&paths),
             running: true,
             pid: 1234,
-            autostart: false,
+            autostart: Some(false),
             usb_devices: vec![],
             host_ips: vec![],
         };
@@ -1279,25 +1446,48 @@ mod tests {
     }
 
     #[test]
-    fn read_log_tail_limits_to_last_80_lines_and_parse_ip_list() {
-        let paths = tmp_paths("logs");
-        fs::create_dir_all(&paths.config_dir).unwrap();
-        let log_path = paths.log_file();
-
-        assert_eq!(read_log_tail(&log_path, false), "No logs yet");
-        let lines: String = (1..=120).map(|i| format!("line-{i}\n")).collect();
-        fs::write(&log_path, lines).unwrap();
-
-        let tail = read_log_tail(&log_path, true);
-        let count = tail.lines().count();
-        assert_eq!(count, 80);
-        assert!(tail.starts_with("line-41"));
-        assert!(tail.ends_with("line-120"));
-
+    fn parse_ip_list_trims_and_skips_empty() {
         assert_eq!(
             parse_ip_list(" 127.0.0.1 , , 10.* , "),
             vec!["127.0.0.1", "10.*"]
         );
+    }
+
+    #[test]
+    fn modal_close_async_logs_and_uninstall_guard() {
+        let paths = tmp_paths("modal_guard");
+        save_config_at(&paths, &SilentInputConfig::default()).unwrap();
+
+        let (mut state, _) = ControlCenterState::new_with_paths(paths.clone());
+
+        // Async log loading sets initial loading modal, ignores stale sequences
+        let _ = state.update(Message::OpenLogs);
+        assert!(matches!(state.modal, Some(ModalView::Logs(_))));
+        assert!(state.logs_loading);
+        let first_seq = state.logs_seq;
+
+        let _ = state.update(Message::LogsLoaded(first_seq.wrapping_sub(1), "stale".to_string()));
+        assert!(state.logs_loading);
+
+        let _ = state.update(Message::LogsLoaded(first_seq, "fresh log line".to_string()));
+        assert!(!state.logs_loading);
+        assert!(matches!(
+            &state.modal,
+            Some(ModalView::Logs(body)) if body == "fresh log line"
+        ));
+
+        // CloseModal dismisses logs modal (also triggered by Esc key subscription)
+        let _ = state.update(Message::CloseModal);
+        assert!(state.modal.is_none());
+
+        // While uninstall_in_flight, CloseModal and repeated uninstall triggers are blocked
+        state.modal = Some(ModalView::UninstallUserConfirm);
+        state.uninstall_in_flight = true;
+        let _ = state.update(Message::CloseModal);
+        assert!(matches!(state.modal, Some(ModalView::UninstallUserConfirm)));
+        let _ = state.update(Message::ConfirmUserUninstall);
+        let _ = state.update(Message::StopServiceAndQuit);
+        assert!(state.uninstall_in_flight);
 
         let _ = fs::remove_dir_all(&paths.config_dir);
     }
@@ -1342,6 +1532,83 @@ mod tests {
         assert!(state.is_dark());
         assert!(style::is_dark_theme(&state.theme()));
         assert_eq!(load_config_at(&paths).gui_theme, "system");
+
+        let _ = fs::remove_dir_all(&paths.config_dir);
+    }
+
+    #[test]
+    fn focus_transitions_and_queued_full_probe_preserve_guards() {
+        let paths = tmp_paths("focus_probe");
+        save_config_at(&paths, &SilentInputConfig::default()).unwrap();
+
+        let (mut state, _) = ControlCenterState::new_with_paths(paths.clone());
+        assert!(state.window_focused);
+        state.autostart = true;
+        state.usb_devices = vec!["1eda8461".to_string()];
+
+        // Repeated Focused when already focused is a no-op
+        let _ = state.update(Message::WindowFocused);
+        assert!(!state.probe_in_flight);
+
+        // Unfocused lowers polling cadence; starting a tick while in flight queues Focus refresh
+        let _ = state.update(Message::WindowUnfocused);
+        assert!(!state.window_focused);
+        let _ = state.update(Message::TickProbe);
+        assert!(state.probe_in_flight);
+
+        let _ = state.update(Message::WindowFocused);
+        assert!(state.window_focused);
+        assert_eq!(
+            state.queued_probe,
+            Some(ProbeOptions {
+                include_autostart: true,
+            })
+        );
+
+        // Completing in-flight partial tick (autostart=None) keeps existing autostart
+        // and immediately dispatches the queued full probe
+        let partial_snap = ProbeSnapshot {
+            gen_before: state.config_generation,
+            service_gen_before: state.service_gen,
+            autostart_gen_before: state.autostart_gen,
+            config: load_config_at(&paths),
+            running: true,
+            pid: 4242,
+            autostart: None,
+            usb_devices: vec!["1eda8461".to_string()],
+            host_ips: vec!["10.0.0.2".to_string()],
+        };
+        let _ = state.update(Message::ProbeCompleted(Box::new(partial_snap)));
+        assert!(state.autostart);
+        assert_eq!(state.usb_devices, vec!["1eda8461"]);
+        assert_eq!(state.host_ips, vec!["10.0.0.2"]);
+        assert!(state.queued_probe.is_none());
+        assert!(state.probe_in_flight);
+
+        let _ = fs::remove_dir_all(&paths.config_dir);
+    }
+
+    #[test]
+    fn probe_failed_clears_in_flight_and_drains_queued_probe() {
+        let paths = tmp_paths("probe_failed");
+        save_config_at(&paths, &SilentInputConfig::default()).unwrap();
+
+        let (mut state, _) = ControlCenterState::new_with_paths(paths.clone());
+
+        // Simulate panic/cancellation inside spawn_blocking while another probe is queued
+        let _ = state.update(Message::TickProbe);
+        assert!(state.probe_in_flight);
+        let _ = state.update(Message::WindowUnfocused);
+        let _ = state.update(Message::WindowFocused);
+        assert!(state.queued_probe.is_some());
+
+        let _ = state.update(Message::ProbeFailed);
+        assert!(state.queued_probe.is_none());
+        assert!(state.probe_in_flight);
+
+        // Next ProbeFailed with empty queue restores idle probe_in_flight = false
+        let _ = state.update(Message::ProbeFailed);
+        assert!(!state.probe_in_flight);
 
         let _ = fs::remove_dir_all(&paths.config_dir);
     }

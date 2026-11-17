@@ -29,6 +29,10 @@ class NetworkClient(
         private const val TAG = "NetworkClient"
         const val DEFAULT_PORT = 53318
         private const val TOFU_PREFS_NAME = "silentinput_tofu_certs"
+        private const val PING_INITIAL_DELAY_MS = 1000L
+        private const val PING_INTERVAL_FOREGROUND_MS = 5000L
+        private const val PING_TIMEOUT_MS = 5000L
+        private const val MAX_RECONNECT_ATTEMPTS = 8
 
         fun formatShortFingerprint(hex: String?): String {
             if (hex.isNullOrBlank()) return ""
@@ -45,7 +49,7 @@ class NetworkClient(
     private val baseClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .readTimeout(0, TimeUnit.MILLISECONDS)
-            .pingInterval(5, TimeUnit.SECONDS) // Keep NAT and Wi-Fi radio alive
+            .pingInterval(30, TimeUnit.SECONDS) // Fallback keepalive; foreground JSON ping measures RTT
             .retryOnConnectionFailure(true)
             .build()
             .also { baseClientInitialized = true }
@@ -186,11 +190,12 @@ class NetworkClient(
     @Volatile
     private var shouldBeConnected = false
 
-    // Heartbeat tracking
     @Volatile
-    private var pendingPingSentTime: Long = 0L
+    private var isInBackground = false
+
+    // Heartbeat tracking (event-driven CompletableDeferred instead of polling)
     @Volatile
-    private var lastPongReceivedTime: Long = 0L
+    private var pingResponseSignal: CompletableDeferred<Unit>? = null
 
     fun connect() {
         synchronized(stateLock) {
@@ -318,7 +323,9 @@ class NetworkClient(
                     } else {
                         _isAuthenticated.value = false
                     }
-                    startPingLoopLocked(webSocket)
+                    if (!isInBackground) {
+                        startPingLoopLocked(webSocket)
+                    }
                 }
 
                 // Send auth payload over established WebSocket channel rather than URL query.
@@ -338,14 +345,14 @@ class NetworkClient(
                         "pong" -> {
                             val sentTime = json.optLong("t", 0L)
                             val now = SystemClock.elapsedRealtime()
-                            if (sentTime > 0) {
-                                synchronized(stateLock) {
-                                    if (this@NetworkClient.webSocket !== webSocket) return
+                            synchronized(stateLock) {
+                                if (this@NetworkClient.webSocket !== webSocket) return
+                                if (sentTime > 0) {
                                     val rtt = now - sentTime
                                     _latencyMs.value = rtt.coerceAtLeast(0L)
-                                    pendingPingSentTime = 0L
-                                    lastPongReceivedTime = now
                                 }
+                                pingResponseSignal?.complete(Unit)
+                                pingResponseSignal = null
                             }
                         }
                         "auth_result" -> {
@@ -470,24 +477,29 @@ class NetworkClient(
         _supportsUnicodeDirectTyping.value = true
         stopPingLoopLocked()
 
-        // Auto reconnect with exponential backoff if app is expected to stay connected
-        if (shouldBeConnected && reconnectJob == null) {
+        // Auto reconnect with capped exponential backoff when in foreground and expected to stay connected
+        if (!isInBackground && shouldBeConnected && reconnectJob == null) {
             _isReconnecting.value = true
             reconnectJob = scope.launch {
                 val selfJob = coroutineContext[Job]
                 try {
                     var retryDelay = 2000L
-                    while (shouldBeConnected && !_isConnected.value) {
+                    var attempts = 0
+                    while (!isInBackground && shouldBeConnected && !_isConnected.value && attempts < MAX_RECONNECT_ATTEMPTS) {
                         delay(retryDelay)
                         synchronized(stateLock) {
-                            if (shouldBeConnected && !_isConnected.value) {
-                                Log.d(TAG, "Attempting auto-reconnect to $serverIp...")
+                            if (!isInBackground && shouldBeConnected && !_isConnected.value) {
+                                Log.d(
+                                    TAG,
+                                    "Attempting auto-reconnect to $serverIp (attempt ${attempts + 1}/$MAX_RECONNECT_ATTEMPTS)..."
+                                )
                                 doConnectLocked()
                             }
                         }
+                        attempts++
                         // Give TLS/WebSocket handshake a moment before evaluating retry backoff
                         delay(1500L)
-                        retryDelay = (retryDelay * 1.5).toLong().coerceAtMost(10000L)
+                        retryDelay = (retryDelay * 1.5).toLong().coerceAtMost(20000L)
                     }
                 } finally {
                     synchronized(stateLock) {
@@ -498,8 +510,55 @@ class NetworkClient(
                     }
                 }
             }
-        } else if (!shouldBeConnected) {
+        } else if (isInBackground || !shouldBeConnected) {
             _isReconnecting.value = false
+        }
+    }
+
+    /**
+     * Immediately pause background reconnect retries and RTT polling when app moves to background,
+     * keeping the open socket alive during the short background grace period.
+     */
+    fun enterBackground() {
+        synchronized(stateLock) {
+            isInBackground = true
+            reconnectJob?.cancel()
+            reconnectJob = null
+            _isReconnecting.value = false
+            stopPingLoopLocked()
+        }
+    }
+
+    /**
+     * Suspend active socket after background grace period expires without clearing [shouldBeConnected],
+     * so returning to foreground can automatically reconnect if the link was previously wanted.
+     */
+    fun suspendForBackground() {
+        synchronized(stateLock) {
+            if (!isInBackground) return
+            reconnectJob?.cancel()
+            reconnectJob = null
+            _isReconnecting.value = false
+            disconnectSocketOnlyLocked()
+        }
+    }
+
+    /**
+     * Resume foreground heartbeat if still connected, or immediately reconnect if suspended/dropped.
+     */
+    fun exitBackground() {
+        synchronized(stateLock) {
+            isInBackground = false
+            val ws = webSocket
+            if (_isConnected.value && ws != null) {
+                startPingLoopLocked(ws)
+            } else if (shouldBeConnected && !_isConnecting.value) {
+                Log.d(TAG, "App resumed into foreground, immediately reconnecting...")
+                reconnectJob?.cancel()
+                reconnectJob = null
+                _isReconnecting.value = false
+                doConnectLocked()
+            }
         }
     }
 
@@ -509,8 +568,8 @@ class NetworkClient(
      */
     fun checkAndReconnect() {
         synchronized(stateLock) {
-            if (shouldBeConnected && !_isConnected.value) {
-                Log.d(TAG, "App resumed into foreground, immediately reconnecting...")
+            if (!isInBackground && shouldBeConnected && !_isConnected.value && !_isConnecting.value) {
+                Log.d(TAG, "Checking connection state, immediately reconnecting...")
                 reconnectJob?.cancel()
                 reconnectJob = null
                 _isReconnecting.value = false
@@ -521,57 +580,65 @@ class NetworkClient(
 
     private fun startPingLoopLocked(activeSocket: WebSocket) {
         stopPingLoopLocked()
-        pendingPingSentTime = 0L
-        lastPongReceivedTime = SystemClock.elapsedRealtime()
 
         pingJob = scope.launch {
-            while (isActive && _isConnected.value && webSocket === activeSocket) {
-                val now = SystemClock.elapsedRealtime()
-
-                // 1. Check if an existing ping is awaiting a pong
-                if (pendingPingSentTime > 0L) {
-                    val waitTime = now - pendingPingSentTime
-                    if (waitTime > 5000L) {
-                        // Heartbeat timeout! 5 seconds without response from server -> dead connection
-                        Log.w(TAG, "Heartbeat timeout! Server did not respond for ${waitTime}ms, closing dead connection.")
-                        synchronized(stateLock) {
-                            if (webSocket === activeSocket) {
-                                _latencyMs.value = null
-                                activeSocket.cancel()
-                                handleDisconnectedLocked()
-                            }
-                        }
-                        break
-                    } else if (waitTime > 300L) {
-                        // Actively experiencing latency: update UI with current real waiting time
-                        _latencyMs.value = waitTime
-                    }
-                } else {
-                    // 2. Time to send a new ping (every 1500ms)
-                    if (now - lastPongReceivedTime >= 1500L) {
-                        pendingPingSentTime = now
-                        val enqueued = activeSocket.send(ProtocolPayloads.buildPingJson(now))
-                        if (!enqueued) {
-                            Log.w(TAG, "Failed to send ping; buffer full or socket closed")
-                            synchronized(stateLock) {
-                                if (webSocket === activeSocket) {
-                                    _latencyMs.value = null
-                                    activeSocket.cancel()
-                                    handleDisconnectedLocked()
-                                }
-                            }
-                            break
-                        }
-                    }
+            var nextDelay = PING_INITIAL_DELAY_MS
+            while (isActive && !isInBackground && _isConnected.value && webSocket === activeSocket) {
+                delay(nextDelay)
+                nextDelay = PING_INTERVAL_FOREGROUND_MS
+                if (!isActive || isInBackground || !_isConnected.value || webSocket !== activeSocket) {
+                    break
                 }
 
-                delay(300L)
+                val deferred = CompletableDeferred<Unit>()
+                val sentAt = SystemClock.elapsedRealtime()
+                val enqueued = synchronized(stateLock) {
+                    if (isInBackground || !_isConnected.value || webSocket !== activeSocket) {
+                        return@synchronized false
+                    }
+                    pingResponseSignal = deferred
+                    activeSocket.send(ProtocolPayloads.buildPingJson(sentAt))
+                }
+                if (!enqueued) {
+                    deferred.cancel()
+                    Log.w(TAG, "Failed to send ping; buffer full or socket closed")
+                    synchronized(stateLock) {
+                        if (pingResponseSignal === deferred) {
+                            pingResponseSignal = null
+                        }
+                        if (webSocket === activeSocket && _isConnected.value) {
+                            _latencyMs.value = null
+                            activeSocket.cancel()
+                            handleDisconnectedLocked()
+                        }
+                    }
+                    break
+                }
+
+                val received = withTimeoutOrNull(PING_TIMEOUT_MS) {
+                    deferred.await()
+                }
+                if (received == null && isActive && !isInBackground) {
+                    Log.w(TAG, "Heartbeat timeout (>${PING_TIMEOUT_MS}ms), closing dead connection.")
+                    synchronized(stateLock) {
+                        if (pingResponseSignal === deferred) {
+                            pingResponseSignal = null
+                        }
+                        if (webSocket === activeSocket) {
+                            _latencyMs.value = null
+                            activeSocket.cancel()
+                            handleDisconnectedLocked()
+                        }
+                    }
+                    break
+                }
             }
         }
     }
 
     private fun stopPingLoopLocked() {
-        pendingPingSentTime = 0L
+        pingResponseSignal?.cancel()
+        pingResponseSignal = null
         pingJob?.cancel()
         pingJob = null
     }

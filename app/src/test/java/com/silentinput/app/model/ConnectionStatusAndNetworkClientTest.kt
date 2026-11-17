@@ -438,4 +438,42 @@ class ConnectionStatusAndNetworkClientTest {
         client.destroy()
         assertFalse(initializedField.getBoolean(client))
     }
+
+    @Test
+    fun `network client background grace preserves shouldBeConnected while pausing reconnect`() {
+        val client = NetworkClient(context = null)
+        try {
+            val shouldBeConnField = NetworkClient::class.java.getDeclaredField("shouldBeConnected")
+            shouldBeConnField.isAccessible = true
+            val isBgField = NetworkClient::class.java.getDeclaredField("isInBackground")
+            isBgField.isAccessible = true
+
+            // Pretend user had an active/desired LAN session
+            client.serverIp = "192.168.1.20"
+            client.authToken = "secret"
+            shouldBeConnField.setBoolean(client, true)
+
+            client.enterBackground()
+            assertTrue(isBgField.getBoolean(client))
+            assertFalse(client.isReconnecting.value)
+            assertTrue(shouldBeConnField.getBoolean(client))
+
+            client.suspendForBackground()
+            assertFalse(client.isConnected.value)
+            // Must remain true so foreground resume auto-reconnects
+            assertTrue(shouldBeConnField.getBoolean(client))
+
+            // Explicit user disconnect clears shouldBeConnected so exitBackground stays idle
+            client.disconnect()
+            assertFalse(shouldBeConnField.getBoolean(client))
+            client.enterBackground()
+            client.suspendForBackground()
+            client.exitBackground()
+            assertFalse(isBgField.getBoolean(client))
+            assertFalse(client.isConnecting.value)
+            assertFalse(client.isReconnecting.value)
+        } finally {
+            client.destroy()
+        }
+    }
 }

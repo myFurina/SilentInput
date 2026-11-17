@@ -10,7 +10,7 @@
 ## 主要功能
 
 - **三种连接方式**：
-  - **USB（adb reverse）**：通过 `adb reverse tcp:53318 tcp:53318` 转发，本地免密直连（daemon 启动后每 3 秒自动检查配置）。
+  - **USB（adb reverse）**：通过 `adb reverse tcp:53318 tcp:53318` 转发，本地免密直连（daemon 通过 ADB TCP 协议自动监听并配置转发；若在 `systemd --user` 托管下长期使用非默认 `ANDROID_ADB_SERVER_PORT`，请写入 `~/.config/environment.d/adb.conf`（`ANDROID_ADB_SERVER_PORT=xxxx`）或通过 `systemctl --user edit silentinput.service` 添加 `Environment=...`，终端 `export` 对后台服务不生效且 `systemctl --user set-environment` 仅在当前会话有效）。
   - **局域网（WebSocket / WSS）**：默认端口 `53318`，支持配对密钥校验、首次连接静默固定证书指纹（TOFU）与 TLS 加密开关。
   - **蓝牙（RFCOMM）**：系统完成一次蓝牙配对后即可在 App 内直连，不依赖蓝牙网络共享。
 - **键盘页**：常用按键、可锁定修饰键（`Ctrl` / `Alt` / `Shift` / `Win`）、方向键，以及可折叠的迷你全键盘（字母、数字、`F1–F12` 与导航键）。

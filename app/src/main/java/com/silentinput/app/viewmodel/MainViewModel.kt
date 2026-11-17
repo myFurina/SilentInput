@@ -11,6 +11,8 @@ import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.ConnectionStatusFormatter
 import com.silentinput.app.model.ImeSwitchShortcut
 import com.silentinput.app.network.NetworkClient
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -24,6 +26,7 @@ import org.json.JSONArray
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
+        private const val BACKGROUND_DISCONNECT_DELAY_MS = 30_000L
         private const val PREFS_NAME = "silentinput_prefs"
         private const val KEY_CONNECTION_MODE = "connection_mode"
         private const val KEY_SERVER_IP = "server_ip"
@@ -59,6 +62,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val networkClient = NetworkClient(application, initialLanguage = _appLanguage.value)
     private val btClient = BluetoothCompanionClient(application, initialLanguage = _appLanguage.value)
+    private var backgroundGraceJob: Job? = null
 
     private val _connectionMode = MutableStateFlow(prefs.getString(KEY_CONNECTION_MODE, "usb") ?: "usb")
     val connectionMode: StateFlow<String> = _connectionMode.asStateFlow()
@@ -251,9 +255,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun isBluetoothEnabled(): Boolean = btClient.refreshBluetoothEnabled()
 
     fun onResume(btPermissionGranted: Boolean) {
+        backgroundGraceJob?.cancel()
+        backgroundGraceJob = null
         networkClient.refreshLanguageIfSystem()
         btClient.refreshLanguageIfSystem()
         refreshBluetoothState(btPermissionGranted)
+        networkClient.exitBackground()
+        btClient.exitBackground()
         if (_connectionMode.value == "bluetooth") {
             val lastAddress = _lastBtDeviceAddress.value
             if (ConnectionStatusFormatter.shouldAutoReconnectBluetooth(
@@ -270,8 +278,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     btClient.connect(dev)
                 }
             }
-        } else {
-            networkClient.checkAndReconnect()
+        }
+    }
+
+    fun onStop() {
+        backgroundGraceJob?.cancel()
+        networkClient.enterBackground()
+        btClient.enterBackground()
+        backgroundGraceJob = viewModelScope.launch {
+            delay(BACKGROUND_DISCONNECT_DELAY_MS)
+            networkClient.suspendForBackground()
+            btClient.suspendForBackground()
         }
     }
 
@@ -514,6 +531,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        backgroundGraceJob?.cancel()
+        backgroundGraceJob = null
         btClient.destroy()
         networkClient.destroy()
     }

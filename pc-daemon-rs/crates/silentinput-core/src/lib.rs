@@ -3,16 +3,20 @@ pub mod certs;
 pub mod config;
 pub mod i18n;
 pub mod keymap;
+pub mod logs;
 pub mod paths;
 pub mod process;
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
     use std::sync::Arc;
     use std::thread;
+    use std::time::Duration;
 
     use crate::acl::{get_bind_addresses, is_ip_allowed, match_ip_pattern};
     use crate::certs::ensure_certificates_at;
@@ -24,8 +28,14 @@ mod tests {
         all_registered_keys, build_key_map, build_wtype_args, has_graphical_session_in,
         lookup_char, normalize_line_endings, resolve_key_combination,
     };
+    use crate::logs::{
+        parse_short_unix_timestamp_secs, read_log_tail_from_file, should_prefer_log_file,
+    };
     use crate::paths::SilentInputPaths;
-    use crate::process::find_daemon_pids_in;
+    use crate::process::{
+        adb_reverse_list_has_spec, encode_adb_request, find_daemon_pids_in, get_all_host_ips,
+        parse_adb_online_serials, query_adb_devices_at, resolve_adb_endpoint_from, AdbEndpoint,
+    };
 
     #[test]
     fn config_dir_and_file_permissions_and_persistence() {
@@ -263,6 +273,131 @@ mod tests {
         let cfg: SilentInputConfig = serde_json::from_str(legacy_json).unwrap();
         assert_eq!(cfg.gui_language, "zh");
         assert_eq!(cfg.gui_theme, "system");
+    }
+
+    #[test]
+    fn logs_tail_limits_to_80_and_source_preference_rules() {
+        let tmp = tempfile_dir("logs");
+        fs::create_dir_all(&tmp).unwrap();
+        let log_path = tmp.join("silentinput.log");
+
+        assert_eq!(read_log_tail_from_file(&log_path, false, 80), "No logs yet");
+        let lines: String = (1..=120).map(|i| format!("line-{i}\n")).collect();
+        fs::write(&log_path, lines).unwrap();
+
+        let tail = read_log_tail_from_file(&log_path, true, 80);
+        assert_eq!(tail.lines().count(), 80);
+        assert!(tail.starts_with("line-41"));
+        assert!(tail.ends_with("line-120"));
+
+        assert_eq!(
+            parse_short_unix_timestamp_secs(
+                "1794923266.312627 bluefin silentinput-daemon[4940]: [SilentInput] Ready\n"
+            ),
+            Some(1794923266.312627)
+        );
+        assert_eq!(parse_short_unix_timestamp_secs("-- No entries --\n"), None);
+
+        assert!(should_prefer_log_file(Some(200.0), Some(150.0)));
+        assert!(!should_prefer_log_file(Some(100.0), Some(150.0)));
+        assert!(should_prefer_log_file(Some(100.0), None));
+        assert!(!should_prefer_log_file(None, Some(150.0)));
+        assert!(!should_prefer_log_file(None, None));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn host_ips_are_valid_non_loopback_unique_ipv4() {
+        let ips = get_all_host_ips();
+        let mut seen = std::collections::HashSet::new();
+        for ip in ips {
+            let parsed: Ipv4Addr = ip.parse().expect("valid IPv4 string");
+            assert!(!parsed.is_loopback());
+            assert!(!parsed.is_unspecified());
+            assert!(seen.insert(ip));
+        }
+    }
+
+    #[test]
+    fn adb_wire_protocol_and_reverse_exact_match() {
+        assert_eq!(encode_adb_request("host:devices"), "000chost:devices");
+        assert_eq!(
+            encode_adb_request("host:track-devices"),
+            "0012host:track-devices"
+        );
+
+        let parsed = parse_adb_online_serials(
+            "List of devices attached\n1eda8461\tdevice\nemulator-5554\toffline\nunauth1\tunauthorized\n2nddev\tdevice\n1eda8461\tdevice\n",
+        );
+        assert_eq!(parsed, vec!["1eda8461", "2nddev"]);
+
+        assert!(adb_reverse_list_has_spec(
+            "UsbFfs tcp:53318 tcp:53318\n",
+            "tcp:53318"
+        ));
+        assert!(!adb_reverse_list_has_spec(
+            "UsbFfs tcp:533180 tcp:533180\n",
+            "tcp:53318"
+        ));
+        assert!(!adb_reverse_list_has_spec("", "tcp:53318"));
+
+        // Mock ADB TCP server
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut req = [0u8; 16];
+            conn.read_exact(&mut req).unwrap();
+            assert_eq!(&req, b"000chost:devices");
+            let payload = b"1eda8461\tdevice\nemulator-5554\toffline\n";
+            let hdr = format!("OKAY{:04x}", payload.len());
+            conn.write_all(hdr.as_bytes()).unwrap();
+            conn.write_all(payload).unwrap();
+        });
+        let found = query_adb_devices_at(addr, Duration::from_millis(500));
+        assert_eq!(found, vec!["1eda8461"]);
+        srv.join().unwrap();
+
+        // Connection refused returns empty cleanly without spawning adb
+        let closed_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_addr = closed_listener.local_addr().unwrap();
+        drop(closed_listener);
+        assert!(query_adb_devices_at(closed_addr, Duration::from_millis(200)).is_empty());
+
+        // Endpoint resolution from ANDROID_ADB_SERVER_PORT and ADB_SERVER_SOCKET
+        assert_eq!(
+            resolve_adb_endpoint_from(None, None),
+            AdbEndpoint::LocalTcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 5037)))
+        );
+        assert_eq!(
+            resolve_adb_endpoint_from(Some("5038"), None),
+            AdbEndpoint::LocalTcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 5038)))
+        );
+        assert_eq!(
+            resolve_adb_endpoint_from(Some("5038"), Some("tcp:localhost:5040")),
+            AdbEndpoint::LocalTcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 5040)))
+        );
+        assert_eq!(
+            resolve_adb_endpoint_from(None, Some("tcp:5041")),
+            AdbEndpoint::LocalTcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 5041)))
+        );
+        assert_eq!(
+            resolve_adb_endpoint_from(None, Some("tcp:[::1]:5042")),
+            AdbEndpoint::LocalTcp(SocketAddr::from((Ipv6Addr::LOCALHOST, 5042)))
+        );
+        assert_eq!(
+            resolve_adb_endpoint_from(None, Some("localfilesystem:/tmp/adb.sock")),
+            AdbEndpoint::UnsupportedSocket
+        );
+        assert_eq!(
+            resolve_adb_endpoint_from(None, Some("tcp:192.168.1.9:5037")),
+            AdbEndpoint::UnsupportedSocket
+        );
+        assert_eq!(
+            resolve_adb_endpoint_from(Some("0"), None),
+            AdbEndpoint::UnsupportedSocket
+        );
     }
 
     fn tempfile_dir(tag: &str) -> std::path::PathBuf {

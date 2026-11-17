@@ -8,7 +8,7 @@ use silentinput_core::config::{
     unix_timestamp_secs,
 };
 use silentinput_core::i18n::resolve_gui_is_zh;
-use silentinput_core::paths::SilentInputPaths;
+use silentinput_core::logs::{select_log_source, LogSource};
 use silentinput_core::process::{
     get_all_host_ips, get_connected_usb_devices, get_package_uninstall_command,
     is_autostart_enabled, is_daemon_running, is_system_package_install, service_restart,
@@ -290,16 +290,25 @@ fn cmd_autostart(state: Option<String>) {
 }
 
 fn cmd_logs() {
-    let log_file = SilentInputPaths::system().log_file();
-    if !log_file.exists() {
-        println!("暂无日志文件 ({})", log_file.display());
-        return;
+    match select_log_source() {
+        LogSource::Journald { unit } => {
+            println!("正在查看 systemd 服务日志: {unit} (按 Ctrl+C 退出)");
+            let _ = Command::new("journalctl")
+                .args(["--user", "-u", &unit, "-n", "30", "-f", "--no-pager"])
+                .status();
+        }
+        LogSource::File(log_file) => {
+            if !log_file.exists() {
+                println!("暂无日志文件 ({})", log_file.display());
+                return;
+            }
+            println!("正在查看日志: {} (按 Ctrl+C 退出)", log_file.display());
+            let _ = Command::new("tail")
+                .args(["-n", "30", "-f"])
+                .arg(&log_file)
+                .status();
+        }
     }
-    println!("正在查看日志: {} (按 Ctrl+C 退出)", log_file.display());
-    let _ = Command::new("tail")
-        .args(["-n", "30", "-f"])
-        .arg(&log_file)
-        .status();
 }
 
 fn cmd_gui() {
