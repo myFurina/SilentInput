@@ -4,10 +4,9 @@ After=network-online.target graphical-session-pre.target bluetooth.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -u /usr/lib/silentinput/silentinput-daemon.py
+ExecStart=/usr/bin/silentinput-daemon
 Restart=on-failure
 RestartSec=3
-Environment="PYTHONUNBUFFERED=1"
 
 [Install]
 WantedBy=default.target

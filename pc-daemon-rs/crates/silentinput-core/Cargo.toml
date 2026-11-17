@@ -1,0 +1,15 @@
+[package]
+name = "silentinput-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+evdev.workspace = true
+ipnet.workspace = true
+libc.workspace = true
+rand.workspace = true
+rcgen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true

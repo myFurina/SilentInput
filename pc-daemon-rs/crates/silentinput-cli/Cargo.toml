@@ -1,0 +1,13 @@
+[package]
+name = "silentinput-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "silentinput"
+path = "src/main.rs"
+
+[dependencies]
+silentinput-core = { path = "../silentinput-core" }
+clap.workspace = true

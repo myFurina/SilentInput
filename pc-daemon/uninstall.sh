@@ -1,7 +1,6 @@
 #!/bin/bash
 # SilentInput Clean Uninstallation Script
 
-SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 BIN_DIR="$HOME/.local/bin"
 APP_DIR="$HOME/.local/share/applications"
 ICON_FILE="$HOME/.local/share/icons/hicolor/scalable/apps/com.silentinput.controlcenter.svg"
@@ -22,13 +21,15 @@ echo "========================================="
 echo "       正在卸载 SilentInput PC 伴侣       "
 echo "========================================="
 
-# 1. 停止运行中的服务
+# 1. Stop running daemon
 echo "🛑 正在停止 SilentInput 服务..."
-if [ -x "$SCRIPT_DIR/silentinput" ]; then
-    python3 "$SCRIPT_DIR/silentinput" stop 2>/dev/null || true
+if [ -x "$BIN_DIR/silentinput" ]; then
+    "$BIN_DIR/silentinput" stop 2>/dev/null || true
+elif command -v silentinput >/dev/null 2>&1; then
+    silentinput stop 2>/dev/null || true
 fi
 
-# 2. 停用并移除 systemd 用户服务
+# 2. Disable and remove systemd user service & XDG autostart
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user stop silentinput.service 2>/dev/null || true
     systemctl --user disable silentinput.service 2>/dev/null || true
@@ -44,18 +45,20 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload 2>/dev/null || true
 fi
 
-# 3. 移除 CLI 命令与本地 venv/在线源码缓存
-if [ -L "$BIN_DIR/silentinput" ] || [ -f "$BIN_DIR/silentinput" ]; then
-    rm -f "$BIN_DIR/silentinput"
-    echo "🗑️ 已移除命令: $BIN_DIR/silentinput"
-fi
+# 3. Remove binaries & local cache
+for bin_name in silentinput silentinput-daemon silentinput-gui; do
+    if [ -L "$BIN_DIR/$bin_name" ] || [ -f "$BIN_DIR/$bin_name" ]; then
+        rm -f "$BIN_DIR/$bin_name"
+        echo "🗑️ 已移除程序: $BIN_DIR/$bin_name"
+    fi
+done
 
 if [ -d "$DATA_DIR" ]; then
     rm -rf "$DATA_DIR"
-    echo "🗑️ 已移除本地运行环境与缓存: $DATA_DIR"
+    echo "🗑️ 已移除本地缓存目录: $DATA_DIR"
 fi
 
-# 4. 移除桌面图标与 SVG 图标
+# 4. Remove desktop shortcuts and icons
 for desktop_file in \
     "$APP_DIR/com.silentinput.controlcenter.desktop" \
     "$APP_DIR/silentinput.desktop" \
@@ -82,7 +85,7 @@ if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database -q "$APP_DIR" >/dev/null 2>&1 || true
 fi
 
-# 5. 可选彻底清理配置与证书
+# 5. Optional purge of user config & TLS certificates
 if [ "$PURGE" -eq 1 ] && [ -d "$CONFIG_DIR" ]; then
     rm -rf "$CONFIG_DIR"
     echo "🗑️ 已彻底删除配置、日志与证书目录: $CONFIG_DIR"
