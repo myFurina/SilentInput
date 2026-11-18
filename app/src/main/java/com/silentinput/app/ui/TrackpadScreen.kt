@@ -246,7 +246,6 @@ fun TrackpadSurface(
     val currentSensitivity by rememberUpdatedState(sensitivity)
     val currentNaturalScrolling by rememberUpdatedState(naturalScrolling)
     val currentHapticEnabled by rememberUpdatedState(isHapticEnabled)
-    val currentIsLeftHeld by rememberUpdatedState(isLeftHeld)
     val currentOnMouseMove by rememberUpdatedState(onMouseMove)
     val currentOnMouseClick by rememberUpdatedState(onMouseClick)
     val currentOnMouseScroll by rememberUpdatedState(onMouseScroll)

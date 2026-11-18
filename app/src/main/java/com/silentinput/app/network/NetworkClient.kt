@@ -25,6 +25,17 @@ class NetworkClient(
     initialLanguage: AppLanguage = AppLanguage.ZH
 ) {
 
+    data class ParsedEndpoint(val host: String, val port: Int) {
+        val isIpv6: Boolean get() = host.contains(':')
+        val hostKey: String get() = if (isIpv6) "[$host]:$port" else "$host:$port"
+
+        fun toWebSocketUrl(useTls: Boolean): String {
+            val proto = if (useTls) "wss" else "ws"
+            val formattedHost = if (isIpv6) "[$host]" else host
+            return "$proto://$formattedHost:$port/"
+        }
+    }
+
     companion object {
         private const val TAG = "NetworkClient"
         const val DEFAULT_PORT = 53318
@@ -33,17 +44,6 @@ class NetworkClient(
         private const val PING_INTERVAL_FOREGROUND_MS = 5000L
         private const val PING_TIMEOUT_MS = 5000L
         private const val MAX_RECONNECT_ATTEMPTS = 8
-
-        data class ParsedEndpoint(val host: String, val port: Int) {
-            val isIpv6: Boolean get() = host.contains(':')
-            val hostKey: String get() = if (isIpv6) "[$host]:$port" else "$host:$port"
-
-            fun toWebSocketUrl(useTls: Boolean): String {
-                val proto = if (useTls) "wss" else "ws"
-                val formattedHost = if (isIpv6) "[$host]" else host
-                return "$proto://$formattedHost:$port/"
-            }
-        }
 
         fun isLoopbackHost(rawHost: String): Boolean {
             val host = rawHost.trim().removePrefix("[").removeSuffix("]")
