@@ -16,6 +16,7 @@ import java.util.concurrent.BlockingQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 class NetworkClientMockWebServerTest {
 
@@ -42,10 +43,12 @@ class NetworkClientMockWebServerTest {
         val server = MockWebServer()
         val receivedMessages: BlockingQueue<String> = LinkedBlockingQueue()
         val openLatch = CountDownLatch(1)
+        val serverSocket = AtomicReference<WebSocket?>(null)
 
         server.enqueue(
             MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    serverSocket.set(webSocket)
                     openLatch.countDown()
                 }
 
@@ -54,6 +57,10 @@ class NetworkClientMockWebServerTest {
                     if (text.contains("\"get_status\"")) {
                         webSocket.send("""{"type":"status","unicode_direct_typing":false}""")
                     }
+                }
+
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(1000, null)
                 }
             })
         )
@@ -75,8 +82,9 @@ class NetworkClientMockWebServerTest {
             assertTrue(client.isAuthenticated.value)
             assertFalse(client.isEncrypted.value)
         } finally {
+            serverSocket.get()?.close(1000, null)
             client.destroy()
-            server.shutdown()
+            runCatching { server.shutdown() }
         }
     }
 
@@ -84,13 +92,23 @@ class NetworkClientMockWebServerTest {
     fun `lan auth success enables transport ready and sends paste payload`() {
         val server = MockWebServer()
         val receivedMessages: BlockingQueue<String> = LinkedBlockingQueue()
+        val serverSocket = AtomicReference<WebSocket?>(null)
+
         server.enqueue(
             MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    serverSocket.set(webSocket)
+                }
+
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     receivedMessages.offer(text)
                     if (text.contains("\"type\":\"auth\"")) {
                         webSocket.send("""{"type":"auth_result","status":"ok","unicode_direct_typing":true}""")
                     }
+                }
+
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(1000, null)
                 }
             })
         )
@@ -113,20 +131,31 @@ class NetworkClientMockWebServerTest {
             val pasteMsg = receivedMessages.poll(5, TimeUnit.SECONDS)
             assertEquals("""{"type":"paste","content":"hello","mode":"gui","enter":true}""", pasteMsg)
         } finally {
+            serverSocket.get()?.close(1000, null)
             client.destroy()
-            server.shutdown()
+            runCatching { server.shutdown() }
         }
     }
 
     @Test
     fun `lan auth failure sets wrong token error and stops reconnecting`() {
         val server = MockWebServer()
+        val serverSocket = AtomicReference<WebSocket?>(null)
+
         server.enqueue(
             MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    serverSocket.set(webSocket)
+                }
+
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     if (text.contains("\"type\":\"auth\"")) {
                         webSocket.send("""{"type":"auth_result","status":"error","message":"Invalid token"}""")
                     }
+                }
+
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(1000, null)
                 }
             })
         )
@@ -146,8 +175,9 @@ class NetworkClientMockWebServerTest {
             assertFalse(client.isTransportReady.value)
             assertFalse(client.isReconnecting.value)
         } finally {
+            serverSocket.get()?.close(1000, null)
             client.destroy()
-            server.shutdown()
+            runCatching { server.shutdown() }
         }
     }
 }
