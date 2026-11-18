@@ -7,11 +7,11 @@ import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.AppStrings
 import com.silentinput.app.model.InputTransport
 import com.silentinput.app.model.ProtocolPayloads
+import com.silentinput.app.model.ServerMessage
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import okhttp3.*
-import org.json.JSONObject
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.cert.CertificateException
@@ -412,77 +412,72 @@ class NetworkClient(
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (this@NetworkClient.webSocket !== webSocket) return
-                try {
-                    val json = JSONObject(text)
-                    when (json.optString("type")) {
-                        "pong" -> {
-                            val sentTime = json.optLong("t", 0L)
-                            val now = SystemClock.elapsedRealtime()
+                when (val msg = ProtocolPayloads.parseServerMessage(text)) {
+                    is ServerMessage.Pong -> {
+                        val sentTime = msg.timestampMs ?: 0L
+                        val now = SystemClock.elapsedRealtime()
+                        synchronized(stateLock) {
+                            if (this@NetworkClient.webSocket !== webSocket) return
+                            if (sentTime > 0) {
+                                val rtt = now - sentTime
+                                _latencyMs.value = rtt.coerceAtLeast(0L)
+                            }
+                            pingResponseSignal?.complete(Unit)
+                            pingResponseSignal = null
+                        }
+                    }
+                    is ServerMessage.AuthResult -> {
+                        if (msg.status == "ok") {
                             synchronized(stateLock) {
                                 if (this@NetworkClient.webSocket !== webSocket) return
-                                if (sentTime > 0) {
-                                    val rtt = now - sentTime
-                                    _latencyMs.value = rtt.coerceAtLeast(0L)
+                                _isAuthenticated.value = true
+                                _isTransportReady.value = _isConnected.value
+                                reconnectAttempts = 0
+                                msg.unicodeDirectTyping?.let {
+                                    _supportsUnicodeDirectTyping.value = it
                                 }
-                                pingResponseSignal?.complete(Unit)
-                                pingResponseSignal = null
+                                setConnectionError(null)
                             }
-                        }
-                        "auth_result" -> {
-                            val status = json.optString("status")
-                            if (status == "ok") {
-                                synchronized(stateLock) {
-                                    if (this@NetworkClient.webSocket !== webSocket) return
-                                    _isAuthenticated.value = true
-                                    _isTransportReady.value = _isConnected.value
-                                    reconnectAttempts = 0
-                                    if (json.has("unicode_direct_typing")) {
-                                        _supportsUnicodeDirectTyping.value =
-                                            json.optBoolean("unicode_direct_typing", true)
-                                    }
-                                    setConnectionError(null)
-                                }
-                            } else {
-                                val serverMsg = json.optString("message", "")
-                                val tooManyAttempts = serverMsg.contains("Too many", ignoreCase = true)
-                                Log.w(TAG, "Authentication failed: $serverMsg")
-                                synchronized(stateLock) {
-                                    if (this@NetworkClient.webSocket !== webSocket) return
-                                    shouldBeConnected = false
-                                    _isReconnecting.value = false
-                                    reconnectJob?.cancel()
-                                    reconnectJob = null
-                                    setConnectionError { s ->
-                                        if (tooManyAttempts) s.netErrTooManyAttempts else s.netErrWrongToken
-                                    }
-                                    disconnectSocketOnlyLocked()
-                                }
-                            }
-                        }
-                        "status" -> {
-                            synchronized(stateLock) {
-                                if (this@NetworkClient.webSocket !== webSocket) return
-                                if (json.has("unicode_direct_typing")) {
-                                    _supportsUnicodeDirectTyping.value =
-                                        json.optBoolean("unicode_direct_typing", true)
-                                }
-                            }
-                        }
-                        "auth_required" -> {
-                            Log.w(TAG, "Server rejected unauthenticated command")
+                        } else {
+                            val serverMsg = msg.message
+                            val tooManyAttempts = serverMsg.contains("Too many", ignoreCase = true)
+                            Log.w(TAG, "Authentication failed: $serverMsg")
                             synchronized(stateLock) {
                                 if (this@NetworkClient.webSocket !== webSocket) return
                                 shouldBeConnected = false
                                 _isReconnecting.value = false
                                 reconnectJob?.cancel()
                                 reconnectJob = null
-                                setConnectionError { it.netErrInvalidOrUnauth }
+                                setConnectionError { s ->
+                                    if (tooManyAttempts) s.netErrTooManyAttempts else s.netErrWrongToken
+                                }
                                 disconnectSocketOnlyLocked()
                             }
                         }
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to parse incoming message", e)
+                    is ServerMessage.Status -> {
+                        synchronized(stateLock) {
+                            if (this@NetworkClient.webSocket !== webSocket) return
+                            msg.unicodeDirectTyping?.let {
+                                _supportsUnicodeDirectTyping.value = it
+                            }
+                        }
+                    }
+                    ServerMessage.AuthRequired -> {
+                        Log.w(TAG, "Server rejected unauthenticated command")
+                        synchronized(stateLock) {
+                            if (this@NetworkClient.webSocket !== webSocket) return
+                            shouldBeConnected = false
+                            _isReconnecting.value = false
+                            reconnectJob?.cancel()
+                            reconnectJob = null
+                            setConnectionError { it.netErrInvalidOrUnauth }
+                            disconnectSocketOnlyLocked()
+                        }
+                    }
+                    null -> {
+                        Log.w(TAG, "Ignored unrecognized or malformed incoming message")
+                    }
                 }
             }
 

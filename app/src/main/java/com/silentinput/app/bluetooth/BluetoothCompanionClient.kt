@@ -18,12 +18,12 @@ import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.AppStrings
 import com.silentinput.app.model.InputTransport
 import com.silentinput.app.model.ProtocolPayloads
+import com.silentinput.app.model.ServerMessage
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
@@ -396,49 +396,42 @@ class BluetoothCompanionClient(
     }
 
     private fun handleMessage(jsonStr: String, connGen: Long) {
-        try {
-            val json = JSONObject(jsonStr)
-            when (json.optString("type")) {
-                "pong" -> {
-                    val sentTime = json.optLong("t", 0L)
-                    val now = SystemClock.elapsedRealtime()
-                    synchronized(stateLock) {
-                        if (connectionGeneration != connGen) return
-                        if (sentTime > 0) {
-                            val rtt = (now - sentTime).coerceAtLeast(0L)
-                            _latencyMs.value = rtt
-                        }
-                        pingResponseSignal?.complete(Unit)
-                        pingResponseSignal = null
+        when (val msg = ProtocolPayloads.parseServerMessage(jsonStr)) {
+            is ServerMessage.Pong -> {
+                val sentTime = msg.timestampMs ?: 0L
+                val now = SystemClock.elapsedRealtime()
+                synchronized(stateLock) {
+                    if (connectionGeneration != connGen) return
+                    if (sentTime > 0) {
+                        val rtt = (now - sentTime).coerceAtLeast(0L)
+                        _latencyMs.value = rtt
                     }
+                    pingResponseSignal?.complete(Unit)
+                    pingResponseSignal = null
                 }
-                "auth_result" -> {
-                    val status = json.optString("status")
-                    synchronized(stateLock) {
-                        if (connectionGeneration != connGen) return
-                        if (status == "ok") {
-                            if (json.has("unicode_direct_typing")) {
-                                _supportsUnicodeDirectTyping.value =
-                                    json.optBoolean("unicode_direct_typing", true)
-                            }
-                        } else {
-                            val serverMsg = json.optString("message", "").takeIf { it.isNotBlank() }
-                            setStatusMessage { it.btStatusAuthFailed(serverMsg) }
+            }
+            is ServerMessage.AuthResult -> {
+                synchronized(stateLock) {
+                    if (connectionGeneration != connGen) return
+                    if (msg.status == "ok") {
+                        msg.unicodeDirectTyping?.let {
+                            _supportsUnicodeDirectTyping.value = it
                         }
-                    }
-                }
-                "status" -> {
-                    synchronized(stateLock) {
-                        if (connectionGeneration != connGen) return
-                        if (json.has("unicode_direct_typing")) {
-                            _supportsUnicodeDirectTyping.value =
-                                json.optBoolean("unicode_direct_typing", true)
-                        }
+                    } else {
+                        val serverMsg = msg.message.takeIf { it.isNotBlank() }
+                        setStatusMessage { it.btStatusAuthFailed(serverMsg) }
                     }
                 }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error parsing message: $jsonStr", e)
+            is ServerMessage.Status -> {
+                synchronized(stateLock) {
+                    if (connectionGeneration != connGen) return
+                    msg.unicodeDirectTyping?.let {
+                        _supportsUnicodeDirectTyping.value = it
+                    }
+                }
+            }
+            ServerMessage.AuthRequired, null -> Unit
         }
     }
 

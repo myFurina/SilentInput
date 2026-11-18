@@ -1,8 +1,19 @@
 package com.silentinput.app.model
 
+sealed class ServerMessage {
+    data class Pong(val timestampMs: Long?) : ServerMessage()
+    data class AuthResult(
+        val status: String,
+        val message: String,
+        val unicodeDirectTyping: Boolean?
+    ) : ServerMessage()
+    data class Status(val unicodeDirectTyping: Boolean?) : ServerMessage()
+    object AuthRequired : ServerMessage()
+}
+
 /**
- * Pure-Kotlin JSON payload builders shared by WebSocket and Bluetooth SPP transports,
- * keeping serialization deterministic and directly unit-testable on the JVM.
+ * Pure-Kotlin JSON payload builders and parsers shared by WebSocket and Bluetooth SPP
+ * transports, keeping serialization deterministic and directly unit-testable on the JVM.
  */
 object ProtocolPayloads {
 
@@ -82,5 +93,179 @@ object ProtocolPayloads {
         }
         sb.append('"')
         return sb.toString()
+    }
+
+    fun parseServerMessage(rawJson: String): ServerMessage? {
+        val obj = SimpleJsonObjectParser(rawJson).parseRootObject() ?: return null
+        return when (obj["type"] as? String) {
+            "pong" -> {
+                val t = (obj["t"] as? Number)?.toLong()
+                ServerMessage.Pong(t)
+            }
+            "auth_result" -> {
+                val status = (obj["status"] as? String).orEmpty()
+                val message = (obj["message"] as? String).orEmpty()
+                val unicode = obj["unicode_direct_typing"] as? Boolean
+                ServerMessage.AuthResult(status, message, unicode)
+            }
+            "status" -> {
+                val unicode = obj["unicode_direct_typing"] as? Boolean
+                ServerMessage.Status(unicode)
+            }
+            "auth_required" -> ServerMessage.AuthRequired
+            else -> null
+        }
+    }
+}
+
+private class SimpleJsonObjectParser(private val input: String) {
+    private var pos = 0
+
+    fun parseRootObject(): Map<String, Any?>? {
+        skipWhitespace()
+        if (pos >= input.length || input[pos] != '{') return null
+        val obj = parseObject() ?: return null
+        skipWhitespace()
+        return if (pos == input.length) obj else null
+    }
+
+    private fun parseValue(): Any? {
+        skipWhitespace()
+        if (pos >= input.length) throw IllegalArgumentException("Unexpected end")
+        return when (val ch = input[pos]) {
+            '{' -> parseObject()
+            '[' -> parseArray()
+            '"' -> parseString()
+            't' -> expectLiteral("true", true)
+            'f' -> expectLiteral("false", false)
+            'n' -> expectLiteral("null", null)
+            '-', in '0'..'9' -> parseNumber()
+            else -> throw IllegalArgumentException("Unexpected char: $ch")
+        }
+    }
+
+    private fun parseObject(): Map<String, Any?>? {
+        if (pos >= input.length || input[pos] != '{') return null
+        pos++
+        skipWhitespace()
+        val result = linkedMapOf<String, Any?>()
+        if (pos < input.length && input[pos] == '}') {
+            pos++
+            return result
+        }
+        return try {
+            while (true) {
+                skipWhitespace()
+                if (pos >= input.length || input[pos] != '"') return null
+                val key = parseString()
+                skipWhitespace()
+                if (pos >= input.length || input[pos] != ':') return null
+                pos++
+                val value = parseValue()
+                result[key] = value
+                skipWhitespace()
+                if (pos >= input.length) return null
+                when (input[pos]) {
+                    ',' -> pos++
+                    '}' -> {
+                        pos++
+                        return result
+                    }
+                    else -> return null
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun parseArray(): List<Any?> {
+        pos++ // '['
+        skipWhitespace()
+        val list = mutableListOf<Any?>()
+        if (pos < input.length && input[pos] == ']') {
+            pos++
+            return list
+        }
+        while (true) {
+            list.add(parseValue())
+            skipWhitespace()
+            if (pos >= input.length) throw IllegalArgumentException("Unterminated array")
+            when (input[pos]) {
+                ',' -> pos++
+                ']' -> {
+                    pos++
+                    return list
+                }
+                else -> throw IllegalArgumentException("Expected ',' or ']'")
+            }
+        }
+    }
+
+    private fun parseString(): String {
+        pos++ // opening '"'
+        val sb = StringBuilder()
+        while (pos < input.length) {
+            val ch = input[pos++]
+            when (ch) {
+                '"' -> return sb.toString()
+                '\\' -> {
+                    if (pos >= input.length) throw IllegalArgumentException("Unterminated escape")
+                    when (val esc = input[pos++]) {
+                        '"' -> sb.append('"')
+                        '\\' -> sb.append('\\')
+                        '/' -> sb.append('/')
+                        'b' -> sb.append('\b')
+                        'f' -> sb.append('\u000C')
+                        'n' -> sb.append('\n')
+                        'r' -> sb.append('\r')
+                        't' -> sb.append('\t')
+                        'u' -> {
+                            if (pos + 4 > input.length) throw IllegalArgumentException("Invalid unicode escape")
+                            val code = input.substring(pos, pos + 4).toInt(16)
+                            sb.append(code.toChar())
+                            pos += 4
+                        }
+                        else -> throw IllegalArgumentException("Invalid escape: \\$esc")
+                    }
+                }
+                else -> sb.append(ch)
+            }
+        }
+        throw IllegalArgumentException("Unterminated string")
+    }
+
+    private fun parseNumber(): Number {
+        val start = pos
+        if (input[pos] == '-') pos++
+        while (pos < input.length && input[pos] in '0'..'9') pos++
+        var isFloat = false
+        if (pos < input.length && input[pos] == '.') {
+            isFloat = true
+            pos++
+            while (pos < input.length && input[pos] in '0'..'9') pos++
+        }
+        if (pos < input.length && (input[pos] == 'e' || input[pos] == 'E')) {
+            isFloat = true
+            pos++
+            if (pos < input.length && (input[pos] == '+' || input[pos] == '-')) pos++
+            while (pos < input.length && input[pos] in '0'..'9') pos++
+        }
+        val raw = input.substring(start, pos)
+        return if (isFloat) raw.toDouble() else raw.toLong()
+    }
+
+    private fun <T> expectLiteral(literal: String, value: T): T {
+        if (!input.startsWith(literal, pos)) {
+            throw IllegalArgumentException("Expected $literal")
+        }
+        pos += literal.length
+        return value
+    }
+
+    private fun skipWhitespace() {
+        while (pos < input.length && input[pos].isWhitespace()) {
+            pos++
+        }
     }
 }

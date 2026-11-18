@@ -2,6 +2,7 @@ package com.silentinput.app.model
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class ProtocolPayloadsTest {
@@ -79,5 +80,30 @@ class ProtocolPayloadsTest {
             "ctrl+alt+shift+super+left",
             ProtocolPayloads.formatKeyWithModifiers("left", ctrl = true, alt = true, shift = true, superKey = true)
         )
+    }
+
+    @Test
+    fun `parseServerMessage parses pong auth_result status and auth_required`() {
+        assertEquals(
+            ServerMessage.Pong(12345L),
+            ProtocolPayloads.parseServerMessage("""{"type":"pong","t":12345}""")
+        )
+        assertEquals(
+            ServerMessage.AuthResult("ok", "", false),
+            ProtocolPayloads.parseServerMessage("""{"type":"auth_result","status":"ok","unicode_direct_typing":false}""")
+        )
+        assertEquals(
+            ServerMessage.AuthResult("error", "Too many \"failed\" attempts", null),
+            ProtocolPayloads.parseServerMessage("""{"type":"auth_result","status":"error","message":"Too many \"failed\" attempts"}""")
+        )
+        assertEquals(
+            ServerMessage.Status(true),
+            ProtocolPayloads.parseServerMessage("""{"type": "status", "unicode_direct_typing": true, "extra": [1, 2]}""")
+        )
+        assertEquals(
+            ServerMessage.AuthRequired,
+            ProtocolPayloads.parseServerMessage("""{"type":"auth_required"}""")
+        )
+        assertNull(ProtocolPayloads.parseServerMessage("not json"))
     }
 }
