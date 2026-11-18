@@ -8,8 +8,13 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.silentinput.app.bluetooth.BluetoothCompanionClient
 import com.silentinput.app.model.AppLanguage
+import com.silentinput.app.model.ConnectionMode
 import com.silentinput.app.model.ConnectionStatusFormatter
 import com.silentinput.app.model.ImeSwitchShortcut
+import com.silentinput.app.model.InputTransport
+import com.silentinput.app.model.MouseAction
+import com.silentinput.app.model.MouseButton
+import com.silentinput.app.model.SendTargetMode
 import com.silentinput.app.network.NetworkClient
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -48,6 +53,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_CLEAR_ON_SEND = "clear_on_send"
         private const val KEY_ENTER_ON_SEND = "enter_on_send"
         private const val KEY_CUSTOM_SNIPPETS_JSON = "custom_snippets_json"
+        private const val KEY_LONG_TEXT_DRAFT = "long_text_draft"
 
         private val DEFAULT_SNIPPETS = listOf("ls -la", "git status", "ujust update", "clear", "python3 ")
     }
@@ -127,7 +133,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     val trackpadSensitivity: StateFlow<Float> = _trackpadSensitivity.asStateFlow()
 
-    private val _sendTargetMode = MutableStateFlow(prefs.getString(KEY_SEND_TARGET_MODE, "terminal") ?: "terminal")
+    private val _sendTargetMode = MutableStateFlow(
+        SendTargetMode.fromWire(prefs.getString(KEY_SEND_TARGET_MODE, SendTargetMode.TERMINAL.wireValue)).wireValue
+    )
     val sendTargetMode: StateFlow<String> = _sendTargetMode.asStateFlow()
 
     private val _clearOnSend = MutableStateFlow(prefs.getBoolean(KEY_CLEAR_ON_SEND, true))
@@ -139,7 +147,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _snippets = MutableStateFlow(loadSnippets())
     val snippets: StateFlow<List<String>> = _snippets.asStateFlow()
 
-    private val _longTextInput = MutableStateFlow("")
+    private val _longTextInput = MutableStateFlow(prefs.getString(KEY_LONG_TEXT_DRAFT, "") ?: "")
     val longTextInput: StateFlow<String> = _longTextInput.asStateFlow()
 
     private val _isLeftMouseHeld = MutableStateFlow(false)
@@ -282,6 +290,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onStop() {
+        prefs.edit().putString(KEY_LONG_TEXT_DRAFT, _longTextInput.value).apply()
         backgroundGraceJob?.cancel()
         networkClient.enterBackground()
         btClient.enterBackground()
@@ -299,10 +308,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         networkClient.authToken = ""
         networkClient.isTlsEnabled = _isTlsEnabled.value
         prefs.edit()
-            .putString(KEY_CONNECTION_MODE, "usb")
+            .putString(KEY_CONNECTION_MODE, ConnectionMode.USB.wireValue)
             .putString(KEY_SERVER_IP, "127.0.0.1")
             .apply()
-        _connectionMode.value = "usb"
+        _connectionMode.value = ConnectionMode.USB.wireValue
         _activeServerIp.value = "127.0.0.1"
         networkClient.connect()
     }
@@ -316,13 +325,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         networkClient.authToken = cleanToken
         networkClient.isTlsEnabled = tlsEnabled
         prefs.edit()
-            .putString(KEY_CONNECTION_MODE, "lan")
+            .putString(KEY_CONNECTION_MODE, ConnectionMode.LAN.wireValue)
             .putString(KEY_SERVER_IP, cleanIp)
             .putString(KEY_LAN_IP, cleanIp)
             .putString(KEY_AUTH_TOKEN, cleanToken)
             .putBoolean(KEY_TLS_ENCRYPTION, tlsEnabled)
             .apply()
-        _connectionMode.value = "lan"
+        _connectionMode.value = ConnectionMode.LAN.wireValue
         _activeServerIp.value = cleanIp
         _lanIp.value = cleanIp
         _savedAuthToken.value = cleanToken
@@ -338,7 +347,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _isTlsEnabled.value = enabled
         prefs.edit().putBoolean(KEY_TLS_ENCRYPTION, enabled).apply()
         networkClient.isTlsEnabled = enabled
-        if (_connectionMode.value != "bluetooth" && (isNetConnected.value || isNetReconnecting.value)) {
+        if (_connectionMode.value != ConnectionMode.BLUETOOTH.wireValue && (isNetConnected.value || isNetReconnecting.value)) {
             networkClient.connect()
         }
     }
@@ -347,15 +356,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         networkClient.trustNewCertificateAndReconnect()
     }
 
+    fun getPinnedCertFingerprint(ip: String): String? {
+        return networkClient.getPinnedFingerprint(ip, NetworkClient.DEFAULT_PORT)
+    }
+
+    fun clearPinnedCertificate(ip: String): Boolean {
+        return networkClient.clearPinnedCertificate(ip, NetworkClient.DEFAULT_PORT)
+    }
+
     fun connectBluetooth(device: BluetoothDevice) {
         networkClient.disconnect()
         _isBtManualDisconnected.value = false
         prefs.edit()
-            .putString(KEY_CONNECTION_MODE, "bluetooth")
+            .putString(KEY_CONNECTION_MODE, ConnectionMode.BLUETOOTH.wireValue)
             .putString(KEY_LAST_BT_ADDRESS, device.address)
             .putBoolean(KEY_BT_MANUAL_DISCONNECTED, false)
             .apply()
-        _connectionMode.value = "bluetooth"
+        _connectionMode.value = ConnectionMode.BLUETOOTH.wireValue
         _lastBtDeviceAddress.value = device.address
         btClient.connect(device)
     }
@@ -366,25 +383,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         btClient.disconnect()
     }
 
+    private fun activeTransport(): InputTransport? {
+        return when {
+            btClient.isTransportReady.value -> btClient
+            networkClient.isTransportReady.value -> networkClient
+            else -> null
+        }
+    }
+
     // Unified input dispatchers
     fun sendKey(key: String, action: String = "tap") {
-        if (btClient.isConnected.value) {
-            btClient.sendKey(key, action)
-        } else if (isNetReady.value) {
-            networkClient.sendKey(key, action)
-        }
+        activeTransport()?.sendKey(key, action)
     }
 
     fun sendMouseMove(dx: Float, dy: Float) {
-        if (btClient.isConnected.value) {
-            btClient.sendMouse(dx, dy, "move")
-        } else if (isNetReady.value) {
-            networkClient.sendMouse(dx, dy, "move")
-        }
+        activeTransport()?.sendMouse(dx, dy, MouseAction.MOVE.wireValue)
     }
 
     fun sendMouseClick(button: String) {
-        if (button == "left") {
+        if (button == MouseButton.LEFT.wireValue) {
             _isLeftMouseHeld.value = false
         }
         sendMouseAction("click_$button")
@@ -398,45 +415,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_isLeftMouseHeld.value == pressed) return
         _isLeftMouseHeld.value = pressed
         if (isAnyConnected.value) {
-            sendMouseAction(if (pressed) "down_left" else "up_left")
+            val action = if (pressed) MouseAction.DOWN_LEFT else MouseAction.UP_LEFT
+            sendMouseAction(action.wireValue)
         }
     }
 
     fun sendMouseAction(action: String) {
-        if (btClient.isConnected.value) {
-            btClient.sendMouse(0f, 0f, action)
-        } else if (isNetReady.value) {
-            networkClient.sendMouse(0f, 0f, action)
-        }
+        activeTransport()?.sendMouse(0f, 0f, action)
     }
 
     fun sendMouseScroll(wheel: Float) {
-        if (btClient.isConnected.value) {
-            btClient.sendMouse(0f, 0f, "scroll", wheel = wheel)
-        } else if (isNetReady.value) {
-            networkClient.sendMouse(0f, 0f, "scroll", wheel = wheel)
-        }
+        activeTransport()?.sendMouse(0f, 0f, MouseAction.SCROLL.wireValue, wheel = wheel)
     }
 
     fun sendTextPaste(text: String) {
         if (text.isBlank()) return
         val enter = _enterOnSend.value
         val mode = _sendTargetMode.value
-        val sent = if (btClient.isConnected.value) {
-            btClient.sendPaste(text, enter = enter, mode = mode)
-        } else if (isNetReady.value) {
-            networkClient.sendPaste(text, enter = enter, mode = mode)
-        } else {
-            false
-        }
+        val sent = activeTransport()?.sendPaste(text, enter = enter, mode = mode) == true
         if (sent && _clearOnSend.value) {
             _longTextInput.value = ""
+            prefs.edit().remove(KEY_LONG_TEXT_DRAFT).apply()
         }
     }
 
     // UI preferences & draft state updates
     fun updateLongTextInput(text: String) {
         _longTextInput.value = text
+        if (text.isEmpty()) {
+            prefs.edit().remove(KEY_LONG_TEXT_DRAFT).apply()
+        }
     }
 
     fun updateTrackpadSensitivity(value: Float, persist: Boolean = true) {

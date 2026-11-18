@@ -5,6 +5,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.AppStrings
+import com.silentinput.app.model.InputTransport
 import com.silentinput.app.model.ProtocolPayloads
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,7 +24,7 @@ import javax.net.ssl.X509TrustManager
 class NetworkClient(
     context: Context? = null,
     initialLanguage: AppLanguage = AppLanguage.ZH
-) {
+) : InputTransport {
 
     data class ParsedEndpoint(val host: String, val port: Int) {
         val isIpv6: Boolean get() = host.contains(':')
@@ -194,6 +195,9 @@ class NetworkClient(
     private val _isAuthenticated = MutableStateFlow(false)
     val isAuthenticated = _isAuthenticated.asStateFlow()
 
+    private val _isTransportReady = MutableStateFlow(false)
+    override val isTransportReady = _isTransportReady.asStateFlow()
+
     private val _latencyMs = MutableStateFlow<Long?>(null)
     val latencyMs = _latencyMs.asStateFlow()
 
@@ -201,7 +205,7 @@ class NetworkClient(
     val isEncrypted = _isEncrypted.asStateFlow()
 
     private val _supportsUnicodeDirectTyping = MutableStateFlow(true)
-    val supportsUnicodeDirectTyping = _supportsUnicodeDirectTyping.asStateFlow()
+    override val supportsUnicodeDirectTyping = _supportsUnicodeDirectTyping.asStateFlow()
 
     private val _certMismatchHost = MutableStateFlow<String?>(null)
     val certMismatchHost = _certMismatchHost.asStateFlow()
@@ -224,7 +228,7 @@ class NetworkClient(
         _connectionError.value = formatter?.invoke(currentStrings())
     }
 
-    fun updateLanguage(language: AppLanguage) {
+    override fun updateLanguage(language: AppLanguage) {
         synchronized(stateLock) {
             appLanguage = language
             lastErrorFormatter?.let { formatter ->
@@ -233,7 +237,7 @@ class NetworkClient(
         }
     }
 
-    fun refreshLanguageIfSystem() {
+    override fun refreshLanguageIfSystem() {
         if (appLanguage == AppLanguage.SYSTEM) {
             updateLanguage(AppLanguage.SYSTEM)
         }
@@ -385,10 +389,12 @@ class NetworkClient(
 
                     if (isUsb) {
                         _isAuthenticated.value = true
+                        _isTransportReady.value = true
                         _latencyMs.value = 1L
                         reconnectAttempts = 0
                     } else {
                         _isAuthenticated.value = false
+                        _isTransportReady.value = false
                     }
                     if (!isInBackground) {
                         startPingLoopLocked(webSocket)
@@ -428,6 +434,7 @@ class NetworkClient(
                                 synchronized(stateLock) {
                                     if (this@NetworkClient.webSocket !== webSocket) return
                                     _isAuthenticated.value = true
+                                    _isTransportReady.value = _isConnected.value
                                     reconnectAttempts = 0
                                     if (json.has("unicode_direct_typing")) {
                                         _supportsUnicodeDirectTyping.value =
@@ -540,6 +547,7 @@ class NetworkClient(
         _isConnected.value = false
         _isConnecting.value = false
         _isAuthenticated.value = false
+        _isTransportReady.value = false
         _latencyMs.value = null
         _isEncrypted.value = false
         _supportsUnicodeDirectTyping.value = true
@@ -600,7 +608,7 @@ class NetworkClient(
      * Immediately pause background reconnect retries and RTT polling when app moves to background,
      * keeping the open socket alive during the short background grace period.
      */
-    fun enterBackground() {
+    override fun enterBackground() {
         synchronized(stateLock) {
             isInBackground = true
             reconnectJob?.cancel()
@@ -614,7 +622,7 @@ class NetworkClient(
      * Suspend active socket after background grace period expires without clearing [shouldBeConnected],
      * so returning to foreground can automatically reconnect if the link was previously wanted.
      */
-    fun suspendForBackground() {
+    override fun suspendForBackground() {
         synchronized(stateLock) {
             if (!isInBackground) return
             reconnectJob?.cancel()
@@ -627,7 +635,7 @@ class NetworkClient(
     /**
      * Resume foreground heartbeat if still connected, or immediately reconnect if suspended/dropped.
      */
-    fun exitBackground() {
+    override fun exitBackground() {
         synchronized(stateLock) {
             isInBackground = false
             val ws = webSocket
@@ -726,16 +734,16 @@ class NetworkClient(
         pingJob = null
     }
 
-    fun sendPaste(text: String, enter: Boolean = false, mode: String = "terminal"): Boolean {
+    override fun sendPaste(text: String, enter: Boolean, mode: String): Boolean {
         return sendJson(ProtocolPayloads.buildPasteJson(text, enter = enter, mode = mode))
     }
 
-    fun sendKey(key: String, action: String = "tap") {
-        sendJson(ProtocolPayloads.buildKeyJson(key, action = action))
+    override fun sendKey(key: String, action: String): Boolean {
+        return sendJson(ProtocolPayloads.buildKeyJson(key, action = action))
     }
 
-    fun sendMouse(dx: Float, dy: Float, action: String = "move", wheel: Float = 0f) {
-        sendJson(ProtocolPayloads.buildMouseJson(dx, dy, action = action, wheel = wheel))
+    override fun sendMouse(dx: Float, dy: Float, action: String, wheel: Float): Boolean {
+        return sendJson(ProtocolPayloads.buildMouseJson(dx, dy, action = action, wheel = wheel))
     }
 
     private fun sendJson(payload: String): Boolean {
@@ -767,6 +775,7 @@ class NetworkClient(
         } catch (_: Exception) {}
         _isConnected.value = false
         _isAuthenticated.value = false
+        _isTransportReady.value = false
         _latencyMs.value = null
         _isEncrypted.value = false
         _supportsUnicodeDirectTyping.value = true
@@ -785,7 +794,30 @@ class NetworkClient(
         }
     }
 
-    fun destroy() {
+    fun getPinnedFingerprint(rawIp: String = serverIp, defaultPort: Int = serverPort): String? {
+        val endpoint = parseServerEndpoint(rawIp, defaultPort) ?: return null
+        if (isLoopbackHost(endpoint.host)) return null
+        val prefs = tofuPrefs ?: return null
+        return synchronized(stateLock) {
+            prefs.getString(endpoint.hostKey, null)
+        }
+    }
+
+    fun clearPinnedCertificate(rawIp: String = serverIp, defaultPort: Int = serverPort): Boolean {
+        val endpoint = parseServerEndpoint(rawIp, defaultPort) ?: return false
+        val prefs = tofuPrefs ?: return false
+        synchronized(stateLock) {
+            prefs.edit().remove(endpoint.hostKey).apply()
+            if (_certMismatchHost.value == endpoint.hostKey) {
+                _certMismatchHost.value = null
+                _pendingCertFingerprint.value = null
+                _savedCertFingerprint.value = null
+            }
+        }
+        return true
+    }
+
+    override fun destroy() {
         disconnect()
         scope.cancel()
         if (baseClientInitialized) {

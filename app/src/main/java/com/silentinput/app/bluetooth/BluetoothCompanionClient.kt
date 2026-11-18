@@ -16,10 +16,12 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.AppStrings
+import com.silentinput.app.model.InputTransport
 import com.silentinput.app.model.ProtocolPayloads
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -31,7 +33,7 @@ import java.util.UUID
 class BluetoothCompanionClient(
     private val context: Context,
     initialLanguage: AppLanguage = AppLanguage.ZH
-) {
+) : InputTransport {
 
     companion object {
         private const val TAG = "BtCompanionClient"
@@ -56,6 +58,8 @@ class BluetoothCompanionClient(
     private val _isConnected = MutableStateFlow(false)
     val isConnected = _isConnected.asStateFlow()
 
+    override val isTransportReady: StateFlow<Boolean> = isConnected
+
     private val _isConnecting = MutableStateFlow(false)
     val isConnecting = _isConnecting.asStateFlow()
 
@@ -69,7 +73,7 @@ class BluetoothCompanionClient(
     val latencyMs = _latencyMs.asStateFlow()
 
     private val _supportsUnicodeDirectTyping = MutableStateFlow(true)
-    val supportsUnicodeDirectTyping = _supportsUnicodeDirectTyping.asStateFlow()
+    override val supportsUnicodeDirectTyping = _supportsUnicodeDirectTyping.asStateFlow()
 
     @Volatile
     var appLanguage: AppLanguage = initialLanguage
@@ -83,14 +87,14 @@ class BluetoothCompanionClient(
         _statusMessage.value = formatter(currentStrings())
     }
 
-    fun updateLanguage(language: AppLanguage) {
+    override fun updateLanguage(language: AppLanguage) {
         synchronized(stateLock) {
             appLanguage = language
             _statusMessage.value = lastStatusFormatter(currentStrings())
         }
     }
 
-    fun refreshLanguageIfSystem() {
+    override fun refreshLanguageIfSystem() {
         if (appLanguage == AppLanguage.SYSTEM) {
             updateLanguage(AppLanguage.SYSTEM)
         }
@@ -550,21 +554,21 @@ class BluetoothCompanionClient(
         closeResourcesLocked()
     }
 
-    fun enterBackground() {
+    override fun enterBackground() {
         synchronized(stateLock) {
             isInBackground = true
             stopPingLoopLocked()
         }
     }
 
-    fun suspendForBackground() {
+    override fun suspendForBackground() {
         synchronized(stateLock) {
             if (!isInBackground) return
             disconnectLocked(resetStatus = true)
         }
     }
 
-    fun exitBackground() {
+    override fun exitBackground() {
         synchronized(stateLock) {
             isInBackground = false
             if (_isConnected.value) {
@@ -579,7 +583,7 @@ class BluetoothCompanionClient(
         }
     }
 
-    fun destroy() {
+    override fun destroy() {
         disconnect()
         if (receiverRegistered) {
             try {
@@ -597,21 +601,21 @@ class BluetoothCompanionClient(
         return true
     }
 
-    fun sendKey(key: String, action: String = "tap") {
-        sendRaw(ProtocolPayloads.buildKeyJson(key, action = action))
+    override fun sendKey(key: String, action: String): Boolean {
+        return sendRaw(ProtocolPayloads.buildKeyJson(key, action = action))
     }
 
-    fun sendMouse(dx: Float, dy: Float, action: String = "move", wheel: Float = 0f) {
-        if (!_isConnected.value) return
+    override fun sendMouse(dx: Float, dy: Float, action: String, wheel: Float): Boolean {
+        if (!_isConnected.value) return false
         if (action == "move" && wheel == 0f) {
             outboundQueue.enqueueMove(dx, dy)
             wakeSignal?.trySend(Unit)
-            return
+            return true
         }
-        sendRaw(ProtocolPayloads.buildMouseJson(dx, dy, action = action, wheel = wheel))
+        return sendRaw(ProtocolPayloads.buildMouseJson(dx, dy, action = action, wheel = wheel))
     }
 
-    fun sendPaste(text: String, enter: Boolean = false, mode: String = "terminal"): Boolean {
+    override fun sendPaste(text: String, enter: Boolean, mode: String): Boolean {
         return sendRaw(ProtocolPayloads.buildPasteJson(text, enter = enter, mode = mode))
     }
 }
