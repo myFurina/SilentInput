@@ -24,12 +24,14 @@ import androidx.compose.ui.unit.sp
 import com.silentinput.app.model.TrackpadAccumulator
 import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.ui.theme.pressScale
+import java.util.Locale
 import kotlin.math.hypot
 
 @Composable
 fun TrackpadScreen(
     sensitivity: Float,
     onSensitivityChange: (Float) -> Unit,
+    onSensitivityChangeFinished: () -> Unit = {},
     naturalScrolling: Boolean = true,
     isHapticEnabled: Boolean = false,
     isConnected: Boolean = true,
@@ -213,11 +215,12 @@ fun TrackpadScreen(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(strings.tpSensitivityLabel(String.format("%.1fx", sensitivity)), style = MaterialTheme.typography.labelSmall)
+            Text(strings.tpSensitivityLabel(String.format(Locale.US, "%.1fx", sensitivity)), style = MaterialTheme.typography.labelSmall)
             Spacer(modifier = Modifier.width(8.dp))
             Slider(
                 value = sensitivity,
                 onValueChange = onSensitivityChange,
+                onValueChangeFinished = onSensitivityChangeFinished,
                 valueRange = 0.1f..2.0f,
                 modifier = Modifier.weight(1f)
             )
@@ -279,14 +282,6 @@ fun TrackpadSurface(
             .pointerInput(Unit) {
                 detectTapGestures(
                     onTap = { dispatchClick("left") },
-                    onDoubleTap = {
-                        if (currentIsLeftHeld) {
-                            dispatchClick("left")
-                        } else {
-                            dispatchClick("left")
-                            dispatchClick("left")
-                        }
-                    },
                     onLongPress = { dispatchClick("right") }
                 )
             }
@@ -297,6 +292,7 @@ fun TrackpadSurface(
                     accumulator.reset()
                     var totalDragDist = 0f
                     var gestureStarted = false
+                    var hadMultiTouch = false
                     val touchSlop = viewConfiguration.touchSlop
 
                     while (true) {
@@ -306,6 +302,7 @@ fun TrackpadSurface(
 
                         val sens = currentSensitivity
                         if (pressedChanges.size >= 2) {
+                            hadMultiTouch = true
                             gestureStarted = true
                             val avgDy = pressedChanges.map { it.positionChange().y }.average().toFloat()
                             pressedChanges.forEach { it.consume() }
@@ -319,6 +316,11 @@ fun TrackpadSurface(
                             }
                         } else {
                             val change = pressedChanges[0]
+                            if (hadMultiTouch) {
+                                // Ignore residual single-finger lift after a two-finger scroll
+                                change.consume()
+                                continue
+                            }
                             val delta = change.positionChange()
                             if (!gestureStarted) {
                                 totalDragDist += hypot(delta.x, delta.y)

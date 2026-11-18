@@ -198,7 +198,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         networkClient.serverIp = _activeServerIp.value
         networkClient.serverPort = prefs.getInt(KEY_SERVER_PORT, NetworkClient.DEFAULT_PORT)
-        networkClient.authToken = _savedAuthToken.value
+        networkClient.authToken = if (_connectionMode.value == "usb") "" else _savedAuthToken.value
         networkClient.isTlsEnabled = _isTlsEnabled.value
         btClient.onAdapterStateChanged = {
             refreshBondedDevices()
@@ -296,7 +296,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         btClient.disconnect()
         networkClient.serverIp = "127.0.0.1"
         networkClient.serverPort = NetworkClient.DEFAULT_PORT
-        networkClient.authToken = _savedAuthToken.value
+        networkClient.authToken = ""
         networkClient.isTlsEnabled = _isTlsEnabled.value
         prefs.edit()
             .putString(KEY_CONNECTION_MODE, "usb")
@@ -422,12 +422,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (text.isBlank()) return
         val enter = _enterOnSend.value
         val mode = _sendTargetMode.value
-        if (btClient.isConnected.value) {
+        val sent = if (btClient.isConnected.value) {
             btClient.sendPaste(text, enter = enter, mode = mode)
         } else if (isNetReady.value) {
             networkClient.sendPaste(text, enter = enter, mode = mode)
+        } else {
+            false
         }
-        if (_clearOnSend.value) {
+        if (sent && _clearOnSend.value) {
             _longTextInput.value = ""
         }
     }
@@ -437,10 +439,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _longTextInput.value = text
     }
 
-    fun updateTrackpadSensitivity(value: Float) {
+    fun updateTrackpadSensitivity(value: Float, persist: Boolean = true) {
         val clamped = value.coerceIn(0.1f, 2.0f)
         _trackpadSensitivity.value = clamped
-        prefs.edit().putFloat(KEY_TRACKPAD_SENSITIVITY, clamped).apply()
+        if (persist) {
+            prefs.edit().putFloat(KEY_TRACKPAD_SENSITIVITY, clamped).apply()
+        }
+    }
+
+    fun commitTrackpadSensitivity() {
+        prefs.edit().putFloat(KEY_TRACKPAD_SENSITIVITY, _trackpadSensitivity.value).apply()
     }
 
     fun setSendTargetMode(mode: String) {

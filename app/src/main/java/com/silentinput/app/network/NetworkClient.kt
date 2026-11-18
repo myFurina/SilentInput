@@ -34,6 +34,69 @@ class NetworkClient(
         private const val PING_TIMEOUT_MS = 5000L
         private const val MAX_RECONNECT_ATTEMPTS = 8
 
+        data class ParsedEndpoint(val host: String, val port: Int) {
+            val isIpv6: Boolean get() = host.contains(':')
+            val hostKey: String get() = if (isIpv6) "[$host]:$port" else "$host:$port"
+
+            fun toWebSocketUrl(useTls: Boolean): String {
+                val proto = if (useTls) "wss" else "ws"
+                val formattedHost = if (isIpv6) "[$host]" else host
+                return "$proto://$formattedHost:$port/"
+            }
+        }
+
+        fun isLoopbackHost(rawHost: String): Boolean {
+            val host = rawHost.trim().removePrefix("[").removeSuffix("]")
+            return host == "127.0.0.1" || host == "::1" || host.equals("localhost", ignoreCase = true)
+        }
+
+        fun parseServerEndpoint(rawInput: String, defaultPort: Int = DEFAULT_PORT): ParsedEndpoint? {
+            val clean = rawInput.trim()
+            if (clean.isEmpty() ||
+                clean.contains("://") ||
+                clean.any { it.isWhitespace() } ||
+                clean.contains("/") ||
+                clean.contains("?") ||
+                clean.contains("#") ||
+                clean.contains("@")
+            ) {
+                return null
+            }
+            if (clean.startsWith("[")) {
+                val closeIdx = clean.indexOf(']')
+                if (closeIdx <= 1) return null
+                val host = clean.substring(1, closeIdx)
+                if (host.isEmpty() || !host.contains(':')) return null
+                val rest = clean.substring(closeIdx + 1)
+                val port = when {
+                    rest.isEmpty() -> defaultPort
+                    rest.startsWith(":") -> {
+                        val parsed = rest.substring(1).toIntOrNull() ?: return null
+                        if (parsed !in 1..65535) return null
+                        parsed
+                    }
+                    else -> return null
+                }
+                return ParsedEndpoint(host, port)
+            }
+            val firstColon = clean.indexOf(':')
+            if (firstColon >= 0) {
+                val lastColon = clean.lastIndexOf(':')
+                return if (firstColon == lastColon) {
+                    val host = clean.substring(0, firstColon)
+                    val portStr = clean.substring(firstColon + 1)
+                    if (host.isEmpty()) return null
+                    val port = portStr.toIntOrNull() ?: return null
+                    if (port !in 1..65535) return null
+                    ParsedEndpoint(host, port)
+                } else {
+                    // Bare IPv6 address (e.g. ::1 or fd7a:115c:a1e0::1)
+                    ParsedEndpoint(clean, defaultPort)
+                }
+            }
+            return ParsedEndpoint(clean, defaultPort)
+        }
+
         fun formatShortFingerprint(hex: String?): String {
             if (hex.isNullOrBlank()) return ""
             return hex.take(16).uppercase().chunked(4).joinToString(":")
@@ -60,11 +123,11 @@ class NetworkClient(
         return digest.joinToString("") { "%02x".format(it) }
     }
 
-    private fun buildClientForHost(cleanIp: String, port: Int, useTls: Boolean, connGen: Long): OkHttpClient {
+    private fun buildClientForHost(endpoint: ParsedEndpoint, useTls: Boolean, connGen: Long): OkHttpClient {
         if (!useTls) return baseClient
 
-        val isLocalhost = cleanIp == "127.0.0.1" || cleanIp == "::1" || cleanIp == "localhost"
-        val hostKey = "$cleanIp:$port"
+        val isLocalhost = isLoopbackHost(endpoint.host)
+        val hostKey = endpoint.hostKey
 
         val trustManager = object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
@@ -76,7 +139,8 @@ class NetworkClient(
                     throw CertificateException("Empty server certificate chain")
                 }
                 val fingerprint = sha256Hex(chain[0])
-                val prefs = tofuPrefs ?: return
+                val prefs = tofuPrefs
+                    ?: throw CertificateException("TOFU certificate store unavailable")
                 synchronized(stateLock) {
                     val saved = prefs.getString(hostKey, null)
                     if (saved == null) {
@@ -113,6 +177,7 @@ class NetworkClient(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var pingJob: Job? = null
     private var reconnectJob: Job? = null
+    private var reconnectAttempts: Int = 0
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected = _isConnected.asStateFlow()
@@ -204,30 +269,30 @@ class NetworkClient(
                 shouldBeConnected = false
                 _isConnecting.value = false
                 _isReconnecting.value = false
+                reconnectAttempts = 0
                 reconnectJob?.cancel()
                 reconnectJob = null
                 disconnectSocketOnlyLocked()
                 setConnectionError { it.netErrEmptyIp }
                 return
             }
-            if (
-                cleanIp.contains("://") ||
-                cleanIp.any { it.isWhitespace() } ||
-                cleanIp.contains("/")
-            ) {
+            val endpoint = parseServerEndpoint(cleanIp, serverPort)
+            if (endpoint == null) {
                 shouldBeConnected = false
                 _isConnecting.value = false
                 _isReconnecting.value = false
+                reconnectAttempts = 0
                 reconnectJob?.cancel()
                 reconnectJob = null
                 disconnectSocketOnlyLocked()
                 setConnectionError { it.netErrInvalidIp }
                 return
             }
-            if (cleanIp != "127.0.0.1" && authToken.trim().isBlank()) {
+            if (!isLoopbackHost(endpoint.host) && authToken.trim().isBlank()) {
                 shouldBeConnected = false
                 _isConnecting.value = false
                 _isReconnecting.value = false
+                reconnectAttempts = 0
                 reconnectJob?.cancel()
                 reconnectJob = null
                 disconnectSocketOnlyLocked()
@@ -235,6 +300,7 @@ class NetworkClient(
                 return
             }
             shouldBeConnected = true
+            reconnectAttempts = 0
             _isConnecting.value = true
             _isReconnecting.value = false
             setConnectionError(null)
@@ -255,6 +321,7 @@ class NetworkClient(
                 tofuPrefs?.edit()?.putString(hostKey, newFp)?.apply()
                 Log.i(TAG, "User accepted new TOFU certificate for $hostKey")
             }
+            reconnectAttempts = 0
             _certMismatchHost.value = null
             _pendingCertFingerprint.value = null
             _savedCertFingerprint.value = null
@@ -266,18 +333,16 @@ class NetworkClient(
     private fun doConnectLocked() {
         disconnectSocketOnlyLocked()
 
-        val cleanIp = serverIp.trim()
-        if (cleanIp.isEmpty()) return
-
+        val endpoint = parseServerEndpoint(serverIp, serverPort) ?: return
         val useTls = isTlsEnabled
         val proto = if (useTls) "wss" else "ws"
-        val url = "$proto://$cleanIp:$serverPort/"
+        val url = endpoint.toWebSocketUrl(useTls)
         Log.d(TAG, "Connecting to $url (Strict TLS: $useTls)...")
 
         val connGen = ++connectionGeneration
         _isConnecting.value = true
         val scopedClient = try {
-            buildClientForHost(cleanIp, serverPort, useTls, connGen)
+            buildClientForHost(endpoint, useTls, connGen)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize TLS client: ${e.message}", e)
             setConnectionError { it.netErrTlsInitFailed(e.message) }
@@ -289,7 +354,7 @@ class NetworkClient(
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 val tokenSnapshot: String
-                val isUsb = cleanIp == "127.0.0.1"
+                val isUsb = isLoopbackHost(endpoint.host)
                 synchronized(stateLock) {
                     if (this@NetworkClient.webSocket !== webSocket) return
                     tokenSnapshot = authToken.trim()
@@ -299,6 +364,7 @@ class NetworkClient(
                         shouldBeConnected = false
                         _isConnecting.value = false
                         _isReconnecting.value = false
+                        reconnectAttempts = 0
                         reconnectJob?.cancel()
                         reconnectJob = null
                         setConnectionError { it.netErrEmptyToken }
@@ -320,6 +386,7 @@ class NetworkClient(
                     if (isUsb) {
                         _isAuthenticated.value = true
                         _latencyMs.value = 1L
+                        reconnectAttempts = 0
                     } else {
                         _isAuthenticated.value = false
                     }
@@ -329,8 +396,8 @@ class NetworkClient(
                 }
 
                 // Send auth payload over established WebSocket channel rather than URL query.
-                // On 127.0.0.1, also send token if configured so allow_usb_unauthenticated=false still succeeds.
-                if (tokenSnapshot.isNotBlank()) {
+                // Never forward LAN tokens to loopback/USB endpoints without server cert pinning.
+                if (!isUsb && tokenSnapshot.isNotBlank()) {
                     webSocket.send(ProtocolPayloads.buildAuthJson(tokenSnapshot))
                 } else if (isUsb) {
                     webSocket.send(ProtocolPayloads.buildGetStatusJson())
@@ -361,6 +428,7 @@ class NetworkClient(
                                 synchronized(stateLock) {
                                     if (this@NetworkClient.webSocket !== webSocket) return
                                     _isAuthenticated.value = true
+                                    reconnectAttempts = 0
                                     if (json.has("unicode_direct_typing")) {
                                         _supportsUnicodeDirectTyping.value =
                                             json.optBoolean("unicode_direct_typing", true)
@@ -479,33 +547,46 @@ class NetworkClient(
 
         // Auto reconnect with capped exponential backoff when in foreground and expected to stay connected
         if (!isInBackground && shouldBeConnected && reconnectJob == null) {
+            if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                shouldBeConnected = false
+                _isReconnecting.value = false
+                if (_connectionError.value == null) {
+                    setConnectionError { it.netErrReconnectExhausted }
+                }
+                return
+            }
+            val attemptIndex = reconnectAttempts
+            reconnectAttempts++
+            var retryDelay = 2000L
+            repeat(attemptIndex) {
+                retryDelay = (retryDelay * 1.5).toLong().coerceAtMost(20000L)
+            }
             _isReconnecting.value = true
             reconnectJob = scope.launch {
                 val selfJob = coroutineContext[Job]
                 try {
-                    var retryDelay = 2000L
-                    var attempts = 0
-                    while (!isInBackground && shouldBeConnected && !_isConnected.value && attempts < MAX_RECONNECT_ATTEMPTS) {
-                        delay(retryDelay)
-                        synchronized(stateLock) {
-                            if (!isInBackground && shouldBeConnected && !_isConnected.value) {
-                                Log.d(
-                                    TAG,
-                                    "Attempting auto-reconnect to $serverIp (attempt ${attempts + 1}/$MAX_RECONNECT_ATTEMPTS)..."
-                                )
-                                doConnectLocked()
-                            }
+                    delay(retryDelay)
+                    synchronized(stateLock) {
+                        if (reconnectJob === selfJob) {
+                            reconnectJob = null
                         }
-                        attempts++
-                        // Give TLS/WebSocket handshake a moment before evaluating retry backoff
-                        delay(1500L)
-                        retryDelay = (retryDelay * 1.5).toLong().coerceAtMost(20000L)
+                        if (!isInBackground && shouldBeConnected && !_isConnected.value && !_isConnecting.value) {
+                            Log.d(
+                                TAG,
+                                "Attempting auto-reconnect to $serverIp (attempt ${attemptIndex + 1}/$MAX_RECONNECT_ATTEMPTS)..."
+                            )
+                            doConnectLocked()
+                        } else if (isInBackground || !shouldBeConnected) {
+                            _isReconnecting.value = false
+                        }
                     }
                 } finally {
                     synchronized(stateLock) {
                         if (reconnectJob === selfJob) {
-                            _isReconnecting.value = false
                             reconnectJob = null
+                            if (!_isConnecting.value && !_isConnected.value) {
+                                _isReconnecting.value = false
+                            }
                         }
                     }
                 }
@@ -554,6 +635,7 @@ class NetworkClient(
                 startPingLoopLocked(ws)
             } else if (shouldBeConnected && !_isConnecting.value) {
                 Log.d(TAG, "App resumed into foreground, immediately reconnecting...")
+                reconnectAttempts = 0
                 reconnectJob?.cancel()
                 reconnectJob = null
                 _isReconnecting.value = false
@@ -570,6 +652,7 @@ class NetworkClient(
         synchronized(stateLock) {
             if (!isInBackground && shouldBeConnected && !_isConnected.value && !_isConnecting.value) {
                 Log.d(TAG, "Checking connection state, immediately reconnecting...")
+                reconnectAttempts = 0
                 reconnectJob?.cancel()
                 reconnectJob = null
                 _isReconnecting.value = false
@@ -643,8 +726,8 @@ class NetworkClient(
         pingJob = null
     }
 
-    fun sendPaste(text: String, enter: Boolean = false, mode: String = "terminal") {
-        sendJson(ProtocolPayloads.buildPasteJson(text, enter = enter, mode = mode))
+    fun sendPaste(text: String, enter: Boolean = false, mode: String = "terminal"): Boolean {
+        return sendJson(ProtocolPayloads.buildPasteJson(text, enter = enter, mode = mode))
     }
 
     fun sendKey(key: String, action: String = "tap") {
@@ -692,6 +775,7 @@ class NetworkClient(
     fun disconnect() {
         synchronized(stateLock) {
             shouldBeConnected = false
+            reconnectAttempts = 0
             _isConnecting.value = false
             _isReconnecting.value = false
             setConnectionError(null)

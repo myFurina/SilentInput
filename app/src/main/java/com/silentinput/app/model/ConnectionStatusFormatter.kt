@@ -1,5 +1,7 @@
 package com.silentinput.app.model
 
+import com.silentinput.app.network.NetworkClient
+
 enum class StatusTone {
     NORMAL,
     PENDING,
@@ -86,7 +88,8 @@ object ConnectionStatusFormatter {
             }
             else -> {
                 val prefix = s.statusUsbPrefix
-                val isLoopback = activeServerIp == "127.0.0.1"
+                val isLoopback = NetworkClient.parseServerEndpoint(activeServerIp)
+                    ?.let { NetworkClient.isLoopbackHost(it.host) } == true
                 val text = when {
                     isNetReady && isLoopback -> {
                         val latText = formatLatencySuffix(netLatencyMs, markHighLatency = false, strings = s)

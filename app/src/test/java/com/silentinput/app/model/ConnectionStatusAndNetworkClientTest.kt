@@ -476,4 +476,37 @@ class ConnectionStatusAndNetworkClientTest {
             client.destroy()
         }
     }
+
+    @Test
+    fun `parseServerEndpoint handles ipv4 host port ipv6 and malformed inputs`() {
+        val ipv4 = NetworkClient.parseServerEndpoint("192.168.1.20")
+        assertEquals(NetworkClient.ParsedEndpoint("192.168.1.20", NetworkClient.DEFAULT_PORT), ipv4)
+        assertEquals("wss://192.168.1.20:53318/", ipv4?.toWebSocketUrl(true))
+
+        val withPort = NetworkClient.parseServerEndpoint("192.168.1.20:54000")
+        assertEquals(NetworkClient.ParsedEndpoint("192.168.1.20", 54000), withPort)
+        assertEquals("ws://192.168.1.20:54000/", withPort?.toWebSocketUrl(false))
+
+        val bareIpv6 = NetworkClient.parseServerEndpoint("fd7a:115c:a1e0::1")
+        assertEquals(NetworkClient.ParsedEndpoint("fd7a:115c:a1e0::1", NetworkClient.DEFAULT_PORT), bareIpv6)
+        assertEquals("wss://[fd7a:115c:a1e0::1]:53318/", bareIpv6?.toWebSocketUrl(true))
+        assertEquals("[fd7a:115c:a1e0::1]:53318", bareIpv6?.hostKey)
+
+        val bracketedIpv6 = NetworkClient.parseServerEndpoint("[::1]:53319")
+        assertEquals(NetworkClient.ParsedEndpoint("::1", 53319), bracketedIpv6)
+        assertEquals("wss://[::1]:53319/", bracketedIpv6?.toWebSocketUrl(true))
+        assertTrue(NetworkClient.isLoopbackHost(bracketedIpv6!!.host))
+
+        assertTrue(NetworkClient.isLoopbackHost("127.0.0.1"))
+        assertTrue(NetworkClient.isLoopbackHost("LOCALHOST"))
+        assertFalse(NetworkClient.isLoopbackHost("192.168.1.1"))
+
+        assertNull(NetworkClient.parseServerEndpoint(""))
+        assertNull(NetworkClient.parseServerEndpoint("http://192.168.1.10"))
+        assertNull(NetworkClient.parseServerEndpoint("192.168.1. 10"))
+        assertNull(NetworkClient.parseServerEndpoint("192.168.1.10:0"))
+        assertNull(NetworkClient.parseServerEndpoint("192.168.1.10:70000"))
+        assertNull(NetworkClient.parseServerEndpoint("192.168.1.10:abc"))
+        assertNull(NetworkClient.parseServerEndpoint("[::1"))
+    }
 }

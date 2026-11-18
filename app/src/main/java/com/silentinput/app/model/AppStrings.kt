@@ -86,6 +86,7 @@ data class AppStrings(
     val netErrConnectFailedHost: String,
     val netErrTimeout: String,
     val netErrGenericFailed: String,
+    val netErrReconnectExhausted: String,
     val netErrOpenFailed: (detail: String?) -> String,
 
     // BluetoothCompanionClient Status
@@ -106,6 +107,8 @@ data class AppStrings(
     val lanIpPlaceholder: String,
     val lanTokenLabel: String,
     val lanTokenPlaceholder: String,
+    val lanTokenShowDesc: String,
+    val lanTokenHideDesc: String,
     val lanTlsTitle: String,
     val lanTlsSubtitleOn: String,
     val lanTlsSubtitleOff: String,
@@ -193,6 +196,7 @@ data class AppStrings(
     // Keyboard Screen
     val kbShortcutsTitle: String,
     val kbImeSwitch: String,
+    val kbImeSwitchCustom: (label: String) -> String,
     val kbSpace: String,
     val kbEnter: String,
     val kbBackspace: String,
@@ -295,6 +299,7 @@ data class AppStrings(
             netErrConnectFailedHost = "无法连接电脑 (请检查 IP、端口及服务状态)",
             netErrTimeout = "连接超时 (请检查局域网连接)",
             netErrGenericFailed = "连接失败",
+            netErrReconnectExhausted = "自动重连已停止，请检查网络后手动重连",
             netErrOpenFailed = { detail -> "建立连接失败: ${detail ?: "未知错误"}" },
 
             btStatusDisconnected = "未连接",
@@ -313,6 +318,8 @@ data class AppStrings(
             lanIpPlaceholder = "请输入电脑 IP 地址",
             lanTokenLabel = "配对密钥",
             lanTokenPlaceholder = "请输入配对密钥",
+            lanTokenShowDesc = "显示配对密钥",
+            lanTokenHideDesc = "隐藏配对密钥",
             lanTlsTitle = "TLS 传输加密 (WSS)",
             lanTlsSubtitleOn = "严格端到端加密 (电脑端也需开启 TLS)",
             lanTlsSubtitleOff = "明文传输模式 (需电脑端同步关闭 TLS)",
@@ -399,6 +406,7 @@ data class AppStrings(
 
             kbShortcutsTitle = "快捷键",
             kbImeSwitch = "Shift",
+            kbImeSwitchCustom = { label -> "中/英\n$label" },
             kbSpace = "空格\nSpace",
             kbEnter = "回车\nEnter",
             kbBackspace = "退格\nBackspace",
@@ -499,6 +507,7 @@ data class AppStrings(
             netErrConnectFailedHost = "Unable to connect to PC (check IP, port, and daemon)",
             netErrTimeout = "Connection timed out (check LAN connection)",
             netErrGenericFailed = "Connection failed",
+            netErrReconnectExhausted = "Auto-reconnect stopped. Check network and reconnect manually.",
             netErrOpenFailed = { detail -> "Failed to open connection: ${detail ?: "Unknown error"}" },
 
             btStatusDisconnected = "Disconnected",
@@ -517,6 +526,8 @@ data class AppStrings(
             lanIpPlaceholder = "Enter PC IP address",
             lanTokenLabel = "Pairing Key",
             lanTokenPlaceholder = "Enter pairing key",
+            lanTokenShowDesc = "Show pairing key",
+            lanTokenHideDesc = "Hide pairing key",
             lanTlsTitle = "TLS Encryption (WSS)",
             lanTlsSubtitleOn = "Strict E2E encryption (TLS must be enabled on PC)",
             lanTlsSubtitleOff = "Plaintext mode (TLS must also be disabled on PC)",
@@ -603,6 +614,7 @@ data class AppStrings(
 
             kbShortcutsTitle = "Shortcuts",
             kbImeSwitch = "Shift",
+            kbImeSwitchCustom = { label -> "IME\n$label" },
             kbSpace = "Space",
             kbEnter = "Enter",
             kbBackspace = "Back-\nspace",

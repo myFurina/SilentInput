@@ -31,7 +31,6 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -50,7 +49,6 @@ import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -191,14 +189,8 @@ fun TextSenderScreen(
                         null
                     },
                     keyboardOptions = KeyboardOptions(
-                        keyboardType = if (isDirectMode) KeyboardType.Ascii else KeyboardType.Text,
-                        imeAction = ImeAction.Send
+                        keyboardType = if (isDirectMode) KeyboardType.Ascii else KeyboardType.Text
                     ),
-                    keyboardActions = KeyboardActions(onSend = {
-                        if (sendEnabled) {
-                            sendText(inputText)
-                        }
-                    }),
                     trailingIcon = {
                         AnimatedVisibility(
                             visible = inputText.isNotEmpty(),

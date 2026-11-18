@@ -142,9 +142,6 @@ class MainActivity : ComponentActivity() {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
                 permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
             }
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-                permissions.add(Manifest.permission.BLUETOOTH_SCAN)
-            }
         }
         if (permissions.isNotEmpty()) {
             permissionLauncher.launch(permissions.toTypedArray())
@@ -353,12 +350,14 @@ fun MainAppScaffold(
                 when (selectedTab) {
                     0 -> KeyboardScreen(
                         isHapticEnabled = isHapticEnabled,
+                        imeSwitchKey = imeSwitchKey,
                         onSendKey = { viewModel.sendKey(it) },
                         onOpenLandscapeKeyboard = { showLandscapeKeyboard = true }
                     )
                     1 -> TrackpadScreen(
                         sensitivity = trackpadSensitivity,
-                        onSensitivityChange = { viewModel.updateTrackpadSensitivity(it) },
+                        onSensitivityChange = { viewModel.updateTrackpadSensitivity(it, persist = false) },
+                        onSensitivityChangeFinished = { viewModel.commitTrackpadSensitivity() },
                         naturalScrolling = isNaturalScrolling,
                         isHapticEnabled = isHapticEnabled,
                         isConnected = isAnyConnected,

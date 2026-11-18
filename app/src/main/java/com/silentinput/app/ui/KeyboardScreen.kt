@@ -42,6 +42,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.silentinput.app.model.ImeSwitchShortcut
 import com.silentinput.app.model.ProtocolPayloads
 import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.ui.theme.pressScale
@@ -50,6 +51,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun KeyboardScreen(
     isHapticEnabled: Boolean = false,
+    imeSwitchKey: String = ImeSwitchShortcut.DEFAULT,
     onSendKey: (String) -> Unit,
     onOpenLandscapeKeyboard: () -> Unit = {}
 ) {
@@ -89,7 +91,14 @@ fun KeyboardScreen(
         }
     }
 
-    fun sendKey(keyName: String) {
+    fun clearModifiers() {
+        ctrlActive = false
+        altActive = false
+        shiftActive = false
+        superActive = false
+    }
+
+    fun sendKey(keyName: String, clearModifiersAfter: Boolean = true) {
         triggerHaptic()
         val fullKey = ProtocolPayloads.formatKeyWithModifiers(
             keyName = keyName,
@@ -100,10 +109,9 @@ fun KeyboardScreen(
         )
         onSendKey(fullKey)
         // Auto release sticky modifiers after action
-        ctrlActive = false
-        altActive = false
-        shiftActive = false
-        superActive = false
+        if (clearModifiersAfter) {
+            clearModifiers()
+        }
     }
 
     fun sendDirectShortcut(name: String) {
@@ -130,8 +138,15 @@ fun KeyboardScreen(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            QuickActionButton(strings.kbImeSwitch, Modifier.weight(1f)) {
-                sendDirectShortcut("shift")
+            if (imeSwitchKey.isNotBlank()) {
+                val imeLabel = if (imeSwitchKey == ImeSwitchShortcut.DEFAULT) {
+                    strings.kbImeSwitch
+                } else {
+                    strings.kbImeSwitchCustom(ImeSwitchShortcut.formatLabel(imeSwitchKey))
+                }
+                QuickActionButton(imeLabel, Modifier.weight(1f)) {
+                    sendDirectShortcut(imeSwitchKey)
+                }
             }
             QuickActionButton(strings.kbSpace, Modifier.weight(1f)) {
                 sendKey("space")
@@ -143,9 +158,10 @@ fun KeyboardScreen(
                 text = strings.kbBackspace,
                 modifier = Modifier.weight(1f),
                 isRepeatable = true,
-                cancelOnDrag = showFullKeyboard
+                cancelOnDrag = showFullKeyboard,
+                onRelease = { clearModifiers() }
             ) {
-                sendKey("backspace")
+                sendKey("backspace", clearModifiersAfter = false)
             }
         }
 
@@ -183,9 +199,10 @@ fun KeyboardScreen(
                 text = "Delete",
                 modifier = Modifier.weight(1f),
                 isRepeatable = true,
-                cancelOnDrag = showFullKeyboard
+                cancelOnDrag = showFullKeyboard,
+                onRelease = { clearModifiers() }
             ) {
-                sendKey("delete")
+                sendKey("delete", clearModifiersAfter = false)
             }
             QuickActionButton("Win", Modifier.weight(1f)) {
                 sendKey("super")
@@ -376,12 +393,28 @@ fun KeyboardScreen(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            RepeatableArrowButton("▲", cancelOnDrag = showFullKeyboard) { sendKey("up") }
+            RepeatableArrowButton(
+                label = "▲",
+                cancelOnDrag = showFullKeyboard,
+                onRelease = { clearModifiers() }
+            ) { sendKey("up", clearModifiersAfter = false) }
             Spacer(modifier = Modifier.height(6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                RepeatableArrowButton("◀", cancelOnDrag = showFullKeyboard) { sendKey("left") }
-                RepeatableArrowButton("▼", cancelOnDrag = showFullKeyboard) { sendKey("down") }
-                RepeatableArrowButton("▶", cancelOnDrag = showFullKeyboard) { sendKey("right") }
+                RepeatableArrowButton(
+                    label = "◀",
+                    cancelOnDrag = showFullKeyboard,
+                    onRelease = { clearModifiers() }
+                ) { sendKey("left", clearModifiersAfter = false) }
+                RepeatableArrowButton(
+                    label = "▼",
+                    cancelOnDrag = showFullKeyboard,
+                    onRelease = { clearModifiers() }
+                ) { sendKey("down", clearModifiersAfter = false) }
+                RepeatableArrowButton(
+                    label = "▶",
+                    cancelOnDrag = showFullKeyboard,
+                    onRelease = { clearModifiers() }
+                ) { sendKey("right", clearModifiersAfter = false) }
             }
         }
     }
@@ -580,6 +613,7 @@ private fun MiniKeyboardKey(
 private fun RepeatableArrowButton(
     label: String,
     cancelOnDrag: Boolean = false,
+    onRelease: (() -> Unit)? = null,
     onTrigger: () -> Unit
 ) {
     val shape = RoundedCornerShape(8.dp)
@@ -592,10 +626,15 @@ private fun RepeatableArrowButton(
             .clip(shape)
             .semantics(mergeDescendants = true) {
                 role = Role.Button
-                onClick { onTrigger(); true }
+                onClick { onTrigger(); onRelease?.invoke(); true }
             }
             .indication(interactionSource, LocalIndication.current)
-            .repeatOnPress(interactionSource = interactionSource, cancelOnDrag = cancelOnDrag, onRepeat = onTrigger),
+            .repeatOnPress(
+                interactionSource = interactionSource,
+                cancelOnDrag = cancelOnDrag,
+                onRelease = onRelease,
+                onRepeat = onTrigger
+            ),
         shape = shape,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
         color = MaterialTheme.colorScheme.surfaceVariant
@@ -613,6 +652,7 @@ fun QuickActionButton(
     isPrimaryHighlight: Boolean = false,
     isRepeatable: Boolean = false,
     cancelOnDrag: Boolean = false,
+    onRelease: (() -> Unit)? = null,
     onClick: () -> Unit
 ) {
     val shape = RoundedCornerShape(10.dp)
@@ -627,10 +667,15 @@ fun QuickActionButton(
                     Modifier
                         .semantics(mergeDescendants = true) {
                             role = Role.Button
-                            onClick { onClick(); true }
+                            onClick { onClick(); onRelease?.invoke(); true }
                         }
                         .indication(interactionSource, LocalIndication.current)
-                        .repeatOnPress(interactionSource = interactionSource, cancelOnDrag = cancelOnDrag, onRepeat = onClick)
+                        .repeatOnPress(
+                            interactionSource = interactionSource,
+                            cancelOnDrag = cancelOnDrag,
+                            onRelease = onRelease,
+                            onRepeat = onClick
+                        )
                 } else {
                     Modifier.clickable(
                         interactionSource = interactionSource,

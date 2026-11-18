@@ -29,9 +29,11 @@ fun Modifier.repeatOnPress(
     initialDelayMs: Long = 350L,
     repeatIntervalMs: Long = 55L,
     cancelOnDrag: Boolean = false,
+    onRelease: (() -> Unit)? = null,
     onRepeat: () -> Unit
 ): Modifier {
     val currentOnRepeat by rememberUpdatedState(onRepeat)
+    val currentOnRelease by rememberUpdatedState(onRelease)
     return this.pointerInput(interactionSource, initialDelayMs, repeatIntervalMs, cancelOnDrag) {
         coroutineScope {
             awaitEachGesture {
@@ -40,20 +42,26 @@ fun Modifier.repeatOnPress(
                 interactionSource.tryEmit(press)
 
                 if (!cancelOnDrag) {
-                    currentOnRepeat()
+                    var emittedAny = false
+                    var released = false
                     val repeatJob = launch {
                         delay(initialDelayMs)
                         while (true) {
+                            emittedAny = true
                             currentOnRepeat()
                             delay(repeatIntervalMs)
                         }
                     }
-                    var released = false
                     try {
+                        emittedAny = true
+                        currentOnRepeat()
                         val up = waitForUpOrCancellation()
                         released = up != null
                     } finally {
                         repeatJob.cancel()
+                        if (emittedAny) {
+                            currentOnRelease?.invoke()
+                        }
                         interactionSource.tryEmit(
                             if (released) PressInteraction.Release(press)
                             else PressInteraction.Cancel(press)
@@ -94,10 +102,14 @@ fun Modifier.repeatOnPress(
                             }
                         }
                         if (releasedNormally && !dragged && !emittedRepeat) {
+                            emittedRepeat = true
                             currentOnRepeat()
                         }
                     } finally {
                         repeatJob.cancel()
+                        if (emittedRepeat) {
+                            currentOnRelease?.invoke()
+                        }
                         interactionSource.tryEmit(
                             if (releasedNormally && !dragged) PressInteraction.Release(press)
                             else PressInteraction.Cancel(press)

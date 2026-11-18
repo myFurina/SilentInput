@@ -25,6 +25,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -36,6 +37,8 @@ import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -48,6 +51,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.silentinput.app.model.AppLanguage
@@ -539,6 +545,7 @@ private fun LanConnectionTab(
     onDisconnect: () -> Unit
 ) {
     val strings = LocalAppStrings.current
+    var tokenVisible by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         OutlinedTextField(
             value = ip,
@@ -555,6 +562,18 @@ private fun LanConnectionTab(
             label = { Text(strings.lanTokenLabel) },
             placeholder = { Text(strings.lanTokenPlaceholder) },
             singleLine = true,
+            visualTransformation = if (tokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Password
+            ),
+            trailingIcon = {
+                IconButton(onClick = { tokenVisible = !tokenVisible }) {
+                    Icon(
+                        imageVector = if (tokenVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                        contentDescription = if (tokenVisible) strings.lanTokenHideDesc else strings.lanTokenShowDesc
+                    )
+                }
+            },
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -932,8 +951,16 @@ private fun BluetoothDeviceRow(
     onConnect: () -> Unit
 ) {
     val strings = LocalAppStrings.current
-    val devName = device.name ?: device.address
-    val isComputer = device.bluetoothClass?.majorDeviceClass == BluetoothClass.Device.Major.COMPUTER
+    val devName = try {
+        device.name ?: device.address
+    } catch (_: SecurityException) {
+        device.address
+    }
+    val isComputer = try {
+        device.bluetoothClass?.majorDeviceClass == BluetoothClass.Device.Major.COMPUTER
+    } catch (_: SecurityException) {
+        false
+    }
     val starColor by animateColorAsState(
         targetValue = if (isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
         animationSpec = tween(SilentMotion.DURATION_STATE_MS),

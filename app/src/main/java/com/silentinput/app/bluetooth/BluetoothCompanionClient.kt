@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -19,7 +20,6 @@ import com.silentinput.app.model.ProtocolPayloads
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
-import java.util.concurrent.ConcurrentLinkedQueue
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -42,7 +42,16 @@ class BluetoothCompanionClient(
         private const val PING_TIMEOUT_MS = 5000L
     }
 
-    private val bluetoothAdapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
+    private val bluetoothAdapter: BluetoothAdapter? =
+        (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+
+    private fun safeDeviceName(device: BluetoothDevice): String {
+        return try {
+            device.name ?: device.address
+        } catch (_: SecurityException) {
+            device.address
+        }
+    }
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected = _isConnected.asStateFlow()
@@ -98,6 +107,8 @@ class BluetoothCompanionClient(
 
     private val stateLock = Any()
     @Volatile
+    private var connectionGeneration: Long = 0L
+    @Volatile
     private var socket: BluetoothSocket? = null
     @Volatile
     private var connectingSocket: BluetoothSocket? = null
@@ -111,11 +122,7 @@ class BluetoothCompanionClient(
     private var writeJob: Job? = null
     private var readJob: Job? = null
     private var pingJob: Job? = null
-    private val controlQueue = ConcurrentLinkedQueue<String>()
-    private val moveLock = Any()
-    private var pendingMoveDx = 0f
-    private var pendingMoveDy = 0f
-    private var hasPendingMove = false
+    private val outboundQueue = BluetoothOutboundQueue()
     @Volatile
     private var wakeSignal: Channel<Unit>? = null
     @Volatile
@@ -148,10 +155,17 @@ class BluetoothCompanionClient(
                 BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
                     @Suppress("DEPRECATION")
                     val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
-                    val activeAddr = _connectedDeviceAddress.value
-                    if (device != null && activeAddr != null && device.address == activeAddr) {
-                        Log.d(TAG, "ACL disconnected for active device $activeAddr")
-                        onConnectionLost()
+                    val matchedGen = synchronized(stateLock) {
+                        val activeAddr = _connectedDeviceAddress.value
+                        if (device != null && activeAddr != null && device.address == activeAddr) {
+                            connectionGeneration
+                        } else {
+                            null
+                        }
+                    }
+                    if (matchedGen != null) {
+                        Log.d(TAG, "ACL disconnected for active device ${device?.address}")
+                        onConnectionLost(expectedGen = matchedGen)
                     }
                 }
             }
@@ -204,7 +218,11 @@ class BluetoothCompanionClient(
             val devices = bluetoothAdapter?.bondedDevices?.toList() ?: emptyList()
             // Prioritize computers/laptops to the top
             devices.sortedByDescending { dev ->
-                dev.bluetoothClass?.majorDeviceClass == BluetoothClass.Device.Major.COMPUTER
+                try {
+                    dev.bluetoothClass?.majorDeviceClass == BluetoothClass.Device.Major.COMPUTER
+                } catch (_: SecurityException) {
+                    false
+                }
             }
         } catch (e: Exception) {
             emptyList()
@@ -214,72 +232,109 @@ class BluetoothCompanionClient(
     fun connect(device: BluetoothDevice) {
         synchronized(stateLock) {
             disconnectLocked(resetStatus = false)
+            val connGen = ++connectionGeneration
             _isConnecting.value = true
-            val devLabel = device.name ?: device.address
+            val devLabel = safeDeviceName(device)
             setStatusMessage { it.btStatusConnecting(devLabel) }
 
             connectJob = clientScope.launch {
                 var activeSocket: BluetoothSocket? = null
 
                 // 1. Try standard SPP UUID connection
+                var primarySocket: BluetoothSocket? = null
                 try {
                     Log.d(TAG, "Attempting SPP connection to ${device.address} via UUID")
                     val s = device.createRfcommSocketToServiceRecord(SPP_UUID)
-                    connectingSocket = s
-                    bluetoothAdapter?.cancelDiscovery()
+                    primarySocket = s
+                    val shouldProceed = synchronized(stateLock) {
+                        if (isActive && connectionGeneration == connGen) {
+                            connectingSocket = s
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    if (!shouldProceed) {
+                        try { s.close() } catch (_: Exception) {}
+                        return@launch
+                    }
                     s.connect()
                     activeSocket = s
                 } catch (e: Exception) {
-                    try { connectingSocket?.close() } catch (_: Exception) {}
-                    connectingSocket = null
-                    if (isActive) {
+                    try { primarySocket?.close() } catch (_: Exception) {}
+                    synchronized(stateLock) {
+                        if (connectingSocket === primarySocket) {
+                            connectingSocket = null
+                        }
+                    }
+                    if (isActive && connectionGeneration == connGen) {
                         Log.w(TAG, "SPP UUID connection failed, attempting fallback to Channel 1", e)
+                        var fallbackSocket: BluetoothSocket? = null
                         try {
                             val m = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
                             val s = m.invoke(device, 1) as BluetoothSocket
-                            connectingSocket = s
-                            bluetoothAdapter?.cancelDiscovery()
+                            fallbackSocket = s
+                            val shouldProceed = synchronized(stateLock) {
+                                if (isActive && connectionGeneration == connGen) {
+                                    connectingSocket = s
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            if (!shouldProceed) {
+                                try { s.close() } catch (_: Exception) {}
+                                return@launch
+                            }
                             s.connect()
                             activeSocket = s
                         } catch (e2: Exception) {
-                            try { connectingSocket?.close() } catch (_: Exception) {}
-                            connectingSocket = null
+                            try { fallbackSocket?.close() } catch (_: Exception) {}
+                            synchronized(stateLock) {
+                                if (connectingSocket === fallbackSocket) {
+                                    connectingSocket = null
+                                }
+                            }
                             Log.e(TAG, "All RFCOMM connection attempts failed", e2)
                         }
                     }
                 }
 
-                if (!isActive) {
+                if (!isActive || connectionGeneration != connGen) {
                     try { activeSocket?.close() } catch (_: Exception) {}
-                    connectingSocket = null
                     return@launch
                 }
 
                 synchronized(stateLock) {
+                    if (connectionGeneration != connGen || !isActive) {
+                        try { activeSocket?.close() } catch (_: Exception) {}
+                        return@launch
+                    }
                     connectingSocket = null
-                    if (activeSocket != null && activeSocket.isConnected && isActive) {
+                    if (activeSocket != null && activeSocket.isConnected) {
                         socket = activeSocket
                         val out = activeSocket.outputStream
+                        val bufReader = BufferedReader(InputStreamReader(activeSocket.inputStream, Charsets.UTF_8))
                         outputStream = out
-                        reader = BufferedReader(InputStreamReader(activeSocket.inputStream, Charsets.UTF_8))
+                        reader = bufReader
 
-                        clearPendingOutbound()
+                        outboundQueue.clear()
                         val signal = Channel<Unit>(capacity = Channel.CONFLATED)
                         wakeSignal = signal
 
                         _isConnected.value = true
                         _isConnecting.value = false
                         _supportsUnicodeDirectTyping.value = true
-                        val devLabel = device.name ?: device.address
-                        _connectedDeviceName.value = devLabel
+                        val connectedLabel = safeDeviceName(device)
+                        _connectedDeviceName.value = connectedLabel
                         _connectedDeviceAddress.value = device.address
-                        setStatusMessage { it.btStatusConnected(devLabel) }
-                        Log.d(TAG, "Bluetooth RFCOMM connected successfully to ${device.name}")
+                        setStatusMessage { it.btStatusConnected(connectedLabel) }
+                        Log.d(TAG, "Bluetooth RFCOMM connected successfully to $connectedLabel")
 
-                        startWriterLocked(signal, out)
-                        startReaderLocked()
+                        startWriterLocked(signal, out, connGen)
+                        startReaderLocked(bufReader, connGen)
                         if (!isInBackground) {
-                            startPingLoopLocked()
+                            startPingLoopLocked(connGen)
                         }
                         sendRaw(ProtocolPayloads.buildGetStatusJson())
                     } else {
@@ -295,82 +350,48 @@ class BluetoothCompanionClient(
         }
     }
 
-    private fun clearPendingOutbound() {
-        controlQueue.clear()
-        synchronized(moveLock) {
-            pendingMoveDx = 0f
-            pendingMoveDy = 0f
-            hasPendingMove = false
-        }
-    }
-
-    private fun startWriterLocked(signal: Channel<Unit>, out: OutputStream) {
+    private fun startWriterLocked(signal: Channel<Unit>, out: OutputStream, connGen: Long) {
         writeJob?.cancel()
         writeJob = clientScope.launch {
             try {
                 for (ignored in signal) {
                     while (true) {
-                        val nextControl = controlQueue.poll()
-                        if (nextControl != null) {
-                            val bytes = (nextControl.trim() + "\n").toByteArray(Charsets.UTF_8)
-                            out.write(bytes)
-                            out.flush()
-                            continue
-                        }
-                        var moveDx = 0f
-                        var moveDy = 0f
-                        var sendMove = false
-                        synchronized(moveLock) {
-                            if (hasPendingMove) {
-                                moveDx = pendingMoveDx
-                                moveDy = pendingMoveDy
-                                pendingMoveDx = 0f
-                                pendingMoveDy = 0f
-                                hasPendingMove = false
-                                sendMove = true
-                            }
-                        }
-                        if (sendMove) {
-                            val bytes = (ProtocolPayloads.buildMouseJson(moveDx, moveDy, action = "move") + "\n")
-                                .toByteArray(Charsets.UTF_8)
-                            out.write(bytes)
-                            out.flush()
-                            continue
-                        }
-                        break
+                        val nextPayload = outboundQueue.pollNext() ?: break
+                        val bytes = (nextPayload.trim() + "\n").toByteArray(Charsets.UTF_8)
+                        out.write(bytes)
+                        out.flush()
                     }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error writing data: ${e.message}")
-                onConnectionLost()
+                onConnectionLost(expectedGen = connGen)
             }
         }
     }
 
-    private fun startReaderLocked() {
+    private fun startReaderLocked(bufReader: BufferedReader, connGen: Long) {
         readJob?.cancel()
-        val bufReader = reader ?: return
         readJob = clientScope.launch {
             try {
-                while (isActive && _isConnected.value) {
+                while (isActive && _isConnected.value && connectionGeneration == connGen) {
                     val line = bufReader.readLine() ?: break
                     val trimmed = line.trim()
                     if (trimmed.isEmpty()) continue
-                    handleMessage(trimmed)
+                    handleMessage(trimmed, connGen)
                 }
             } catch (e: Exception) {
                 Log.d(TAG, "Bluetooth read loop ended: ${e.message}")
             } finally {
                 withContext(NonCancellable) {
-                    onConnectionLost()
+                    onConnectionLost(expectedGen = connGen)
                 }
             }
         }
     }
 
-    private fun handleMessage(jsonStr: String) {
+    private fun handleMessage(jsonStr: String, connGen: Long) {
         try {
             val json = JSONObject(jsonStr)
             when (json.optString("type")) {
@@ -378,6 +399,7 @@ class BluetoothCompanionClient(
                     val sentTime = json.optLong("t", 0L)
                     val now = SystemClock.elapsedRealtime()
                     synchronized(stateLock) {
+                        if (connectionGeneration != connGen) return
                         if (sentTime > 0) {
                             val rtt = (now - sentTime).coerceAtLeast(0L)
                             _latencyMs.value = rtt
@@ -388,22 +410,26 @@ class BluetoothCompanionClient(
                 }
                 "auth_result" -> {
                     val status = json.optString("status")
-                    if (status == "ok") {
-                        if (json.has("unicode_direct_typing")) {
-                            _supportsUnicodeDirectTyping.value =
-                                json.optBoolean("unicode_direct_typing", true)
-                        }
-                    } else {
-                        val serverMsg = json.optString("message", "").takeIf { it.isNotBlank() }
-                        synchronized(stateLock) {
+                    synchronized(stateLock) {
+                        if (connectionGeneration != connGen) return
+                        if (status == "ok") {
+                            if (json.has("unicode_direct_typing")) {
+                                _supportsUnicodeDirectTyping.value =
+                                    json.optBoolean("unicode_direct_typing", true)
+                            }
+                        } else {
+                            val serverMsg = json.optString("message", "").takeIf { it.isNotBlank() }
                             setStatusMessage { it.btStatusAuthFailed(serverMsg) }
                         }
                     }
                 }
                 "status" -> {
-                    if (json.has("unicode_direct_typing")) {
-                        _supportsUnicodeDirectTyping.value =
-                            json.optBoolean("unicode_direct_typing", true)
+                    synchronized(stateLock) {
+                        if (connectionGeneration != connGen) return
+                        if (json.has("unicode_direct_typing")) {
+                            _supportsUnicodeDirectTyping.value =
+                                json.optBoolean("unicode_direct_typing", true)
+                        }
                     }
                 }
             }
@@ -412,22 +438,22 @@ class BluetoothCompanionClient(
         }
     }
 
-    private fun startPingLoopLocked() {
+    private fun startPingLoopLocked(connGen: Long) {
         stopPingLoopLocked()
 
         pingJob = clientScope.launch {
             var nextDelay = PING_INITIAL_DELAY_MS
-            while (isActive && !isInBackground && _isConnected.value) {
+            while (isActive && !isInBackground && _isConnected.value && connectionGeneration == connGen) {
                 delay(nextDelay)
                 nextDelay = PING_INTERVAL_FOREGROUND_MS
-                if (!isActive || isInBackground || !_isConnected.value) {
+                if (!isActive || isInBackground || !_isConnected.value || connectionGeneration != connGen) {
                     break
                 }
 
                 val deferred = CompletableDeferred<Unit>()
                 val sentAt = SystemClock.elapsedRealtime()
                 val canSend = synchronized(stateLock) {
-                    if (isInBackground || !_isConnected.value) {
+                    if (isInBackground || !_isConnected.value || connectionGeneration != connGen) {
                         false
                     } else {
                         pingResponseSignal = deferred
@@ -443,14 +469,14 @@ class BluetoothCompanionClient(
                 val received = withTimeoutOrNull(PING_TIMEOUT_MS) {
                     deferred.await()
                 }
-                if (received == null && isActive && !isInBackground && _isConnected.value) {
+                if (received == null && isActive && !isInBackground && _isConnected.value && connectionGeneration == connGen) {
                     Log.w(TAG, "Bluetooth heartbeat timeout (>${PING_TIMEOUT_MS}ms), closing dead connection")
                     synchronized(stateLock) {
                         if (pingResponseSignal === deferred) {
                             pingResponseSignal = null
                         }
                     }
-                    onConnectionLost()
+                    onConnectionLost(expectedGen = connGen)
                     break
                 }
             }
@@ -467,7 +493,7 @@ class BluetoothCompanionClient(
     private fun closeResourcesLocked() {
         wakeSignal?.close()
         wakeSignal = null
-        clearPendingOutbound()
+        outboundQueue.clear()
         try { outputStream?.close() } catch (_: Exception) {}
         try { reader?.close() } catch (_: Exception) {}
         try { socket?.close() } catch (_: Exception) {}
@@ -478,8 +504,12 @@ class BluetoothCompanionClient(
         reader = null
     }
 
-    private fun onConnectionLost() {
+    private fun onConnectionLost(expectedGen: Long? = null) {
         synchronized(stateLock) {
+            if (expectedGen != null && connectionGeneration != expectedGen) {
+                return
+            }
+            connectionGeneration++
             val wasConnectedOrConnecting = _isConnected.value || _isConnecting.value
             _isConnected.value = false
             _isConnecting.value = false
@@ -500,6 +530,7 @@ class BluetoothCompanionClient(
     }
 
     private fun disconnectLocked(resetStatus: Boolean = true) {
+        connectionGeneration++
         connectJob?.cancel()
         connectJob = null
         _isConnected.value = false
@@ -537,7 +568,7 @@ class BluetoothCompanionClient(
         synchronized(stateLock) {
             isInBackground = false
             if (_isConnected.value) {
-                startPingLoopLocked()
+                startPingLoopLocked(connectionGeneration)
             }
         }
     }
@@ -559,10 +590,11 @@ class BluetoothCompanionClient(
         clientScope.cancel()
     }
 
-    fun sendRaw(data: String) {
-        if (!_isConnected.value) return
-        controlQueue.offer(data)
+    fun sendRaw(data: String): Boolean {
+        if (!_isConnected.value) return false
+        outboundQueue.enqueueControl(data)
         wakeSignal?.trySend(Unit)
+        return true
     }
 
     fun sendKey(key: String, action: String = "tap") {
@@ -572,18 +604,14 @@ class BluetoothCompanionClient(
     fun sendMouse(dx: Float, dy: Float, action: String = "move", wheel: Float = 0f) {
         if (!_isConnected.value) return
         if (action == "move" && wheel == 0f) {
-            synchronized(moveLock) {
-                pendingMoveDx += dx
-                pendingMoveDy += dy
-                hasPendingMove = true
-            }
+            outboundQueue.enqueueMove(dx, dy)
             wakeSignal?.trySend(Unit)
             return
         }
         sendRaw(ProtocolPayloads.buildMouseJson(dx, dy, action = action, wheel = wheel))
     }
 
-    fun sendPaste(text: String, enter: Boolean = false, mode: String = "terminal") {
-        sendRaw(ProtocolPayloads.buildPasteJson(text, enter = enter, mode = mode))
+    fun sendPaste(text: String, enter: Boolean = false, mode: String = "terminal"): Boolean {
+        return sendRaw(ProtocolPayloads.buildPasteJson(text, enter = enter, mode = mode))
     }
 }

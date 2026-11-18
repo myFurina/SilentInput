@@ -94,7 +94,14 @@ fun LandscapeKeyboardScreen(
         }
     }
 
-    fun sendKeyWithModifiers(keyCode: String) {
+    fun clearModifiers() {
+        ctrlActive = false
+        altActive = false
+        shiftActive = false
+        superActive = false
+    }
+
+    fun sendKeyWithModifiers(keyCode: String, clearModifiersAfter: Boolean = true) {
         triggerHaptic()
         val combined = ProtocolPayloads.formatKeyWithModifiers(
             keyName = keyCode,
@@ -104,10 +111,9 @@ fun LandscapeKeyboardScreen(
             superKey = superActive
         )
         onSendKey(combined)
-        ctrlActive = false
-        altActive = false
-        shiftActive = false
-        superActive = false
+        if (clearModifiersAfter) {
+            clearModifiers()
+        }
     }
 
     fun handleModifierClick(keyCode: String, isActive: Boolean, setActive: (Boolean) -> Unit) {
@@ -272,7 +278,8 @@ fun LandscapeKeyboardScreen(
                     label = "⌫",
                     weight = 1.8f,
                     isFunction = true,
-                    onRepeat = { sendKeyWithModifiers("backspace") }
+                    onRelease = { clearModifiers() },
+                    onRepeat = { sendKeyWithModifiers("backspace", clearModifiersAfter = false) }
                 )
             }
 
@@ -373,13 +380,15 @@ fun LandscapeKeyboardScreen(
                     label = "↑",
                     weight = 1.3f,
                     isFunction = true,
-                    onRepeat = { sendKeyWithModifiers("up") }
+                    onRelease = { clearModifiers() },
+                    onRepeat = { sendKeyWithModifiers("up", clearModifiersAfter = false) }
                 )
                 LandscapeRepeatableKey(
                     label = "Del",
                     weight = 1.3f,
                     isFunction = true,
-                    onRepeat = { sendKeyWithModifiers("delete") }
+                    onRelease = { clearModifiers() },
+                    onRepeat = { sendKeyWithModifiers("delete", clearModifiersAfter = false) }
                 )
             }
 
@@ -432,19 +441,22 @@ fun LandscapeKeyboardScreen(
                     label = "←",
                     weight = 1.3f,
                     isFunction = true,
-                    onRepeat = { sendKeyWithModifiers("left") }
+                    onRelease = { clearModifiers() },
+                    onRepeat = { sendKeyWithModifiers("left", clearModifiersAfter = false) }
                 )
                 LandscapeRepeatableKey(
                     label = "↓",
                     weight = 1.3f,
                     isFunction = true,
-                    onRepeat = { sendKeyWithModifiers("down") }
+                    onRelease = { clearModifiers() },
+                    onRepeat = { sendKeyWithModifiers("down", clearModifiersAfter = false) }
                 )
                 LandscapeRepeatableKey(
                     label = "→",
                     weight = 1.3f,
                     isFunction = true,
-                    onRepeat = { sendKeyWithModifiers("right") }
+                    onRelease = { clearModifiers() },
+                    onRepeat = { sendKeyWithModifiers("right", clearModifiersAfter = false) }
                 )
             }
         }
@@ -512,6 +524,7 @@ private fun RowScope.LandscapeRepeatableKey(
     label: String,
     weight: Float,
     isFunction: Boolean = true,
+    onRelease: (() -> Unit)? = null,
     onRepeat: () -> Unit
 ) {
     val interactionSource = remember { MutableInteractionSource() }
@@ -541,6 +554,7 @@ private fun RowScope.LandscapeRepeatableKey(
             .repeatOnPress(
                 interactionSource = interactionSource,
                 cancelOnDrag = false,
+                onRelease = onRelease,
                 onRepeat = onRepeat
             )
             .padding(horizontal = 2.dp)
