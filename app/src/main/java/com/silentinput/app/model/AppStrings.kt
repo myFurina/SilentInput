@@ -217,6 +217,8 @@ data class AppStrings(
     val kbLandscapeBtn: String,
     val kbLandscapeExitBtn: String,
     val kbLandscapeFnToggle: String,
+    val kbLandscapeDisconnectedChip: String,
+    val kbLandscapeModHint: String,
     val kbNavigationTitle: String,
 
     // Trackpad Screen
@@ -429,6 +431,8 @@ data class AppStrings(
             kbLandscapeBtn = "横屏全键盘",
             kbLandscapeExitBtn = "退出横屏",
             kbLandscapeFnToggle = "Fn / 导航",
+            kbLandscapeDisconnectedChip = "未连接 · 设置",
+            kbLandscapeModHint = "长按修饰键锁定",
             kbNavigationTitle = "方向键",
 
             tpHoldingLeftBtn = "正在框选 · 点此松开",
@@ -639,6 +643,8 @@ data class AppStrings(
             kbLandscapeBtn = "Landscape",
             kbLandscapeExitBtn = "Exit Landscape",
             kbLandscapeFnToggle = "Fn / Nav",
+            kbLandscapeDisconnectedChip = "Offline · Settings",
+            kbLandscapeModHint = "Hold mod to lock",
             kbNavigationTitle = "Arrow Keys",
 
             tpHoldingLeftBtn = "Holding Left · Tap to Release",

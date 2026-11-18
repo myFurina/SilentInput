@@ -1,7 +1,6 @@
 package com.silentinput.app.ui
 
 import android.annotation.SuppressLint
-import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -30,6 +29,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.silentinput.app.bluetooth.BluetoothCompanionClient
 import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.ui.theme.pressScale
 import kotlinx.coroutines.launch
@@ -271,16 +271,8 @@ private fun BluetoothDeviceRow(
     onConnect: () -> Unit
 ) {
     val strings = LocalAppStrings.current
-    val devName = try {
-        device.name ?: device.address
-    } catch (_: SecurityException) {
-        device.address
-    }
-    val isComputer = try {
-        device.bluetoothClass?.majorDeviceClass == BluetoothClass.Device.Major.COMPUTER
-    } catch (_: SecurityException) {
-        false
-    }
+    val devName = BluetoothCompanionClient.safeDeviceName(device)
+    val isComputer = BluetoothCompanionClient.isComputerDevice(device)
     val starColor by animateColorAsState(
         targetValue = if (isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
         animationSpec = tween(SilentMotion.DURATION_STATE_MS),

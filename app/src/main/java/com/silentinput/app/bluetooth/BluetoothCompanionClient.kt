@@ -42,18 +42,28 @@ class BluetoothCompanionClient(
         private const val PING_INITIAL_DELAY_MS = 1000L
         private const val PING_INTERVAL_FOREGROUND_MS = 5000L
         private const val PING_TIMEOUT_MS = 5000L
+
+        @SuppressLint("MissingPermission")
+        fun safeDeviceName(device: BluetoothDevice): String {
+            return try {
+                device.name ?: device.address
+            } catch (_: SecurityException) {
+                device.address
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        fun isComputerDevice(device: BluetoothDevice): Boolean {
+            return try {
+                device.bluetoothClass?.majorDeviceClass == BluetoothClass.Device.Major.COMPUTER
+            } catch (_: SecurityException) {
+                false
+            }
+        }
     }
 
     private val bluetoothAdapter: BluetoothAdapter? =
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
-
-    private fun safeDeviceName(device: BluetoothDevice): String {
-        return try {
-            device.name ?: device.address
-        } catch (_: SecurityException) {
-            device.address
-        }
-    }
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected = _isConnected.asStateFlow()
@@ -221,13 +231,7 @@ class BluetoothCompanionClient(
         return try {
             val devices = bluetoothAdapter?.bondedDevices?.toList() ?: emptyList()
             // Prioritize computers/laptops to the top
-            devices.sortedByDescending { dev ->
-                try {
-                    dev.bluetoothClass?.majorDeviceClass == BluetoothClass.Device.Major.COMPUTER
-                } catch (_: SecurityException) {
-                    false
-                }
-            }
+            devices.sortedByDescending { dev -> isComputerDevice(dev) }
         } catch (e: Exception) {
             emptyList()
         }
@@ -419,6 +423,7 @@ class BluetoothCompanionClient(
                         }
                     } else {
                         val serverMsg = msg.message.takeIf { it.isNotBlank() }
+                        disconnectLocked(resetStatus = false)
                         setStatusMessage { it.btStatusAuthFailed(serverMsg) }
                     }
                 }
@@ -431,7 +436,14 @@ class BluetoothCompanionClient(
                     }
                 }
             }
-            ServerMessage.AuthRequired, null -> Unit
+            ServerMessage.AuthRequired -> {
+                synchronized(stateLock) {
+                    if (connectionGeneration != connGen) return
+                    disconnectLocked(resetStatus = false)
+                    setStatusMessage { it.btStatusAuthFailed(null) }
+                }
+            }
+            null -> Unit
         }
     }
 
@@ -588,10 +600,13 @@ class BluetoothCompanionClient(
     }
 
     fun sendRaw(data: String): Boolean {
-        if (!_isConnected.value) return false
-        outboundQueue.enqueueControl(data)
-        wakeSignal?.trySend(Unit)
-        return true
+        synchronized(stateLock) {
+            val signal = wakeSignal
+            if (!_isConnected.value || signal == null) return false
+            outboundQueue.enqueueControl(data)
+            signal.trySend(Unit)
+            return true
+        }
     }
 
     override fun sendKey(key: String, action: String): Boolean {
@@ -599,13 +614,18 @@ class BluetoothCompanionClient(
     }
 
     override fun sendMouse(dx: Float, dy: Float, action: String, wheel: Float): Boolean {
-        if (!_isConnected.value) return false
-        if (action == "move" && wheel == 0f) {
-            outboundQueue.enqueueMove(dx, dy)
-            wakeSignal?.trySend(Unit)
+        synchronized(stateLock) {
+            val signal = wakeSignal
+            if (!_isConnected.value || signal == null) return false
+            if (action == "move" && wheel == 0f) {
+                outboundQueue.enqueueMove(dx, dy)
+                signal.trySend(Unit)
+                return true
+            }
+            outboundQueue.enqueueControl(ProtocolPayloads.buildMouseJson(dx, dy, action = action, wheel = wheel))
+            signal.trySend(Unit)
             return true
         }
-        return sendRaw(ProtocolPayloads.buildMouseJson(dx, dy, action = action, wheel = wheel))
     }
 
     override fun sendPaste(text: String, enter: Boolean, mode: String): Boolean {

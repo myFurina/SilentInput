@@ -1,10 +1,7 @@
 package com.silentinput.app
 
 import android.Manifest
-import android.app.Activity
 import android.bluetooth.BluetoothAdapter
-import android.content.Context
-import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
@@ -54,6 +51,7 @@ import com.silentinput.app.ui.TrackpadScreen
 import com.silentinput.app.ui.UnifiedConnectionDialog
 import com.silentinput.app.ui.theme.SilentInputTheme
 import com.silentinput.app.ui.theme.SilentMotion
+import com.silentinput.app.ui.theme.findActivity
 import com.silentinput.app.viewmodel.MainViewModel
 import java.util.Locale
 
@@ -236,8 +234,13 @@ fun MainAppScaffold(
     if (showLandscapeKeyboard) {
         LandscapeKeyboardScreen(
             isHapticEnabled = isHapticEnabled,
+            isConnected = isAnyConnected,
             imeSwitchKey = imeSwitchKey,
             onSendKey = { viewModel.sendKey(it) },
+            onOpenSettings = {
+                showLandscapeKeyboard = false
+                showConfigDialog = true
+            },
             onExit = { showLandscapeKeyboard = false }
         )
         return
@@ -470,10 +473,4 @@ private fun TopBarConnectionStatusSubtitle(
         color = statusColor,
         maxLines = 1
     )
-}
-
-private tailrec fun Context.findActivity(): Activity? = when (this) {
-    is Activity -> this
-    is ContextWrapper -> baseContext.findActivity()
-    else -> null
 }

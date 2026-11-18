@@ -19,6 +19,8 @@ data class StatusDisplay(
  */
 object ConnectionStatusFormatter {
 
+    private const val HIGH_LATENCY_THRESHOLD_MS = 800L
+
     fun shouldAutoReconnectBluetooth(
         mode: String,
         isBtConnected: Boolean,
@@ -78,7 +80,7 @@ object ConnectionStatusFormatter {
                     else -> s.statusDisconnected(prefix)
                 }
                 val tone = when {
-                    isNetReady && (netLatencyMs ?: 0L) >= 800L -> StatusTone.HIGH_LATENCY
+                    isNetReady && (netLatencyMs ?: 0L) >= HIGH_LATENCY_THRESHOLD_MS -> StatusTone.HIGH_LATENCY
                     isNetReady -> StatusTone.NORMAL
                     isNetConnected || isNetConnecting -> StatusTone.PENDING
                     isNetReconnecting && netConnectionError == null -> StatusTone.PENDING
@@ -102,7 +104,7 @@ object ConnectionStatusFormatter {
                     else -> s.statusDisconnected(prefix)
                 }
                 val tone = when {
-                    isNetReady && isLoopback && (netLatencyMs ?: 0L) >= 800L -> StatusTone.HIGH_LATENCY
+                    isNetReady && isLoopback && (netLatencyMs ?: 0L) >= HIGH_LATENCY_THRESHOLD_MS -> StatusTone.HIGH_LATENCY
                     isNetReady && isLoopback -> StatusTone.NORMAL
                     (isNetConnected && isLoopback) || (isNetConnecting && isLoopback) -> StatusTone.PENDING
                     isNetReconnecting && netConnectionError == null -> StatusTone.PENDING
@@ -181,7 +183,7 @@ object ConnectionStatusFormatter {
         return when {
             latencyMs == null -> ""
             latencyMs <= 1L -> " (<1ms)"
-            markHighLatency && latencyMs >= 1000L -> strings.statusHighLatencyTag(latencyMs)
+            markHighLatency && latencyMs >= HIGH_LATENCY_THRESHOLD_MS -> strings.statusHighLatencyTag(latencyMs)
             else -> " (${latencyMs}ms)"
         }
     }

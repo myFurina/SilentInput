@@ -509,4 +509,41 @@ class ConnectionStatusAndNetworkClientTest {
         assertNull(NetworkClient.parseServerEndpoint("192.168.1.10:abc"))
         assertNull(NetworkClient.parseServerEndpoint("[::1"))
     }
+
+    @Test
+    fun `high latency tone and suffix share consistent 800ms threshold`() {
+        val below = ConnectionStatusFormatter.formatTopBarStatus(
+            mode = "lan",
+            isBtConnected = false,
+            isBtConnecting = false,
+            btDeviceName = null,
+            btLatencyMs = null,
+            isNetConnected = true,
+            isNetAuthenticated = true,
+            isNetReconnecting = false,
+            isNetEncrypted = true,
+            netConnectionError = null,
+            netLatencyMs = 799L,
+            activeServerIp = "192.168.1.20"
+        )
+        assertEquals(StatusTone.NORMAL, below.tone)
+        assertEquals("局域网: 已连接 (799ms) 🔒", below.text)
+
+        val atThreshold = ConnectionStatusFormatter.formatTopBarStatus(
+            mode = "lan",
+            isBtConnected = false,
+            isBtConnecting = false,
+            btDeviceName = null,
+            btLatencyMs = null,
+            isNetConnected = true,
+            isNetAuthenticated = true,
+            isNetReconnecting = false,
+            isNetEncrypted = true,
+            netConnectionError = null,
+            netLatencyMs = 800L,
+            activeServerIp = "192.168.1.20"
+        )
+        assertEquals(StatusTone.HIGH_LATENCY, atThreshold.tone)
+        assertEquals("局域网: 已连接 (800ms 卡顿/高延迟) 🔒", atThreshold.text)
+    }
 }

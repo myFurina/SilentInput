@@ -13,7 +13,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -62,6 +62,7 @@ fun UnifiedConnectionDialog(
     val isNetReconnecting by viewModel.isNetReconnecting.collectAsState()
     val isNetEncrypted by viewModel.isNetEncrypted.collectAsState()
     val connError by viewModel.netConnectionError.collectAsState()
+    val lanInputError by viewModel.lanInputError.collectAsState()
     val latencyMs by viewModel.netLatencyMs.collectAsState()
     val certMismatchHost by viewModel.certMismatchHost.collectAsState()
     val savedCertFingerprint by viewModel.savedCertFingerprint.collectAsState()
@@ -104,7 +105,7 @@ fun UnifiedConnectionDialog(
     val isUsbReconnecting = isNetReconnecting && isUsbTarget
     val isLanReconnecting = isNetReconnecting && !isUsbTarget
     val usbConnError = if (isUsbTarget) connError else null
-    val lanConnError = if (!isUsbTarget) connError else null
+    val lanConnError = lanInputError ?: if (!isUsbTarget) connError else null
     val pinnedCertFingerprint = remember(ipInput, isLanConnected, pinnedCertNonce) {
         viewModel.getPinnedCertFingerprint(ipInput)
     }
@@ -163,9 +164,15 @@ fun UnifiedConnectionDialog(
                         )
                         1 -> LanConnectionTab(
                             ip = ipInput,
-                            onIpChange = { ipInput = it },
+                            onIpChange = {
+                                ipInput = it
+                                viewModel.clearLanInputError()
+                            },
                             token = tokenInput,
-                            onTokenChange = { tokenInput = it },
+                            onTokenChange = {
+                                tokenInput = it
+                                viewModel.clearLanInputError()
+                            },
                             isTlsEnabled = isTlsEnabled,
                             onToggleTls = { viewModel.toggleTlsEncryption(it) },
                             isLanConnected = isLanConnected,
@@ -275,7 +282,7 @@ internal fun MoreSettingsEntryRow(
                 )
             }
             Icon(
-                imageVector = Icons.Default.KeyboardArrowRight,
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                 contentDescription = strings.expandDesc,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )

@@ -8,6 +8,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.silentinput.app.bluetooth.BluetoothCompanionClient
 import com.silentinput.app.model.AppLanguage
+import com.silentinput.app.model.AppStrings
 import com.silentinput.app.model.ConnectionMode
 import com.silentinput.app.model.ConnectionStatusFormatter
 import com.silentinput.app.model.ImeSwitchShortcut
@@ -35,7 +36,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val PREFS_NAME = "silentinput_prefs"
         private const val KEY_CONNECTION_MODE = "connection_mode"
         private const val KEY_SERVER_IP = "server_ip"
-        private const val KEY_SERVER_PORT = "server_port"
         private const val KEY_LAN_IP = "lan_ip"
         private const val KEY_AUTH_TOKEN = "auth_token"
         private const val KEY_TLS_ENCRYPTION = "tls_encryption"
@@ -153,6 +153,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isLeftMouseHeld = MutableStateFlow(false)
     val isLeftMouseHeld: StateFlow<Boolean> = _isLeftMouseHeld.asStateFlow()
 
+    private var lanErrorFormatter: ((AppStrings) -> String)? = null
+    private val _lanInputError = MutableStateFlow<String?>(null)
+    val lanInputError: StateFlow<String?> = _lanInputError.asStateFlow()
+
     // Delegated network state
     val isNetConnected: StateFlow<Boolean> = networkClient.isConnected
     val isNetAuthenticated: StateFlow<Boolean> = networkClient.isAuthenticated
@@ -205,8 +209,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         networkClient.serverIp = _activeServerIp.value
-        networkClient.serverPort = prefs.getInt(KEY_SERVER_PORT, NetworkClient.DEFAULT_PORT)
-        networkClient.authToken = if (_connectionMode.value == "usb") "" else _savedAuthToken.value
+        networkClient.serverPort = NetworkClient.DEFAULT_PORT
+        networkClient.authToken = if (_connectionMode.value == ConnectionMode.USB.wireValue) "" else _savedAuthToken.value
         networkClient.isTlsEnabled = _isTlsEnabled.value
         btClient.onAdapterStateChanged = {
             refreshBondedDevices()
@@ -301,7 +305,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun setLanInputError(formatter: ((AppStrings) -> String)?) {
+        lanErrorFormatter = formatter
+        _lanInputError.value = formatter?.invoke(AppStrings.forLanguage(_appLanguage.value))
+    }
+
+    fun clearLanInputError() {
+        setLanInputError(null)
+    }
+
     fun connectUsb() {
+        setLanInputError(null)
         btClient.disconnect()
         networkClient.serverIp = "127.0.0.1"
         networkClient.serverPort = NetworkClient.DEFAULT_PORT
@@ -317,9 +331,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connectLan(ip: String, token: String, tlsEnabled: Boolean) {
-        btClient.disconnect()
         val cleanIp = ip.trim()
         val cleanToken = token.trim()
+        if (cleanIp.isEmpty()) {
+            setLanInputError { it.netErrEmptyIp }
+            return
+        }
+        val endpoint = NetworkClient.parseServerEndpoint(cleanIp, NetworkClient.DEFAULT_PORT)
+        if (endpoint == null) {
+            setLanInputError { it.netErrInvalidIp }
+            return
+        }
+        if (!NetworkClient.isLoopbackHost(endpoint.host) && cleanToken.isBlank()) {
+            setLanInputError { it.netErrEmptyToken }
+            return
+        }
+
+        setLanInputError(null)
+        btClient.disconnect()
         networkClient.serverIp = cleanIp
         networkClient.serverPort = NetworkClient.DEFAULT_PORT
         networkClient.authToken = cleanToken
@@ -340,6 +369,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnectNetwork() {
+        setLanInputError(null)
         networkClient.disconnect()
     }
 
@@ -347,7 +377,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _isTlsEnabled.value = enabled
         prefs.edit().putBoolean(KEY_TLS_ENCRYPTION, enabled).apply()
         networkClient.isTlsEnabled = enabled
-        if (_connectionMode.value != ConnectionMode.BLUETOOTH.wireValue && (isNetConnected.value || isNetReconnecting.value)) {
+        if (_connectionMode.value == ConnectionMode.LAN.wireValue && (isNetConnected.value || isNetReconnecting.value)) {
             networkClient.connect()
         }
     }
@@ -505,6 +535,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_appLanguage.value == language) return
         _appLanguage.value = language
         prefs.edit().putString(KEY_APP_LANGUAGE, language.prefValue).apply()
+        lanErrorFormatter?.let { formatter ->
+            _lanInputError.value = formatter(AppStrings.forLanguage(language))
+        }
         networkClient.updateLanguage(language)
         btClient.updateLanguage(language)
     }

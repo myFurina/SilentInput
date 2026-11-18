@@ -73,7 +73,7 @@ fun KeyboardScreen(
 
     LaunchedEffect(showFullKeyboard) {
         if (showFullKeyboard && !prevShowFullKeyboard) {
-            delay(90)
+            delay(SilentMotion.DURATION_EXPAND_MS.toLong())
             val targetScroll = (scrollState.value + 220).coerceAtMost(scrollState.maxValue)
             if (targetScroll > scrollState.value) {
                 scrollState.animateScrollTo(

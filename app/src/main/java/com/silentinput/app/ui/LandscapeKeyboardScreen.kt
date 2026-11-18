@@ -68,8 +68,10 @@ import com.silentinput.app.ui.theme.pressScale
 @Composable
 fun LandscapeKeyboardScreen(
     isHapticEnabled: Boolean,
+    isConnected: Boolean = true,
     imeSwitchKey: String = ImeSwitchShortcut.DEFAULT,
     onSendKey: (String) -> Unit,
+    onOpenSettings: () -> Unit = {},
     onExit: () -> Unit
 ) {
     val view = LocalView.current
@@ -193,6 +195,25 @@ fun LandscapeKeyboardScreen(
                     LandscapeUtilityKey(label = "PrtSc", onClick = { sendKeyWithModifiers("printscreen") })
                 }
 
+                if (!isConnected) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(onClick = onOpenSettings)
+                    ) {
+                        Text(
+                            text = strings.kbLandscapeDisconnectedChip,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                            maxLines = 1
+                        )
+                    }
+                }
+
                 if (hasAnyModifier) {
                     Surface(
                         color = MaterialTheme.colorScheme.primaryContainer,
@@ -207,6 +228,13 @@ fun LandscapeKeyboardScreen(
                             maxLines = 1
                         )
                     }
+                } else {
+                    Text(
+                        text = strings.kbLandscapeModHint,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        maxLines = 1
+                    )
                 }
 
                 val exitInteraction = remember { MutableInteractionSource() }
