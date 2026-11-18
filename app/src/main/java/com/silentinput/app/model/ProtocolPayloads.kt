@@ -133,7 +133,7 @@ private class SimpleJsonObjectParser(private val input: String) {
         skipWhitespace()
         if (pos >= input.length) throw IllegalArgumentException("Unexpected end")
         return when (val ch = input[pos]) {
-            '{' -> parseObject()
+            '{' -> parseObject() ?: throw IllegalArgumentException("Invalid object")
             '[' -> parseArray()
             '"' -> parseString()
             't' -> expectLiteral("true", true)
@@ -153,7 +153,7 @@ private class SimpleJsonObjectParser(private val input: String) {
             pos++
             return result
         }
-        return try {
+        try {
             while (true) {
                 skipWhitespace()
                 if (pos >= input.length || input[pos] != '"') return null
@@ -175,7 +175,7 @@ private class SimpleJsonObjectParser(private val input: String) {
                 }
             }
         } catch (_: Exception) {
-            null
+            return null
         }
     }
 
