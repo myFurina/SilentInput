@@ -12,9 +12,10 @@ use iced::widget::{
     text_input, toggler, Id,
 };
 use iced::{window, Alignment, Element, Font, Length, Size, Subscription, Task, Theme};
+use silentinput_core::acl::find_invalid_ip_patterns;
 use silentinput_core::config::{
-    get_token_status_text, load_config_at, regenerate_token_at, save_config_at, unix_timestamp_secs,
-    SilentInputConfig,
+    generate_token_hex, get_token_status_text, load_config_at, regenerate_token_at,
+    save_config_at, unix_timestamp_secs, SilentInputConfig,
 };
 use silentinput_core::i18n::{resolve_gui_is_zh, t};
 use silentinput_core::logs::read_log_tail_at;
@@ -53,6 +54,8 @@ struct ProbeSnapshot {
 
 #[derive(Debug, Clone)]
 enum ModalView {
+    Help,
+    ResetConfigConfirm,
     Logs(String),
     UninstallPackage(String),
     UninstallUserConfirm,
@@ -85,6 +88,9 @@ enum Message {
     SystemThemeChanged(Mode),
     RestartService,
     RestartActionFinished,
+    OpenHelp,
+    OpenResetConfig,
+    ConfirmResetConfig,
     OpenLogs,
     RefreshLogs,
     LogsLoaded(u64, String),
@@ -568,6 +574,51 @@ impl ControlCenterState {
                     Task::none()
                 }
             }
+            Message::OpenHelp => {
+                self.modal = Some(ModalView::Help);
+                Task::none()
+            }
+            Message::OpenResetConfig => {
+                self.modal = Some(ModalView::ResetConfigConfirm);
+                Task::none()
+            }
+            Message::ConfirmResetConfig => {
+                self.modal = None;
+                let default_cfg = SilentInputConfig {
+                    auth_token: generate_token_hex(4),
+                    token_created_at: unix_timestamp_secs(),
+                    ..SilentInputConfig::default()
+                };
+                self.config = default_cfg;
+                self.whitelist_input = format_ip_list(&self.config.whitelist);
+                self.blacklist_input = format_ip_list(&self.config.blacklist);
+                let _ = save_config_at(&self.paths, &self.config);
+                self.config_generation += 1;
+                self.pending_acl_save = false;
+
+                self.service_action_count += 1;
+                self.service_gen += 1;
+                let paths = self.paths.clone();
+                let is_zh = self.is_zh;
+                let restart_task = Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || service_restart_at(&paths)).await
+                    },
+                    move |res| match res {
+                        Ok((ok, msg)) => Message::ServiceActionFinished(ok, msg),
+                        Err(_) => Message::ServiceActionFinished(
+                            false,
+                            t(is_zh, "重启服务调用失败", "Failed to restart service").to_string(),
+                        ),
+                    },
+                );
+                let toast = self.show_toast(t(
+                    self.is_zh,
+                    "已恢复出厂默认设置，后台服务已重启",
+                    "Restored factory defaults and restarted daemon",
+                ));
+                Task::batch([toast, restart_task])
+            }
             Message::CloseModal => {
                 if self.uninstall_in_flight {
                     return Task::none();
@@ -796,6 +847,30 @@ impl ControlCenterState {
         let exp_desc = get_token_status_text(&self.config, zh);
         let selected_expire = find_option(&exp_opts, &self.config.token_expire_mode);
 
+        let usb_sub = if self.usb_devices.is_empty() {
+            t(
+                zh,
+                "通过 USB 数据线直连输入（当前未检测到 USB 设备）",
+                "Auto-trust USB adb reverse (No USB device connected)",
+            )
+            .to_string()
+        } else if zh {
+            format!(
+                "通过 USB 数据线直连输入 · 已连接: {} (免配对直连，延迟最低)",
+                self.usb_devices.join(", ")
+            )
+        } else {
+            format!(
+                "Auto-trust USB adb reverse · Connected: {} (trusted direct, lowest latency)",
+                self.usb_devices.join(", ")
+            )
+        };
+        let usb_status_color = if self.usb_devices.is_empty() {
+            muted
+        } else {
+            success
+        };
+
         let security_card = section_card(
             t(zh, "安全与配对", "Security & Pairing"),
             is_dark,
@@ -841,13 +916,9 @@ impl ControlCenterState {
                 row![
                     column![
                         text(t(zh, "USB 有线免密直连", "USB Trusted Direct Connect")).size(15),
-                        text(t(
-                            zh,
-                            "通过 USB 数据线连接自动信任",
-                            "Auto-trust local USB adb reverse connections",
-                        ))
-                        .size(12)
-                        .color(muted),
+                        text(usb_sub)
+                            .size(12)
+                            .color(usb_status_color),
                     ]
                     .spacing(2)
                     .width(Length::Fill),
@@ -883,23 +954,23 @@ impl ControlCenterState {
         );
 
         // Group 3: Network & IPs
-        let usb_sub = if self.usb_devices.is_empty() {
-            t(zh, "未连接", "Disconnected").to_string()
-        } else if zh {
-            format!("已连接: {}", self.usb_devices.join(", "))
-        } else {
-            format!("Connected: {}", self.usb_devices.join(", "))
-        };
+        let mut net_col = column![].spacing(8);
 
-        let mut net_col = column![row![
-            column![
-                text(t(zh, "USB 有线状态", "USB Status")).size(15),
-                text(usb_sub).size(12).color(muted),
-            ]
-            .spacing(2)
-            .width(Length::Fill),
-        ]]
-        .spacing(10);
+        if self.config.access_control_mode == "localhost_only" {
+            net_col = net_col.push(
+                container(
+                    text(t(
+                        zh,
+                        "💡 当前访问控制为「仅限本机」最小权限模式（局域网不可连接，USB 可用）。若手机需通过 Wi-Fi 局域网输入，请在下方访问控制切换为「局域网白名单」。",
+                        "💡 Access control is 'Localhost Only' (LAN blocked, USB active). Switch to 'Whitelist' below if connecting via Wi-Fi.",
+                    ))
+                    .size(12)
+                    .color(muted),
+                )
+                .style(style::subtle_box_style)
+                .padding([8, 10]),
+            );
+        }
 
         if self.host_ips.is_empty() {
             net_col = net_col.push(
@@ -913,7 +984,7 @@ impl ControlCenterState {
                     row![
                         text(ip.clone()).font(self.mono_font).size(14),
                         space::horizontal(),
-                        button(text(t(zh, "复制 IP", "Copy")).size(12))
+                        button(text(t(zh, "复制 IP", "Copy IP")).size(12))
                             .style(style::secondary_button_style)
                             .padding([5, 10])
                             .on_press(Message::CopyIp(ip.clone())),
@@ -929,8 +1000,8 @@ impl ControlCenterState {
         let network_card = section_card(
             t(
                 zh,
-                "电脑 IP (局域网，点击右侧按钮复制)",
-                "PC IP Addresses (LAN)",
+                "电脑局域网 IP (手机 Wi-Fi 局域网输入)",
+                "PC LAN IP Addresses (Wi-Fi Input)",
             ),
             is_dark,
             net_col,
@@ -951,42 +1022,78 @@ impl ControlCenterState {
 
         match self.config.access_control_mode.as_str() {
             "whitelist" => {
-                acl_col = acl_col.push(
-                    column![
-                        text(t(
-                            zh,
-                            "IP 白名单 (逗号分隔，支持 * 通配符)",
-                            "IP Whitelist (comma-separated, * wildcard supported)",
-                        ))
+                let invalid_whitelist = find_invalid_ip_patterns(&parse_ip_list(&self.whitelist_input));
+                let mut wl_col = column![
+                    text(t(
+                        zh,
+                        "IP 白名单 (逗号分隔，支持 * 通配符如 192.168.* 或 CIDR 如 172.16.0.0/12)",
+                        "IP Whitelist (comma-separated, * wildcard or CIDR e.g. 172.16.0.0/12)",
+                    ))
+                    .size(12)
+                    .color(muted),
+                    text_input("127.0.0.1, 192.168.*, 172.16.0.0/12", &self.whitelist_input)
+                        .on_input(Message::WhitelistChanged)
+                        .style(style::input_style)
+                        .padding([8, 10])
+                        .size(13),
+                ]
+                .spacing(4);
+
+                if !invalid_whitelist.is_empty() {
+                    let err_items = invalid_whitelist
+                        .iter()
+                        .map(|(p, _)| format!("\"{p}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    wl_col = wl_col.push(
+                        text(if zh {
+                            format!("⚠️ 发现无法识别的网段格式: {err_items} (该规则将无法匹配任何设备，请检查修正)")
+                        } else {
+                            format!("⚠️ Unrecognized subnet format: {err_items} (will not match devices)")
+                        })
                         .size(12)
-                        .color(muted),
-                        text_input("127.0.0.1, 192.168.*", &self.whitelist_input)
-                            .on_input(Message::WhitelistChanged)
-                            .style(style::input_style)
-                            .padding([8, 10])
-                            .size(13),
-                    ]
-                    .spacing(4),
-                );
+                        .color(style::warning_color(is_dark)),
+                    );
+                }
+
+                acl_col = acl_col.push(wl_col);
             }
             "blacklist" => {
-                acl_col = acl_col.push(
-                    column![
-                        text(t(
-                            zh,
-                            "IP 黑名单 (逗号分隔)",
-                            "IP Blacklist (comma-separated)",
-                        ))
+                let invalid_blacklist = find_invalid_ip_patterns(&parse_ip_list(&self.blacklist_input));
+                let mut bl_col = column![
+                    text(t(
+                        zh,
+                        "IP 黑名单 (逗号分隔，命中后将拒绝连接)",
+                        "IP Blacklist (comma-separated, matches will be blocked)",
+                    ))
+                    .size(12)
+                    .color(muted),
+                    text_input("192.168.1.50", &self.blacklist_input)
+                        .on_input(Message::BlacklistChanged)
+                        .style(style::input_style)
+                        .padding([8, 10])
+                        .size(13),
+                ]
+                .spacing(4);
+
+                if !invalid_blacklist.is_empty() {
+                    let err_items = invalid_blacklist
+                        .iter()
+                        .map(|(p, _)| format!("\"{p}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    bl_col = bl_col.push(
+                        text(if zh {
+                            format!("⚠️ 发现无法识别的黑名单格式: {err_items} (该规则将无法生效)")
+                        } else {
+                            format!("⚠️ Unrecognized blacklist format: {err_items} (will not take effect)")
+                        })
                         .size(12)
-                        .color(muted),
-                        text_input("192.168.1.50", &self.blacklist_input)
-                            .on_input(Message::BlacklistChanged)
-                            .style(style::input_style)
-                            .padding([8, 10])
-                            .size(13),
-                    ]
-                    .spacing(4),
-                );
+                        .color(style::warning_color(is_dark)),
+                    );
+                }
+
+                acl_col = acl_col.push(bl_col);
             }
             _ => {}
         }
@@ -1048,6 +1155,29 @@ impl ControlCenterState {
                 .align_y(Alignment::Center),
                 row![
                     column![
+                        text(t(zh, "恢复出厂设置", "Reset to Factory Defaults")).size(15),
+                        text(t(
+                            zh,
+                            "重置访问控制（仅限本机）、白名单网段与密钥有效期（1小时），并重启服务",
+                            "Reset mode (localhost-only), whitelist, 1h key expiration, and restart",
+                        ))
+                        .size(12)
+                        .color(muted),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    button(text(t(zh, "恢复默认", "Reset Defaults")).size(13))
+                        .style(style::secondary_button_style)
+                        .padding([6, 14])
+                        .on_press_maybe(if self.service_action_count == 0 {
+                            Some(Message::OpenResetConfig)
+                        } else {
+                            None
+                        }),
+                ]
+                .align_y(Alignment::Center),
+                row![
+                    column![
                         text(t(zh, "卸载 SilentInput", "Uninstall SilentInput")).size(15),
                         text(t(
                             zh,
@@ -1073,6 +1203,10 @@ impl ControlCenterState {
             text(self.header_title())
             .size(20),
             space::horizontal(),
+            button(text(t(zh, "使用指引", "Help Guide")).size(12))
+                .style(style::secondary_button_style)
+                .padding([4, 10])
+                .on_press(Message::OpenHelp),
             container(
                 text(if self.running {
                     t(zh, "服务运行中", "Running")
@@ -1089,6 +1223,7 @@ impl ControlCenterState {
             .style(style::subtle_box_style)
             .padding([4, 10]),
         ]
+        .spacing(8)
         .align_y(Alignment::Center);
 
         let content_list = scrollable(
@@ -1126,6 +1261,115 @@ impl ControlCenterState {
 
         if let Some(modal) = &self.modal {
             let dialog: Element<'_, Message> = match modal {
+                ModalView::Help => container(
+                    column![
+                        row![
+                            text(t(zh, "SilentInput 电脑伴侣 · 使用指引", "SilentInput · User Guide"))
+                                .size(17),
+                            space::horizontal(),
+                            button(text(t(zh, "关闭", "Close")).size(12))
+                                .style(style::primary_button_style)
+                                .padding([5, 12])
+                                .on_press(Message::CloseModal),
+                        ]
+                        .align_y(Alignment::Center),
+                        container(
+                            scrollable(
+                                column![
+                                    text(t(
+                                        zh,
+                                        "🔌 1. USB 有线直连（推荐，延迟极低且免密）",
+                                        "🔌 1. USB Wired Connection (Recommended, Zero Latency)",
+                                    ))
+                                    .size(14),
+                                    text(t(
+                                        zh,
+                                        "• 手机开启「开发者选项」并开启「USB 调试」。\n• 使用数据线连接手机与电脑，保持电脑后台服务运行。\n• 手机 App 连接模式选择「USB 有线」，无需输入电脑 IP 和密钥，即插即用自动信任直连！",
+                                        "• Enable Developer Options and USB Debugging on phone.\n• Connect phone to PC via USB cable.\n• Switch to 'USB Wired' on phone, auto connects without IP or pairing key!",
+                                    ))
+                                    .size(12)
+                                    .color(muted),
+
+                                    space::vertical().height(8),
+                                    text(t(zh, "📶 2. Wi-Fi 局域网连接", "📶 2. Wi-Fi LAN Connection"))
+                                        .size(14),
+                                    text(t(
+                                        zh,
+                                        "• 确保手机与电脑连接同一 Wi-Fi 网络（同一局域网）。\n• 在下方访问控制中将模式切换为「局域网白名单」（开箱支持 192.168.* 与 10.* 等网段）。\n• 在手机 App 中输入本页显示的电脑局域网 IP 与安全配对密钥即可连接。",
+                                        "• Ensure phone and PC are on the same Wi-Fi network.\n• Set Access Control mode to 'Whitelist' below.\n• Enter the PC LAN IP and Pairing Key in mobile app to connect.",
+                                    ))
+                                    .size(12)
+                                    .color(muted),
+
+                                    space::vertical().height(8),
+                                    text(t(zh, "🔵 3. 蓝牙无线连接", "🔵 3. Bluetooth Connection"))
+                                        .size(14),
+                                    text(t(
+                                        zh,
+                                        "• 在系统蓝牙设置中，搜索此电脑名称并完成配对。\n• 手机端切换至「蓝牙模式」，点击此电脑即可连接作为外接键盘输入文字与按键。",
+                                        "• Pair phone with this PC in system Bluetooth settings.\n• Switch to 'Bluetooth' in mobile app to type directly.",
+                                    ))
+                                    .size(12)
+                                    .color(muted),
+
+                                    space::vertical().height(8),
+                                    text(t(zh, "🛡️ 4. 最小权限安全防护", "🛡️ 4. Security & Least Privilege"))
+                                        .size(14),
+                                    text(t(
+                                        zh,
+                                        "• 出厂默认采用「仅限本机」最小权限原则，不暴露任何局域网端口，USB 走本机通道依然畅通。\n• 配对密钥默认 1 小时自动轮换过期，强化无线链路新鲜度。\n• 白名单网段支持通配符（如 192.168.*）与 CIDR 掩码（如 172.16.0.0/12）。输入非法网段将实时提示。",
+                                        "• Defaults to 'Localhost Only' for zero-trust protection while USB remains active.\n• Pairing key expires in 1 hour by default.\n• Whitelist supports wildcards (192.168.*) and CIDR (172.16.0.0/12).",
+                                    ))
+                                    .size(12)
+                                    .color(muted),
+                                ]
+                                .spacing(6),
+                            )
+                            .height(Length::Fill),
+                        )
+                        .style(style::subtle_box_style)
+                        .padding(12)
+                        .width(Length::Fill)
+                        .height(Length::Fixed(320.0)),
+                    ]
+                    .spacing(12),
+                )
+                .style(style::card_style)
+                .padding(18)
+                .width(Length::Fixed(480.0))
+                .into(),
+
+                ModalView::ResetConfigConfirm => container(
+                    column![
+                        text(t(zh, "确认恢复出厂默认设置？", "Reset to Factory Defaults?"))
+                            .size(17),
+                        text(t(
+                            zh,
+                            "此操作将重置以下安全配置：\n• 访问控制模式：恢复为「仅限本机」（遵循最小权限原则）\n• 密钥有效期：恢复为「1小时」（最短有效，定时轮换）\n• 重新生成一套全新的安全配对密钥\n• 白名单网段：恢复为标准默认网段（127.0.0.1, 10.*, 192.168.*, 100.*, 172.16.0.0/12）\n• 自动重启后台输入服务使设置生效",
+                            "This will reset the following security settings:\n• Access mode: Localhost Only (least privilege)\n• Key expiration: 1 Hour (auto rotate)\n• Generate a new pairing key\n• Subnets: Standard whitelist\n• Automatically restart background daemon",
+                        ))
+                        .size(13)
+                        .color(muted),
+                        row![
+                            space::horizontal(),
+                            button(text(t(zh, "取消", "Cancel")).size(13))
+                                .style(style::secondary_button_style)
+                                .padding([7, 14])
+                                .on_press(Message::CloseModal),
+                            button(text(t(zh, "确认恢复", "Confirm Reset")).size(13))
+                                .style(style::danger_button_style)
+                                .padding([7, 14])
+                                .on_press(Message::ConfirmResetConfig),
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(14),
+                )
+                .style(style::card_style)
+                .padding(18)
+                .width(Length::Fixed(440.0))
+                .into(),
+
                 ModalView::Logs(log_text) => container(
                     column![
                         row![
@@ -1609,6 +1853,52 @@ mod tests {
         // Next ProbeFailed with empty queue restores idle probe_in_flight = false
         let _ = state.update(Message::ProbeFailed);
         assert!(!state.probe_in_flight);
+
+        let _ = fs::remove_dir_all(&paths.config_dir);
+    }
+
+    #[test]
+    fn help_modal_and_reset_config_confirm() {
+        let paths = tmp_paths("help_and_reset");
+        // Start with customized non-default config
+        let custom_cfg = SilentInputConfig {
+            access_control_mode: "whitelist".to_string(),
+            token_expire_mode: "never".to_string(),
+            whitelist: vec!["100.*".to_string()],
+            ..SilentInputConfig::default()
+        };
+        save_config_at(&paths, &custom_cfg).unwrap();
+
+        let (mut state, _) = ControlCenterState::new_with_paths(paths.clone());
+        assert_eq!(state.config.access_control_mode, "whitelist");
+        assert_eq!(state.config.token_expire_mode, "never");
+        assert_eq!(state.whitelist_input, "100.*");
+
+        // 1. Open and close Help modal
+        let _ = state.update(Message::OpenHelp);
+        assert!(matches!(state.modal, Some(ModalView::Help)));
+        let _ = state.update(Message::CloseModal);
+        assert!(state.modal.is_none());
+
+        // 2. Open Reset modal
+        let _ = state.update(Message::OpenResetConfig);
+        assert!(matches!(state.modal, Some(ModalView::ResetConfigConfirm)));
+
+        // 3. Confirm Reset modal
+        let _ = state.update(Message::ConfirmResetConfig);
+        assert!(state.modal.is_none());
+        assert_eq!(state.config.access_control_mode, "localhost_only");
+        assert_eq!(state.config.token_expire_mode, "1h");
+        assert_eq!(state.config.auth_token.len(), 8);
+        assert!(state.whitelist_input.contains("127.0.0.1"));
+        assert!(state.whitelist_input.contains("172.16.0.0/12"));
+        assert!(state.toast.is_some());
+
+        // Verify persisted to disk
+        let disk_cfg = load_config_at(&paths);
+        assert_eq!(disk_cfg.access_control_mode, "localhost_only");
+        assert_eq!(disk_cfg.token_expire_mode, "1h");
+        assert_eq!(disk_cfg.auth_token, state.config.auth_token);
 
         let _ = fs::remove_dir_all(&paths.config_dir);
     }

@@ -16,13 +16,18 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.AppStrings
+import com.silentinput.app.model.BaseInputTransport
 import com.silentinput.app.model.InputTransport
 import com.silentinput.app.model.ProtocolPayloads
 import com.silentinput.app.model.ServerMessage
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -33,7 +38,7 @@ import java.util.UUID
 class BluetoothCompanionClient(
     private val context: Context,
     initialLanguage: AppLanguage = AppLanguage.ZH
-) : InputTransport {
+) : BaseInputTransport(initialLanguage) {
 
     companion object {
         private const val TAG = "BtCompanionClient"
@@ -82,15 +87,7 @@ class BluetoothCompanionClient(
     private val _latencyMs = MutableStateFlow<Long?>(null)
     val latencyMs = _latencyMs.asStateFlow()
 
-    private val _supportsUnicodeDirectTyping = MutableStateFlow(true)
-    override val supportsUnicodeDirectTyping = _supportsUnicodeDirectTyping.asStateFlow()
-
-    @Volatile
-    var appLanguage: AppLanguage = initialLanguage
-
     private var lastStatusFormatter: ((AppStrings) -> String) = { it.btStatusDisconnected }
-
-    private fun currentStrings(): AppStrings = AppStrings.forLanguage(appLanguage)
 
     private fun setStatusMessage(formatter: (AppStrings) -> String) {
         lastStatusFormatter = formatter
@@ -101,12 +98,6 @@ class BluetoothCompanionClient(
         synchronized(stateLock) {
             appLanguage = language
             _statusMessage.value = lastStatusFormatter(currentStrings())
-        }
-    }
-
-    override fun refreshLanguageIfSystem() {
-        if (appLanguage == AppLanguage.SYSTEM) {
-            updateLanguage(AppLanguage.SYSTEM)
         }
     }
 
@@ -434,6 +425,14 @@ class BluetoothCompanionClient(
                     msg.unicodeDirectTyping?.let {
                         _supportsUnicodeDirectTyping.value = it
                     }
+                    msg.version?.let {
+                        _daemonVersion.value = it
+                    }
+                }
+            }
+            is ServerMessage.PasteResult -> {
+                if (msg.status == "busy") {
+                    _pasteQueueBusyEvent.tryEmit(msg.message)
                 }
             }
             ServerMessage.AuthRequired -> {
@@ -548,6 +547,7 @@ class BluetoothCompanionClient(
         _connectedDeviceAddress.value = null
         _latencyMs.value = null
         _supportsUnicodeDirectTyping.value = true
+        _daemonVersion.value = null
         if (resetStatus) {
             setStatusMessage { it.btStatusDisconnected }
         }

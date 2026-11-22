@@ -7,7 +7,14 @@ sealed class ServerMessage {
         val message: String,
         val unicodeDirectTyping: Boolean?
     ) : ServerMessage()
-    data class Status(val unicodeDirectTyping: Boolean?) : ServerMessage()
+    data class Status(
+        val unicodeDirectTyping: Boolean?,
+        val version: String? = null
+    ) : ServerMessage()
+    data class PasteResult(
+        val status: String,
+        val message: String
+    ) : ServerMessage()
     object AuthRequired : ServerMessage()
 }
 
@@ -110,7 +117,13 @@ object ProtocolPayloads {
             }
             "status" -> {
                 val unicode = obj["unicode_direct_typing"] as? Boolean
-                ServerMessage.Status(unicode)
+                val version = obj["version"] as? String
+                ServerMessage.Status(unicode, version)
+            }
+            "paste_result" -> {
+                val status = (obj["status"] as? String).orEmpty()
+                val message = (obj["message"] as? String).orEmpty()
+                ServerMessage.PasteResult(status, message)
             }
             "auth_required" -> ServerMessage.AuthRequired
             else -> null

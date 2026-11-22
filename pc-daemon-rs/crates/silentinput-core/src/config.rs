@@ -25,7 +25,7 @@ pub fn default_port() -> u16 {
 }
 
 pub fn default_token_expire_mode() -> String {
-    "never".to_string()
+    "1h".to_string()
 }
 
 pub fn default_true() -> bool {
@@ -33,7 +33,7 @@ pub fn default_true() -> bool {
 }
 
 pub fn default_access_control_mode() -> String {
-    "whitelist".to_string()
+    "localhost_only".to_string()
 }
 
 pub fn default_whitelist() -> Vec<String> {
@@ -42,7 +42,7 @@ pub fn default_whitelist() -> Vec<String> {
         "10.*".to_string(),
         "192.168.*".to_string(),
         "100.*".to_string(),
-        "172.16.*".to_string(),
+        "172.16.0.0/12".to_string(),
     ]
 }
 

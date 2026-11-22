@@ -18,10 +18,14 @@ import com.silentinput.app.model.MouseButton
 import com.silentinput.app.model.SendTargetMode
 import com.silentinput.app.network.NetworkClient
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
@@ -32,6 +36,7 @@ import org.json.JSONArray
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
+        const val MAX_SAFE_PASTE_CHARS = 300_000
         private const val BACKGROUND_DISCONNECT_DELAY_MS = 30_000L
         private const val PREFS_NAME = "silentinput_prefs"
         private const val KEY_CONNECTION_MODE = "connection_mode"
@@ -41,6 +46,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_TLS_ENCRYPTION = "tls_encryption"
         private const val KEY_LAST_BT_ADDRESS = "last_bt_device_address"
         private const val KEY_BT_MANUAL_DISCONNECTED = "bt_manual_disconnected"
+        private const val KEY_NET_MANUAL_DISCONNECTED = "net_manual_disconnected"
         private const val KEY_FAVORITE_BT_ADDRESSES = "favorite_bt_addresses"
         private const val KEY_HAPTIC_ENABLED = "haptic_enabled"
         private const val KEY_DARK_MODE = "dark_mode"
@@ -102,6 +108,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isBtManualDisconnected = MutableStateFlow(
         prefs.getBoolean(KEY_BT_MANUAL_DISCONNECTED, false)
     )
+
+    private val _isNetManualDisconnected = MutableStateFlow(
+        prefs.getBoolean(KEY_NET_MANUAL_DISCONNECTED, false)
+    )
+    val isNetManualDisconnected: StateFlow<Boolean> = _isNetManualDisconnected.asStateFlow()
+
+    private val _userToastEvent = MutableSharedFlow<((AppStrings) -> String)>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val userToastEvent: SharedFlow<((AppStrings) -> String)> = _userToastEvent.asSharedFlow()
 
     private val _favoriteBtAddresses = MutableStateFlow(
         prefs.getStringSet(KEY_FAVORITE_BT_ADDRESSES, emptySet())?.toSet() ?: emptySet()
@@ -207,6 +224,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, true)
 
+    val daemonVersion: StateFlow<String?> = combine(
+        connectionMode,
+        isBtConnected,
+        btClient.daemonVersion,
+        isNetReady,
+        networkClient.daemonVersion
+    ) { mode, btConn, btVer, netReady, netVer ->
+        when {
+            mode == ConnectionMode.BLUETOOTH.wireValue && btConn -> btVer
+            mode != ConnectionMode.BLUETOOTH.wireValue && netReady -> netVer
+            else -> null
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
     init {
         networkClient.serverIp = _activeServerIp.value
         networkClient.serverPort = NetworkClient.DEFAULT_PORT
@@ -214,6 +245,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         networkClient.isTlsEnabled = _isTlsEnabled.value
         btClient.onAdapterStateChanged = {
             refreshBondedDevices()
+        }
+        viewModelScope.launch {
+            networkClient.pasteQueueBusyEvent.collect {
+                _userToastEvent.tryEmit { strings -> strings.txtQueueBusyToast }
+            }
+        }
+        viewModelScope.launch {
+            btClient.pasteQueueBusyEvent.collect {
+                _userToastEvent.tryEmit { strings -> strings.txtQueueBusyToast }
+            }
         }
         viewModelScope.launch {
             isAnyConnected.collectLatest { connected ->
@@ -274,20 +315,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         refreshBluetoothState(btPermissionGranted)
         networkClient.exitBackground()
         btClient.exitBackground()
-        if (_connectionMode.value == "bluetooth") {
-            val lastAddress = _lastBtDeviceAddress.value
-            if (ConnectionStatusFormatter.shouldAutoReconnectBluetooth(
-                    mode = _connectionMode.value,
-                    isBtConnected = btClient.isConnected.value,
-                    isBtConnecting = btClient.isConnecting.value,
-                    manualDisconnected = _isBtManualDisconnected.value,
-                    isBluetoothEnabled = btClient.refreshBluetoothEnabled(),
-                    lastBtDeviceAddress = lastAddress
-                )
-            ) {
-                val dev = _bondedBtDevices.value.firstOrNull { it.address == lastAddress }
-                if (dev != null) {
-                    btClient.connect(dev)
+        when (_connectionMode.value) {
+            ConnectionMode.BLUETOOTH.wireValue -> {
+                val lastAddress = _lastBtDeviceAddress.value
+                if (ConnectionStatusFormatter.shouldAutoReconnectBluetooth(
+                        mode = _connectionMode.value,
+                        isBtConnected = btClient.isConnected.value,
+                        isBtConnecting = btClient.isConnecting.value,
+                        manualDisconnected = _isBtManualDisconnected.value,
+                        isBluetoothEnabled = btClient.refreshBluetoothEnabled(),
+                        lastBtDeviceAddress = lastAddress
+                    )
+                ) {
+                    val dev = _bondedBtDevices.value.firstOrNull { it.address == lastAddress }
+                    if (dev != null) {
+                        btClient.connect(dev)
+                    }
+                }
+            }
+            ConnectionMode.LAN.wireValue -> {
+                if (ConnectionStatusFormatter.shouldAutoReconnectNetwork(
+                        mode = _connectionMode.value,
+                        targetMode = ConnectionMode.LAN.wireValue,
+                        isNetConnected = networkClient.isConnected.value,
+                        isNetConnecting = networkClient.isConnecting.value,
+                        manualDisconnected = _isNetManualDisconnected.value,
+                        serverIp = _lanIp.value
+                    )
+                ) {
+                    applyNetworkConnection(
+                        mode = ConnectionMode.LAN,
+                        serverIp = _lanIp.value,
+                        authToken = _savedAuthToken.value,
+                        tlsEnabled = _isTlsEnabled.value
+                    )
+                }
+            }
+            ConnectionMode.USB.wireValue -> {
+                if (ConnectionStatusFormatter.shouldAutoReconnectNetwork(
+                        mode = _connectionMode.value,
+                        targetMode = ConnectionMode.USB.wireValue,
+                        isNetConnected = networkClient.isConnected.value,
+                        isNetConnecting = networkClient.isConnecting.value,
+                        manualDisconnected = _isNetManualDisconnected.value,
+                        serverIp = "127.0.0.1"
+                    )
+                ) {
+                    applyNetworkConnection(
+                        mode = ConnectionMode.USB,
+                        serverIp = "127.0.0.1",
+                        authToken = "",
+                        tlsEnabled = _isTlsEnabled.value
+                    )
                 }
             }
         }
@@ -314,20 +393,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         setLanInputError(null)
     }
 
-    fun connectUsb() {
+    private fun applyNetworkConnection(
+        mode: ConnectionMode,
+        serverIp: String,
+        authToken: String,
+        tlsEnabled: Boolean
+    ) {
         setLanInputError(null)
         btClient.disconnect()
-        networkClient.serverIp = "127.0.0.1"
+        _isNetManualDisconnected.value = false
+        networkClient.serverIp = serverIp
         networkClient.serverPort = NetworkClient.DEFAULT_PORT
-        networkClient.authToken = ""
-        networkClient.isTlsEnabled = _isTlsEnabled.value
-        prefs.edit()
-            .putString(KEY_CONNECTION_MODE, ConnectionMode.USB.wireValue)
-            .putString(KEY_SERVER_IP, "127.0.0.1")
-            .apply()
-        _connectionMode.value = ConnectionMode.USB.wireValue
-        _activeServerIp.value = "127.0.0.1"
+        networkClient.authToken = authToken
+        networkClient.isTlsEnabled = tlsEnabled
+
+        val editor = prefs.edit()
+            .putBoolean(KEY_NET_MANUAL_DISCONNECTED, false)
+            .putString(KEY_CONNECTION_MODE, mode.wireValue)
+            .putString(KEY_SERVER_IP, serverIp)
+
+        _connectionMode.value = mode.wireValue
+        _activeServerIp.value = serverIp
+
+        if (mode == ConnectionMode.LAN) {
+            editor.putString(KEY_LAN_IP, serverIp)
+                .putString(KEY_AUTH_TOKEN, authToken)
+                .putBoolean(KEY_TLS_ENCRYPTION, tlsEnabled)
+            _lanIp.value = serverIp
+            _savedAuthToken.value = authToken
+            _isTlsEnabled.value = tlsEnabled
+        }
+        editor.apply()
         networkClient.connect()
+    }
+
+    fun connectUsb() {
+        applyNetworkConnection(
+            mode = ConnectionMode.USB,
+            serverIp = "127.0.0.1",
+            authToken = "",
+            tlsEnabled = _isTlsEnabled.value
+        )
     }
 
     fun connectLan(ip: String, token: String, tlsEnabled: Boolean) {
@@ -342,34 +448,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             setLanInputError { it.netErrInvalidIp }
             return
         }
-        if (!NetworkClient.isLoopbackHost(endpoint.host) && cleanToken.isBlank()) {
+        if (NetworkClient.isLoopbackHost(endpoint.host)) {
+            setLanInputError { it.lanErrLoopbackNotAllowed }
+            return
+        }
+        if (cleanToken.isBlank()) {
             setLanInputError { it.netErrEmptyToken }
             return
         }
 
-        setLanInputError(null)
-        btClient.disconnect()
-        networkClient.serverIp = cleanIp
-        networkClient.serverPort = NetworkClient.DEFAULT_PORT
-        networkClient.authToken = cleanToken
-        networkClient.isTlsEnabled = tlsEnabled
-        prefs.edit()
-            .putString(KEY_CONNECTION_MODE, ConnectionMode.LAN.wireValue)
-            .putString(KEY_SERVER_IP, cleanIp)
-            .putString(KEY_LAN_IP, cleanIp)
-            .putString(KEY_AUTH_TOKEN, cleanToken)
-            .putBoolean(KEY_TLS_ENCRYPTION, tlsEnabled)
-            .apply()
-        _connectionMode.value = ConnectionMode.LAN.wireValue
-        _activeServerIp.value = cleanIp
-        _lanIp.value = cleanIp
-        _savedAuthToken.value = cleanToken
-        _isTlsEnabled.value = tlsEnabled
-        networkClient.connect()
+        applyNetworkConnection(
+            mode = ConnectionMode.LAN,
+            serverIp = cleanIp,
+            authToken = cleanToken,
+            tlsEnabled = tlsEnabled
+        )
     }
 
     fun disconnectNetwork() {
         setLanInputError(null)
+        _isNetManualDisconnected.value = true
+        prefs.edit().putBoolean(KEY_NET_MANUAL_DISCONNECTED, true).apply()
         networkClient.disconnect()
     }
 
@@ -414,7 +513,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun activeTransport(): InputTransport? {
+        val mode = _connectionMode.value
         return when {
+            mode == ConnectionMode.BLUETOOTH.wireValue && btClient.isTransportReady.value -> btClient
+            mode != ConnectionMode.BLUETOOTH.wireValue && networkClient.isTransportReady.value -> networkClient
             btClient.isTransportReady.value -> btClient
             networkClient.isTransportReady.value -> networkClient
             else -> null
@@ -459,7 +561,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendTextPaste(text: String) {
-        if (text.isBlank()) return
+        if (text.isBlank() || text.length > MAX_SAFE_PASTE_CHARS) return
         val enter = _enterOnSend.value
         val mode = _sendTargetMode.value
         val sent = activeTransport()?.sendPaste(text, enter = enter, mode = mode) == true

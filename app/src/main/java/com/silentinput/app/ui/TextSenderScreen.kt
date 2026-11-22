@@ -1,6 +1,7 @@
 package com.silentinput.app.ui
 
 import android.graphics.Rect
+import android.os.SystemClock
 import android.view.HapticFeedbackConstants
 import android.view.ViewTreeObserver
 import androidx.core.view.ViewCompat
@@ -100,8 +101,12 @@ fun TextSenderScreen(
         onSendKey(keyName)
     }
 
+    var lastSendTimestamp by remember { mutableLongStateOf(0L) }
     fun sendText(text: String) {
-        if (text.isBlank()) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastSendTimestamp < 200L) return
+        lastSendTimestamp = now
+        if (text.isBlank() || text.length > 300_000) return
         if (isHapticEnabled) {
             view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
         }
@@ -156,7 +161,8 @@ fun TextSenderScreen(
                     isDirectMode && !supportsUnicodeDirectTyping && nonAsciiCount > 0
                 val hasDirectLargeUnicodeWarning =
                     isDirectMode && supportsUnicodeDirectTyping && nonAsciiCount > 60
-                val sendEnabled = inputText.isNotBlank() && isConnected && !hasDirectHeadlessError
+                val isTextTooLong = inputText.length > 300_000
+                val sendEnabled = inputText.isNotBlank() && isConnected && !hasDirectHeadlessError && !isTextTooLong
 
                 OutlinedTextField(
                     value = inputText,
@@ -166,10 +172,11 @@ fun TextSenderScreen(
                         .heightIn(min = 90.dp, max = 150.dp),
                     shape = RoundedCornerShape(12.dp),
                     placeholder = { Text(strings.txtPlaceholder) },
-                    isError = hasDirectHeadlessError,
-                    supportingText = if (isDirectMode) {
+                    isError = hasDirectHeadlessError || isTextTooLong,
+                    supportingText = if (isTextTooLong || isDirectMode) {
                         {
                             val msg = when {
+                                isTextTooLong -> strings.txtTextTooLongError(300_000)
                                 hasDirectHeadlessError -> strings.txtDirectHeadlessUnsupportedError
                                 !supportsUnicodeDirectTyping -> strings.txtDirectHeadlessHint
                                 hasDirectLargeUnicodeWarning -> strings.txtDirectLargeUnicodeWarning(nonAsciiCount)
@@ -178,7 +185,7 @@ fun TextSenderScreen(
                             Text(
                                 text = msg,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = if (hasDirectHeadlessError) {
+                                color = if (hasDirectHeadlessError || isTextTooLong) {
                                     MaterialTheme.colorScheme.error
                                 } else {
                                     MaterialTheme.colorScheme.onSurfaceVariant

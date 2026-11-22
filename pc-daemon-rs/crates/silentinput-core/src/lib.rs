@@ -18,7 +18,10 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use crate::acl::{get_bind_addresses, is_ip_allowed, match_ip_pattern};
+    use crate::acl::{
+        find_invalid_ip_patterns, get_bind_addresses, is_ip_allowed, match_ip_pattern,
+        validate_ip_pattern,
+    };
     use crate::certs::ensure_certificates_at;
     use crate::config::{
         constant_time_token_eq, generate_token_hex, get_token_status_text_at, load_config_at,
@@ -47,7 +50,8 @@ mod tests {
         assert_eq!(cfg.auth_token.len(), 8);
         assert!(cfg.enable_tls);
         assert!(cfg.allow_usb_unauthenticated);
-        assert_eq!(cfg.access_control_mode, "whitelist");
+        assert_eq!(cfg.access_control_mode, "localhost_only");
+        assert_eq!(cfg.token_expire_mode, "1h");
         assert_eq!(cfg.gui_language, "system");
         assert_eq!(cfg.gui_theme, "system");
 
@@ -149,6 +153,23 @@ mod tests {
         assert_eq!(get_bind_addresses(&usb_only), vec!["127.0.0.1"]);
         assert!(!is_ip_allowed("192.168.1.2", &usb_only));
         assert!(is_ip_allowed("127.0.0.1", &usb_only));
+
+        // Default config uses least privilege (localhost_only)
+        let default_cfg = SilentInputConfig::default();
+        assert_eq!(default_cfg.access_control_mode, "localhost_only");
+        assert!(!is_ip_allowed("172.16.0.1", &default_cfg));
+        assert!(is_ip_allowed("127.0.0.1", &default_cfg));
+
+        // Whitelist mode CIDR coverage for 172.16.0.0/12 (172.16.0.0 - 172.31.255.255)
+        let whitelist_cfg = SilentInputConfig {
+            access_control_mode: "whitelist".to_string(),
+            ..SilentInputConfig::default()
+        };
+        assert!(is_ip_allowed("172.16.0.1", &whitelist_cfg));
+        assert!(is_ip_allowed("172.20.1.5", &whitelist_cfg));
+        assert!(is_ip_allowed("172.31.255.254", &whitelist_cfg));
+        assert!(!is_ip_allowed("172.15.255.255", &whitelist_cfg));
+        assert!(!is_ip_allowed("172.32.0.1", &whitelist_cfg));
     }
 
     #[test]
@@ -161,7 +182,13 @@ mod tests {
         assert!(!constant_time_token_eq("ab12cd35", "ab12cd34"));
         assert!(!constant_time_token_eq("short", "longertoken"));
 
-        let never_cfg = SilentInputConfig::default();
+        let def_cfg = SilentInputConfig::default();
+        assert_eq!(def_cfg.token_expire_mode, "1h");
+
+        let never_cfg = SilentInputConfig {
+            token_expire_mode: "never".to_string(),
+            ..SilentInputConfig::default()
+        };
         assert_eq!(get_token_status_text_at(&never_cfg, false, 1000.0), "Never expires");
         assert_eq!(get_token_status_text_at(&never_cfg, true, 1000.0), "永不过期");
 
@@ -398,6 +425,44 @@ mod tests {
             resolve_adb_endpoint_from(Some("0"), None),
             AdbEndpoint::UnsupportedSocket
         );
+    }
+
+    #[test]
+    fn validate_ip_pattern_rules() {
+        // Valid forms
+        assert!(validate_ip_pattern("*").is_ok());
+        assert!(validate_ip_pattern("all").is_ok());
+        assert!(validate_ip_pattern("0.0.0.0/0").is_ok());
+        assert!(validate_ip_pattern("127.0.0.1").is_ok());
+        assert!(validate_ip_pattern("::1").is_ok());
+        assert!(validate_ip_pattern("192.168.1.10").is_ok());
+        assert!(validate_ip_pattern("172.16.0.0/12").is_ok());
+        assert!(validate_ip_pattern("10.0.0.0/8").is_ok());
+        assert!(validate_ip_pattern("192.168.*").is_ok());
+        assert!(validate_ip_pattern("10.*").is_ok());
+        assert!(validate_ip_pattern("10.17.*").is_ok());
+        assert!(validate_ip_pattern("192.168.1.*").is_ok());
+
+        // Invalid forms
+        assert!(validate_ip_pattern("").is_err());
+        assert!(validate_ip_pattern("   ").is_err());
+        assert!(validate_ip_pattern("abc").is_err());
+        assert!(validate_ip_pattern("192.168.1.1/99").is_err());
+        assert!(validate_ip_pattern("999.999.999.999").is_err());
+        assert!(validate_ip_pattern("192.*.1").is_err());
+        assert!(validate_ip_pattern("*.168.1").is_err());
+
+        // find_invalid_ip_patterns
+        let list = vec![
+            "127.0.0.1".to_string(),
+            "abc".to_string(),
+            "192.168.*".to_string(),
+            "172.16.0.0/99".to_string(),
+        ];
+        let invalid = find_invalid_ip_patterns(&list);
+        assert_eq!(invalid.len(), 2);
+        assert_eq!(invalid[0].0, "abc");
+        assert_eq!(invalid[1].0, "172.16.0.0/99");
     }
 
     fn tempfile_dir(tag: &str) -> std::path::PathBuf {

@@ -51,6 +51,7 @@ fun MoreSettingsScreen(
     val isNaturalScrolling by viewModel.isNaturalScrolling.collectAsState()
     val imeSwitchKey by viewModel.imeSwitchKey.collectAsState()
     val snippets by viewModel.snippets.collectAsState()
+    val daemonVersion by viewModel.daemonVersion.collectAsState()
     val strings = LocalAppStrings.current
     val scrollState = rememberScrollState()
     val coroutineScope = rememberCoroutineScope()
@@ -194,7 +195,10 @@ fun MoreSettingsScreen(
     }
 
     if (showHelpDialog) {
-        HelpAndAboutDialog(onDismiss = { showHelpDialog = false })
+        HelpAndAboutDialog(
+            daemonVersion = daemonVersion,
+            onDismiss = { showHelpDialog = false }
+        )
     }
 }
 

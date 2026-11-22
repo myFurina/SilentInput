@@ -546,4 +546,82 @@ class ConnectionStatusAndNetworkClientTest {
         assertEquals(StatusTone.HIGH_LATENCY, atThreshold.tone)
         assertEquals("局域网: 已连接 (800ms 卡顿/高延迟) 🔒", atThreshold.text)
     }
+
+    @Test
+    fun `shouldAutoReconnectNetwork rules and manual disconnection flag`() {
+        // LAN auto reconnect when expected and configured
+        assertTrue(
+            ConnectionStatusFormatter.shouldAutoReconnectNetwork(
+                mode = "lan",
+                targetMode = "lan",
+                isNetConnected = false,
+                isNetConnecting = false,
+                manualDisconnected = false,
+                serverIp = "192.168.1.10"
+            )
+        )
+
+        // Manual disconnection stops reconnect
+        assertFalse(
+            ConnectionStatusFormatter.shouldAutoReconnectNetwork(
+                mode = "lan",
+                targetMode = "lan",
+                isNetConnected = false,
+                isNetConnecting = false,
+                manualDisconnected = true,
+                serverIp = "192.168.1.10"
+            )
+        )
+
+        // Already connected stops redundant connect invocation
+        assertFalse(
+            ConnectionStatusFormatter.shouldAutoReconnectNetwork(
+                mode = "lan",
+                targetMode = "lan",
+                isNetConnected = true,
+                isNetConnecting = false,
+                manualDisconnected = false,
+                serverIp = "192.168.1.10"
+            )
+        )
+
+        // Mode mismatch does not trigger reconnect
+        assertFalse(
+            ConnectionStatusFormatter.shouldAutoReconnectNetwork(
+                mode = "bluetooth",
+                targetMode = "lan",
+                isNetConnected = false,
+                isNetConnecting = false,
+                manualDisconnected = false,
+                serverIp = "192.168.1.10"
+            )
+        )
+
+        // Blank IP does not trigger reconnect
+        assertFalse(
+            ConnectionStatusFormatter.shouldAutoReconnectNetwork(
+                mode = "lan",
+                targetMode = "lan",
+                isNetConnected = false,
+                isNetConnecting = false,
+                manualDisconnected = false,
+                serverIp = ""
+            )
+        )
+    }
+
+    @Test
+    fun `app strings include loopback error daemon version and queue busy strings`() {
+        assertTrue(AppStrings.ZH.lanErrLoopbackNotAllowed.contains("127.0.0.1"))
+        assertTrue(AppStrings.EN.lanErrLoopbackNotAllowed.contains("127.0.0.1"))
+
+        assertEquals("电脑端版本: v1.0.20", AppStrings.ZH.helpDaemonVersion("1.0.20"))
+        assertEquals("PC Daemon: v1.0.20", AppStrings.EN.helpDaemonVersion("1.0.20"))
+
+        assertTrue(AppStrings.ZH.txtTextTooLongError(300_000).contains("300000"))
+        assertTrue(AppStrings.EN.txtTextTooLongError(300_000).contains("300000"))
+
+        assertTrue(AppStrings.ZH.txtQueueBusyToast.contains("队列已满"))
+        assertTrue(AppStrings.EN.txtQueueBusyToast.contains("busy"))
+    }
 }

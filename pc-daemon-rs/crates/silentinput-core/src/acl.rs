@@ -100,3 +100,70 @@ pub fn get_bind_addresses(config: &SilentInputConfig) -> Vec<String> {
         vec!["0.0.0.0".to_string()]
     }
 }
+
+/// Validate a single IP rule pattern entered by the user.
+/// Returns Ok(()) if the pattern is recognized, or Err(reason) if malformed.
+pub fn validate_ip_pattern(pattern: &str) -> Result<(), &'static str> {
+    let p = pattern.trim();
+    if p.is_empty() {
+        return Err("规则不能为空");
+    }
+    if matches!(p, "*" | "all" | "0.0.0.0/0") {
+        return Ok(());
+    }
+    // Single valid IPv4 or IPv6
+    if p.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    // Standard CIDR notation (e.g. 172.16.0.0/12)
+    if p.contains('/') {
+        return if p.parse::<IpNet>().is_ok() {
+            Ok(())
+        } else {
+            Err("无效的 CIDR 子网格式 (如 172.16.0.0/12)")
+        };
+    }
+    // Wildcard pattern (e.g. 192.168.*, 10.*, 10.17.*)
+    let parts: Vec<&str> = p.split('.').collect();
+    if parts.len() >= 2 && parts.len() <= 4 {
+        let mut had_wildcard = false;
+        let mut valid = true;
+        for (i, &part) in parts.iter().enumerate() {
+            if part == "*" {
+                if i == 0 {
+                    // "*.*" or similar is discouraged; use "*" instead
+                    valid = false;
+                    break;
+                }
+                had_wildcard = true;
+            } else if had_wildcard {
+                // Cannot have numbers after a wildcard (e.g. 192.*.1 is invalid)
+                valid = false;
+                break;
+            } else if part.parse::<u8>().is_err() {
+                valid = false;
+                break;
+            }
+        }
+        if valid && had_wildcard {
+            return Ok(());
+        }
+    }
+
+    Err("无效的 IP/网段格式 (支持单个IP、192.168.* 通配符或 CIDR 如 172.16.0.0/12)")
+}
+
+/// Check a list of IP rules and return a list of (invalid_item, reason).
+pub fn find_invalid_ip_patterns(items: &[String]) -> Vec<(String, &'static str)> {
+    items
+        .iter()
+        .filter_map(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                validate_ip_pattern(trimmed).err().map(|err| (trimmed.to_string(), err))
+            }
+        })
+        .collect()
+}

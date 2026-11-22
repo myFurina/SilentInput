@@ -41,6 +41,7 @@ internal fun statusToneColor(tone: StatusTone) = when (tone) {
 @Composable
 fun UnifiedConnectionDialog(
     viewModel: MainViewModel,
+    initialTab: Int? = null,
     onRequestBtPermission: () -> Unit,
     onToggleBluetoothSystem: (Boolean) -> Unit,
     onOpenMoreSettings: () -> Unit = {},
@@ -84,20 +85,24 @@ fun UnifiedConnectionDialog(
 
     var selectedTab by rememberSaveable {
         mutableIntStateOf(
-            when (ConnectionMode.fromWire(currentMode)) {
+            initialTab ?: when (ConnectionMode.fromWire(currentMode)) {
                 ConnectionMode.BLUETOOTH -> 2
                 ConnectionMode.LAN -> 1
                 ConnectionMode.USB -> 0
             }
         )
     }
+    LaunchedEffect(initialTab) {
+        if (initialTab != null) {
+            selectedTab = initialTab
+        }
+    }
     var ipInput by rememberSaveable { mutableStateOf(savedLanIp) }
     var tokenInput by rememberSaveable { mutableStateOf(savedToken) }
     var pinnedCertNonce by remember { mutableIntStateOf(0) }
     val dialogScrollState = rememberScrollState()
 
-    val isUsbTarget = NetworkClient.parseServerEndpoint(activeServerIp)
-        ?.let { NetworkClient.isLoopbackHost(it.host) } == true
+    val isUsbTarget = currentMode == ConnectionMode.USB.wireValue
     val isUsbConnected = isNetConnected && isUsbTarget
     val isLanConnected = isNetConnected && !isUsbTarget
     val isUsbConnecting = isNetConnecting && isUsbTarget

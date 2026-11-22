@@ -5,11 +5,16 @@ import android.os.SystemClock
 import android.util.Log
 import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.AppStrings
+import com.silentinput.app.model.BaseInputTransport
 import com.silentinput.app.model.InputTransport
 import com.silentinput.app.model.ProtocolPayloads
 import com.silentinput.app.model.ServerMessage
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import okhttp3.*
 import java.security.MessageDigest
@@ -24,7 +29,7 @@ import javax.net.ssl.X509TrustManager
 class NetworkClient(
     context: Context? = null,
     initialLanguage: AppLanguage = AppLanguage.ZH
-) : InputTransport {
+) : BaseInputTransport(initialLanguage) {
 
     data class ParsedEndpoint(val host: String, val port: Int) {
         val isIpv6: Boolean get() = host.contains(':')
@@ -204,9 +209,6 @@ class NetworkClient(
     private val _isEncrypted = MutableStateFlow(false)
     val isEncrypted = _isEncrypted.asStateFlow()
 
-    private val _supportsUnicodeDirectTyping = MutableStateFlow(true)
-    override val supportsUnicodeDirectTyping = _supportsUnicodeDirectTyping.asStateFlow()
-
     private val _certMismatchHost = MutableStateFlow<String?>(null)
     val certMismatchHost = _certMismatchHost.asStateFlow()
 
@@ -216,12 +218,7 @@ class NetworkClient(
     private val _savedCertFingerprint = MutableStateFlow<String?>(null)
     val savedCertFingerprint = _savedCertFingerprint.asStateFlow()
 
-    @Volatile
-    var appLanguage: AppLanguage = initialLanguage
-
     private var lastErrorFormatter: ((AppStrings) -> String)? = null
-
-    private fun currentStrings(): AppStrings = AppStrings.forLanguage(appLanguage)
 
     private fun setConnectionError(formatter: ((AppStrings) -> String)?) {
         lastErrorFormatter = formatter
@@ -234,12 +231,6 @@ class NetworkClient(
             lastErrorFormatter?.let { formatter ->
                 _connectionError.value = formatter(currentStrings())
             }
-        }
-    }
-
-    override fun refreshLanguageIfSystem() {
-        if (appLanguage == AppLanguage.SYSTEM) {
-            updateLanguage(AppLanguage.SYSTEM)
         }
     }
 
@@ -461,6 +452,14 @@ class NetworkClient(
                             msg.unicodeDirectTyping?.let {
                                 _supportsUnicodeDirectTyping.value = it
                             }
+                            msg.version?.let {
+                                _daemonVersion.value = it
+                            }
+                        }
+                    }
+                    is ServerMessage.PasteResult -> {
+                        if (msg.status == "busy") {
+                            _pasteQueueBusyEvent.tryEmit(msg.message)
                         }
                     }
                     ServerMessage.AuthRequired -> {
@@ -546,6 +545,7 @@ class NetworkClient(
         _latencyMs.value = null
         _isEncrypted.value = false
         _supportsUnicodeDirectTyping.value = true
+        _daemonVersion.value = null
         stopPingLoopLocked()
 
         // Auto reconnect with capped exponential backoff when in foreground and expected to stay connected
@@ -774,6 +774,7 @@ class NetworkClient(
         _latencyMs.value = null
         _isEncrypted.value = false
         _supportsUnicodeDirectTyping.value = true
+        _daemonVersion.value = null
     }
 
     fun disconnect() {

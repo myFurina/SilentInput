@@ -30,7 +30,10 @@ private const val GITHUB_RELEASES_URL = "$GITHUB_REPO_URL/releases"
 private const val GITHUB_ISSUES_URL = "$GITHUB_REPO_URL/issues"
 
 @Composable
-internal fun HelpAndAboutDialog(onDismiss: () -> Unit) {
+internal fun HelpAndAboutDialog(
+    daemonVersion: String? = null,
+    onDismiss: () -> Unit
+) {
     val strings = LocalAppStrings.current
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
@@ -81,6 +84,13 @@ internal fun HelpAndAboutDialog(onDismiss: () -> Unit) {
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold
                         )
+                        if (!daemonVersion.isNullOrBlank()) {
+                            Text(
+                                text = strings.helpDaemonVersion(daemonVersion),
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                         Text(
                             text = strings.helpProjectSummary,
                             fontSize = 12.sp,

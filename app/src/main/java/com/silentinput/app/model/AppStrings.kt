@@ -75,6 +75,7 @@ data class AppStrings(
     // NetworkClient Errors
     val netErrEmptyIp: String,
     val netErrInvalidIp: String,
+    val lanErrLoopbackNotAllowed: String,
     val netErrEmptyToken: String,
     val netErrTlsInitFailed: (detail: String?) -> String,
     val netErrTooManyAttempts: String,
@@ -184,6 +185,7 @@ data class AppStrings(
     val helpEntrySubtitle: String,
     val helpDialogTitle: String,
     val helpVersionLicense: (versionName: String) -> String,
+    val helpDaemonVersion: (version: String) -> String,
     val helpProjectSummary: String,
     val helpLinksTitle: String,
     val helpRepoLabel: String,
@@ -252,7 +254,9 @@ data class AppStrings(
     val txtCursorEditTitle: String,
     val txtCursorBackspace: String,
     val txtCursorEnter: String,
-    val txtInlineTrackpadHint: String
+    val txtInlineTrackpadHint: String,
+    val txtTextTooLongError: (limit: Int) -> String,
+    val txtQueueBusyToast: String
 ) {
     companion object {
         val ZH = AppStrings(
@@ -292,6 +296,7 @@ data class AppStrings(
 
             netErrEmptyIp = "请输入电脑 IP 地址",
             netErrInvalidIp = "连接地址格式无效，请检查 IP 输入",
+            lanErrLoopbackNotAllowed = "局域网模式不可使用回环地址 127.0.0.1，请使用 USB 模式",
             netErrEmptyToken = "请输入配对密钥",
             netErrTlsInitFailed = { detail -> "TLS 初始化失败: ${detail ?: "未知错误"}" },
             netErrTooManyAttempts = "配对密钥错误次数过多，请稍后再试",
@@ -399,6 +404,7 @@ data class AppStrings(
             helpEntrySubtitle = "GitHub 项目地址、下载更新与使用提示",
             helpDialogTitle = "帮助与关于",
             helpVersionLicense = { versionName -> "SilentInput v$versionName · GNU GPL-3.0 开源" },
+            helpDaemonVersion = { version -> "电脑端版本: v$version" },
             helpProjectSummary = "适用于 Linux（Wayland / GNOME）的手机远程键盘、触控板与文本输入工具。",
             helpLinksTitle = "项目地址与反馈",
             helpRepoLabel = "GitHub 仓库主页",
@@ -464,7 +470,9 @@ data class AppStrings(
             txtCursorEditTitle = "光标与编辑",
             txtCursorBackspace = "退格",
             txtCursorEnter = "回车",
-            txtInlineTrackpadHint = "触控区域（输入法弹出时自动折叠）\n单指移动 · 双指滚动 · 轻点左键"
+            txtInlineTrackpadHint = "触控区域（输入法弹出时自动折叠）\n单指移动 · 双指滚动 · 轻点左键",
+            txtTextTooLongError = { limit -> "文本过长 (已超出 $limit 字上限)" },
+            txtQueueBusyToast = "电脑输入队列已满，请稍后再试"
         )
 
         val EN = AppStrings(
@@ -504,6 +512,7 @@ data class AppStrings(
 
             netErrEmptyIp = "Please enter PC IP address",
             netErrInvalidIp = "Invalid host address. Please check IP input.",
+            lanErrLoopbackNotAllowed = "Loopback address 127.0.0.1 is not allowed in LAN mode, please use USB mode",
             netErrEmptyToken = "Please enter pairing key",
             netErrTlsInitFailed = { detail -> "TLS initialization failed: ${detail ?: "Unknown error"}" },
             netErrTooManyAttempts = "Too many wrong pairing key attempts. Try again later.",
@@ -611,6 +620,7 @@ data class AppStrings(
             helpEntrySubtitle = "GitHub repository, downloads & usage tips",
             helpDialogTitle = "Help & About",
             helpVersionLicense = { versionName -> "SilentInput v$versionName · GNU GPL-3.0" },
+            helpDaemonVersion = { version -> "PC Daemon: v$version" },
             helpProjectSummary = "Remote keyboard, trackpad & text input companion for Linux (Wayland / GNOME).",
             helpLinksTitle = "Project Links",
             helpRepoLabel = "GitHub Repository",
@@ -676,7 +686,9 @@ data class AppStrings(
             txtCursorEditTitle = "Cursor & Edit",
             txtCursorBackspace = "Bksp",
             txtCursorEnter = "Enter",
-            txtInlineTrackpadHint = "Trackpad (auto-hides when keyboard opens)\n1-finger move · 2-finger scroll · Tap left-click"
+            txtInlineTrackpadHint = "Trackpad (auto-hides when keyboard opens)\n1-finger move · 2-finger scroll · Tap left-click",
+            txtTextTooLongError = { limit -> "Text too long (exceeds $limit characters limit)" },
+            txtQueueBusyToast = "PC input queue is busy, please slow down"
         )
 
         fun forResolved(language: ResolvedLanguage): AppStrings {

@@ -465,10 +465,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert!(input.combos.lock().unwrap().is_empty());
 
-        // Saturated paste queue rejects excess queued background typing tasks safely
+        // Saturated paste queue rejects excess queued background typing tasks safely and notifies client
         let tiny_sem = Arc::new(tokio::sync::Semaphore::new(1));
         let _held_permit = Arc::clone(&tiny_sem).try_acquire_owned().unwrap();
-        process_message(
+        let saturated_res = process_message(
             r#"{"type":"paste","content":"dropped","mode":"keys"}"#,
             SessionContext {
                 authenticated: true,
@@ -482,6 +482,9 @@ mod tests {
             },
         )
         .await;
+        let busy_json: Value = serde_json::from_str(saturated_res.reply.as_deref().unwrap()).unwrap();
+        assert_eq!(busy_json["type"], "paste_result");
+        assert_eq!(busy_json["status"], "busy");
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(input.typed_texts.lock().unwrap().is_empty());
     }

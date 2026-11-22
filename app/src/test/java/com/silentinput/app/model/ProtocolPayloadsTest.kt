@@ -101,6 +101,14 @@ class ProtocolPayloadsTest {
             ProtocolPayloads.parseServerMessage("""{"type": "status", "unicode_direct_typing": true, "extra": [1, 2]}""")
         )
         assertEquals(
+            ServerMessage.Status(true, "1.0.20"),
+            ProtocolPayloads.parseServerMessage("""{"type":"status","unicode_direct_typing":true,"version":"1.0.20"}""")
+        )
+        assertEquals(
+            ServerMessage.PasteResult("busy", "Input queue full, please slow down."),
+            ProtocolPayloads.parseServerMessage("""{"type":"paste_result","status":"busy","message":"Input queue full, please slow down."}""")
+        )
+        assertEquals(
             ServerMessage.AuthRequired,
             ProtocolPayloads.parseServerMessage("""{"type":"auth_required"}""")
         )

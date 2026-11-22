@@ -37,6 +37,21 @@ object ConnectionStatusFormatter {
             !lastBtDeviceAddress.isNullOrBlank()
     }
 
+    fun shouldAutoReconnectNetwork(
+        mode: String,
+        targetMode: String,
+        isNetConnected: Boolean,
+        isNetConnecting: Boolean,
+        manualDisconnected: Boolean,
+        serverIp: String
+    ): Boolean {
+        return mode == targetMode &&
+            !isNetConnected &&
+            !isNetConnecting &&
+            !manualDisconnected &&
+            serverIp.isNotBlank()
+    }
+
     fun formatTopBarStatus(
         mode: String,
         isBtConnected: Boolean,

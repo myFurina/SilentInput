@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -196,11 +197,28 @@ fun MainAppScaffold(
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var showConfigDialog by rememberSaveable { mutableStateOf(false) }
+    var configDialogInitialTab by rememberSaveable { mutableStateOf<Int?>(null) }
     var showMoreSettingsPage by rememberSaveable { mutableStateOf(false) }
     var returnToConfigDialogOnBack by rememberSaveable { mutableStateOf(false) }
     var showLandscapeKeyboard by rememberSaveable { mutableStateOf(false) }
 
     val context = LocalContext.current
+    val strings = LocalAppStrings.current
+    LaunchedEffect(Unit) {
+        viewModel.userToastEvent.collect { event ->
+            Toast.makeText(context, event(strings), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun openConfigDialog(preferredTab: Int? = null) {
+        configDialogInitialTab = preferredTab ?: when (currentMode) {
+            "bluetooth" -> 2
+            "lan" -> 1
+            else -> 0
+        }
+        showConfigDialog = true
+    }
+
     val activity = remember(context) { context.findActivity() }
     DisposableEffect(activity, showLandscapeKeyboard) {
         activity?.requestedOrientation = if (showLandscapeKeyboard) {
@@ -220,7 +238,7 @@ fun MainAppScaffold(
                 showMoreSettingsPage = false
                 if (returnToConfigDialogOnBack) {
                     returnToConfigDialogOnBack = false
-                    showConfigDialog = true
+                    openConfigDialog()
                 }
             },
             onDone = {
@@ -239,7 +257,7 @@ fun MainAppScaffold(
             onSendKey = { viewModel.sendKey(it) },
             onOpenSettings = {
                 showLandscapeKeyboard = false
-                showConfigDialog = true
+                openConfigDialog()
             },
             onExit = { showLandscapeKeyboard = false }
         )
@@ -258,14 +276,14 @@ fun MainAppScaffold(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { showConfigDialog = true }
+                            .clickable { openConfigDialog() }
                     ) {
                         Text("SilentInput", fontSize = 18.sp, fontWeight = FontWeight.Bold)
                         TopBarConnectionStatusSubtitle(viewModel = viewModel)
                     }
                 },
                 actions = {
-                    IconButton(onClick = { showConfigDialog = true }) {
+                    IconButton(onClick = { openConfigDialog() }) {
                         Icon(
                             imageVector = Icons.Default.Settings,
                             contentDescription = strings.settings,
@@ -321,7 +339,7 @@ fun MainAppScaffold(
                     color = MaterialTheme.colorScheme.primaryContainer,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { showConfigDialog = true }
+                        .clickable { openConfigDialog() }
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
@@ -406,6 +424,7 @@ fun MainAppScaffold(
         if (showConfigDialog) {
             UnifiedConnectionDialog(
                 viewModel = viewModel,
+                initialTab = configDialogInitialTab,
                 onRequestBtPermission = onRequestBtPermission,
                 onToggleBluetoothSystem = onToggleBluetoothSystem,
                 onOpenMoreSettings = {
@@ -413,7 +432,10 @@ fun MainAppScaffold(
                     returnToConfigDialogOnBack = true
                     showMoreSettingsPage = true
                 },
-                onDismiss = { showConfigDialog = false }
+                onDismiss = {
+                    showConfigDialog = false
+                    configDialogInitialTab = null
+                }
             )
         }
     }

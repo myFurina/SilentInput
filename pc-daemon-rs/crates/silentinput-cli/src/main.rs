@@ -4,8 +4,8 @@ use std::process::Command;
 
 use clap::{Parser, Subcommand};
 use silentinput_core::config::{
-    get_token_status_text, load_config, regenerate_token, save_config, set_tls_enabled,
-    unix_timestamp_secs,
+    generate_token_hex, get_token_status_text, load_config, regenerate_token, save_config,
+    set_tls_enabled, unix_timestamp_secs, SilentInputConfig,
 };
 use silentinput_core::i18n::resolve_gui_is_zh;
 use silentinput_core::logs::{select_log_source, LogSource};
@@ -18,6 +18,7 @@ use silentinput_core::process::{
 #[derive(Parser)]
 #[command(
     name = "silentinput",
+    version,
     about = "SilentInput PC Companion CLI",
     disable_help_subcommand = true
 )]
@@ -63,6 +64,10 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    #[command(visible_alias = "v", about = "查看版本信息")]
+    Version,
+    #[command(about = "恢复出厂默认配置并重启服务")]
+    Reset,
     #[command(about = "显示帮助信息")]
     Help,
 }
@@ -79,6 +84,7 @@ SilentInput 管理命令:
   silentinput token       - 查看当前安全配对密钥 (--reset 可重新生成)
   silentinput tls         - 查看或切换 TLS 传输加密 (on/off)
   silentinput autostart   - 查看或切换开机自动启动 (on/off)
+  silentinput reset       - 恢复出厂默认配置并重启服务
   silentinput logs        - 实时跟踪后台服务运行日志
   silentinput gui         - 打开桌面控制中心界面
   silentinput install     - 安装到系统 (开机自启、桌面图标、CLI 命令)
@@ -407,6 +413,36 @@ fn cmd_bluetooth() {
     println!("=========================================");
 }
 
+fn cmd_reset() {
+    let default_cfg = SilentInputConfig {
+        auth_token: generate_token_hex(4),
+        token_created_at: unix_timestamp_secs(),
+        ..SilentInputConfig::default()
+    };
+    if let Err(e) = save_config(&default_cfg) {
+        eprintln!("❌ 恢复出厂默认配置失败: {e}");
+        return;
+    }
+    println!("=========================================");
+    println!("       已恢复出厂默认配置 (最小权限模式)   ");
+    println!("=========================================");
+    println!(" 访问控制模式: 🔒 本地模式 (localhost_only, 权限最小)");
+    println!(" 密钥有效期:   ⏱️  1小时 (1h, 最短有效，自动轮换)");
+    println!(" 默认服务端口: 53318");
+    println!(" 传输加密:     TLS 开启 (WSS)");
+    println!(" USB 免密:     已开启 (仅限本机 127.0.0.1)");
+    println!(" 白名单网段:   127.0.0.1, 10.*, 192.168.*, 100.*, 172.16.0.0/12");
+    println!(" 新配对密钥:   {}", default_cfg.auth_token);
+    println!("=========================================");
+    println!("正在重启后台服务使新配置生效...");
+    let (ok, msg) = service_restart();
+    if ok {
+        println!("✅ {msg}");
+    } else {
+        println!("⚠️ 请手动运行 silentinput restart 重启服务");
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -426,6 +462,8 @@ fn main() {
         Some(Commands::Gui) => cmd_gui(),
         Some(Commands::Install { args }) => cmd_install(args),
         Some(Commands::Uninstall { args }) => cmd_uninstall(args),
+        Some(Commands::Version) => println!("silentinput {}", env!("CARGO_PKG_VERSION")),
+        Some(Commands::Reset) => cmd_reset(),
         Some(Commands::Help) => print_help(),
     }
 }

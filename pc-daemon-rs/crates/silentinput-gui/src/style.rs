@@ -44,6 +44,14 @@ pub fn success_color(dark: bool) -> Color {
     }
 }
 
+pub fn warning_color(dark: bool) -> Color {
+    if dark {
+        DARK_STATUS_WARNING
+    } else {
+        STATUS_WARNING
+    }
+}
+
 pub fn monochrome_theme(dark: bool) -> Theme {
     if dark {
         Theme::custom(

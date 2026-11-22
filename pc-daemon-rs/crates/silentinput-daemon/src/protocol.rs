@@ -9,7 +9,7 @@ use silentinput_core::keymap::{lookup_char, normalize_line_endings};
 use crate::auth_limiter::{AuthRateLimiter, AUTH_LOCKOUT_SECS};
 use crate::input::InputController;
 
-pub const DAEMON_VERSION: &str = "1.0.20";
+pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MAX_PENDING_PASTE_TASKS: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,10 +239,15 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                 eprintln!(
                     "[SilentInput] Dropping paste/type command: background input queue is full."
                 );
+                let reply = json!({
+                    "type": "paste_result",
+                    "status": "busy",
+                    "message": "Input queue full, please slow down.",
+                });
                 return ProcessOutcome {
                     authenticated: true,
                     should_close: false,
-                    reply: None,
+                    reply: Some(reply.to_string()),
                 };
             };
 
