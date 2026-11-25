@@ -393,8 +393,8 @@ class NetworkClient(
                         reconnectAttempts = 0
                         reconnectJob?.cancel()
                         reconnectJob = null
-                        setConnectionError { it.netErrEmptyToken }
                         disconnectSocketOnlyLocked()
+                        setConnectionError { it.netErrEmptyToken }
                         return
                     }
 
@@ -492,10 +492,10 @@ class NetworkClient(
                                 _isReconnecting.value = false
                                 reconnectJob?.cancel()
                                 reconnectJob = null
+                                disconnectSocketOnlyLocked()
                                 setConnectionError { s ->
                                     if (tooManyAttempts) s.netErrTooManyAttempts else s.netErrWrongToken
                                 }
-                                disconnectSocketOnlyLocked()
                             }
                         }
                     }
@@ -523,8 +523,8 @@ class NetworkClient(
                             _isReconnecting.value = false
                             reconnectJob?.cancel()
                             reconnectJob = null
-                            setConnectionError { it.netErrInvalidOrUnauth }
                             disconnectSocketOnlyLocked()
+                            setConnectionError { it.netErrInvalidOrUnauth }
                         }
                     }
                     null -> {
@@ -836,15 +836,9 @@ class NetworkClient(
     private fun disconnectSocketOnlyLocked() {
         stopPingLoopLocked()
         closeUdpChannelLocked()
+        val wasConnected = _isConnected.value
         val old = webSocket
         webSocket = null
-        try {
-            if (_isConnected.value) {
-                old?.close(1000, "Normal closure")
-            } else {
-                old?.cancel()
-            }
-        } catch (_: Exception) {}
         _isConnected.value = false
         _isAuthenticated.value = false
         _isTransportReady.value = false
@@ -852,6 +846,13 @@ class NetworkClient(
         _isEncrypted.value = false
         _supportsUnicodeDirectTyping.value = true
         _daemonVersion.value = null
+        try {
+            if (wasConnected) {
+                old?.close(1000, "Normal closure")
+            } else {
+                old?.cancel()
+            }
+        } catch (_: Exception) {}
     }
 
     fun disconnect() {
