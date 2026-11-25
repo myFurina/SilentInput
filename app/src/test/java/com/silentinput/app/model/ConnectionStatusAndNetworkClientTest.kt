@@ -404,7 +404,7 @@ class ConnectionStatusAndNetworkClientTest {
             activeServerIp = "192.168.1.20",
             language = ResolvedLanguage.EN
         )
-        assertEquals("LAN: Connected (1200ms High Latency) (Plaintext) · TCP", lanHighEn.text)
+        assertEquals("LAN: Connected (1200ms high latency) (Plaintext) · TCP", lanHighEn.text)
         assertEquals(StatusTone.HIGH_LATENCY, lanHighEn.tone)
 
         val usbDialogEn = ConnectionStatusFormatter.formatUsbDialogStatus(

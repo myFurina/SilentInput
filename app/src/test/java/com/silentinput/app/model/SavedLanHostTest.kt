@@ -8,7 +8,7 @@ import org.junit.Test
 class SavedLanHostTest {
 
     private val tokenA = "si_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789-"
-    private val tokenB = "si_0123456789-_abcdefghijklmnopqrstuvwxyzABCDEF"
+    private val tokenB = "si_0123456789-_abcdefghijklmnopqrstuvwxyzABCDE"
 
     @Test
     fun `upsert sorts favorites first then most recently connected and deduplicates endpoints`() {
