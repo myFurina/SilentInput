@@ -82,7 +82,7 @@ class ConnectionStatusAndNetworkClientTest {
             activeServerIp = "192.168.1.20",
             isUdpMouseActive = true
         )
-        assertEquals("局域网: 已连接 (15ms) 🔒 ⚡UDP", readyUdp.text)
+        assertEquals("局域网: 已连接 (15ms) 🔒 · UDP", readyUdp.text)
         assertEquals(StatusTone.NORMAL, readyUdp.tone)
 
         val lanDialogUdp = ConnectionStatusFormatter.formatLanDialogStatus(
@@ -94,7 +94,7 @@ class ConnectionStatusAndNetworkClientTest {
             latencyMs = 15L,
             isUdpMouseActive = true
         )
-        assertEquals("状态: 已连接 (15ms) (TLS加密) [UDP]", lanDialogUdp.text)
+        assertEquals("状态: 已连接 (15ms) [TLS加密] [UDP]", lanDialogUdp.text)
 
         val highLatency = ConnectionStatusFormatter.formatTopBarStatus(
             mode = "lan",

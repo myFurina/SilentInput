@@ -86,7 +86,7 @@ object ConnectionStatusFormatter {
                 val text = when {
                     isNetReady -> {
                         val encTag = if (isNetEncrypted) " 🔒" else s.statusPlaintextShortTag
-                        val mouseTag = if (isUdpMouseActive) " ⚡UDP" else " · TCP"
+                        val mouseTag = if (isUdpMouseActive) " · UDP" else " · TCP"
                         val latText = formatLatencySuffix(netLatencyMs, markHighLatency = true, strings = s)
                         s.statusNetConnected(prefix, latText, "$encTag$mouseTag")
                     }
