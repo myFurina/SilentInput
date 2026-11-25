@@ -11,3 +11,4 @@ path = "src/main.rs"
 [dependencies]
 silentinput-core = { path = "../silentinput-core" }
 clap.workspace = true
+qrcode.workspace = true

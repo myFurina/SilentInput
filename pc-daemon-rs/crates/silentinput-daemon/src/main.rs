@@ -409,8 +409,9 @@ mod tests {
             crate::protocol::MAX_PENDING_PASTE_TASKS,
         ));
         let limiter = AuthRateLimiter::new();
+        let valid_token = silentinput_core::config::generate_pairing_token();
         let cfg = SilentInputConfig {
-            auth_token: "secret12".to_string(),
+            auth_token: valid_token.clone(),
             access_control_mode: "whitelist".to_string(),
             ..SilentInputConfig::default()
         };
@@ -476,8 +477,9 @@ mod tests {
             assert!(!res.authenticated);
             assert_eq!(res.should_close, idx == 4);
         }
+        let locked_msg = format!(r#"{{"type":"auth","token":"{valid_token}"}}"#);
         let locked_res = process_message(
-            r#"{"type":"auth","token":"secret12"}"#,
+            &locked_msg,
             SessionContext {
                 authenticated: false,
                 config: &cfg,
@@ -560,9 +562,10 @@ mod tests {
         );
         deps.max_ws_connections = 4;
 
+        let valid_token = silentinput_core::config::generate_pairing_token();
         let cfg = SilentInputConfig {
             allow_usb_unauthenticated: false,
-            auth_token: "goodtok1".to_string(),
+            auth_token: valid_token.clone(),
             access_control_mode: "all".to_string(),
             ..SilentInputConfig::default()
         };
@@ -606,8 +609,8 @@ mod tests {
         let err_text = err.to_string();
         assert!(err_text.contains("403"), "Expected 403 rejection, got: {err_text}");
 
-        // 3. URL query token (?token=goodtok1) must NOT authenticate connection
-        let (mut ws, _) = connect_async(format!("ws://{addr}/?token=goodtok1"))
+        // 3. URL query token (?token=...) must NOT authenticate connection
+        let (mut ws, _) = connect_async(format!("ws://{addr}/?token={valid_token}"))
             .await
             .unwrap();
         ws.send(Message::Text(r#"{"type":"key","key":"a"}"#.to_string()))
@@ -619,7 +622,7 @@ mod tests {
 
         // 4. Proper JSON auth succeeds
         ws.send(Message::Text(
-            r#"{"type":"auth","token":"goodtok1"}"#.to_string(),
+            format!(r#"{{"type":"auth","token":"{valid_token}"}}"#),
         ))
         .await
         .unwrap();
@@ -711,15 +714,17 @@ mod tests {
         ));
         let limiter = AuthRateLimiter::new();
         let registry = UdpSessionRegistry::new(53318, true);
+        let valid_token = silentinput_core::config::generate_pairing_token();
         let cfg = SilentInputConfig {
-            auth_token: "secret12".to_string(),
+            auth_token: valid_token.clone(),
             access_control_mode: "whitelist".to_string(),
             ..SilentInputConfig::default()
         };
 
         // Localhost (USB) does not receive UDP credentials
+        let auth_msg = format!(r#"{{"type":"auth","token":"{valid_token}"}}"#);
         let usb_auth = process_message(
-            r#"{"type":"auth","token":"secret12"}"#,
+            &auth_msg,
             SessionContext {
                 authenticated: false,
                 config: &cfg,
@@ -740,7 +745,7 @@ mod tests {
 
         // Non-localhost LAN peer receives UDP port, session_id, and 32-byte key
         let lan_auth = process_message(
-            r#"{"type":"auth","token":"secret12"}"#,
+            &auth_msg,
             SessionContext {
                 authenticated: false,
                 config: &cfg,
@@ -748,8 +753,8 @@ mod tests {
                 conn_id: 2,
                 auth_limiter: &limiter,
                 input: Arc::clone(&input) as Arc<dyn InputController>,
-                paste_lock,
-                paste_semaphore: paste_sem,
+                paste_lock: Arc::clone(&paste_lock),
+                paste_semaphore: Arc::clone(&paste_sem),
                 udp_registry: Some(&registry),
             },
         )
@@ -764,5 +769,29 @@ mod tests {
             format!("{sid:016x}")
         );
         assert_eq!(lan_json["udp_key"].as_str().unwrap().len(), 44);
+
+        // Weak legacy tokens (<256-bit si_ format) are rejected even if stored in config
+        let weak_cfg = SilentInputConfig {
+            auth_token: "deadbeef".to_string(),
+            access_control_mode: "whitelist".to_string(),
+            ..SilentInputConfig::default()
+        };
+        let weak_auth = process_message(
+            r#"{"type":"auth","token":"deadbeef"}"#,
+            SessionContext {
+                authenticated: false,
+                config: &weak_cfg,
+                peer_ip: "192.168.1.99",
+                conn_id: 3,
+                auth_limiter: &limiter,
+                input: Arc::clone(&input) as Arc<dyn InputController>,
+                paste_lock,
+                paste_semaphore: paste_sem,
+                udp_registry: Some(&registry),
+            },
+        )
+        .await;
+        assert!(!weak_auth.authenticated);
+        assert_eq!(registry.session_count(), 1);
     }
 }

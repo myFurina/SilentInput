@@ -110,7 +110,7 @@ class ConnectionStatusAndNetworkClientTest {
             netLatencyMs = 1200L,
             activeServerIp = "192.168.1.20"
         )
-        assertEquals("局域网: 已连接 (1200ms 卡顿/高延迟) (明文) · TCP", highLatency.text)
+        assertEquals("局域网: 已连接 (1200ms 高延迟) (明文) · TCP", highLatency.text)
         assertEquals(StatusTone.HIGH_LATENCY, highLatency.tone)
     }
 
@@ -573,7 +573,7 @@ class ConnectionStatusAndNetworkClientTest {
             activeServerIp = "192.168.1.20"
         )
         assertEquals(StatusTone.HIGH_LATENCY, atThreshold.tone)
-        assertEquals("局域网: 已连接 (800ms 卡顿/高延迟) 🔒 · TCP", atThreshold.text)
+        assertEquals("局域网: 已连接 (800ms 高延迟) 🔒 · TCP", atThreshold.text)
     }
 
     @Test

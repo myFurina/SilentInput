@@ -4,6 +4,7 @@ pub mod config;
 pub mod i18n;
 pub mod keymap;
 pub mod logs;
+pub mod pairing;
 pub mod paths;
 pub mod process;
 
@@ -22,9 +23,11 @@ mod tests {
         find_invalid_ip_patterns, get_bind_addresses, is_ip_allowed, match_ip_pattern,
         validate_ip_pattern,
     };
-    use crate::certs::ensure_certificates_at;
+    use crate::certs::{self, ensure_certificates_at};
+    use crate::pairing;
     use crate::config::{
-        constant_time_token_eq, generate_token_hex, get_token_status_text_at, load_config_at,
+        constant_time_token_eq, generate_pairing_token, generate_token_hex,
+        get_token_status_text_at, is_valid_strong_token, load_config_at, STRONG_TOKEN_LEN,
         save_config_at, SilentInputConfig,
     };
     use crate::keymap::{
@@ -47,7 +50,8 @@ mod tests {
 
         let cfg = load_config_at(&paths);
         assert_eq!(cfg.port, 53318);
-        assert_eq!(cfg.auth_token.len(), 8);
+        assert_eq!(cfg.auth_token.len(), STRONG_TOKEN_LEN);
+        assert!(is_valid_strong_token(&cfg.auth_token));
         assert!(cfg.enable_tls);
         assert!(cfg.allow_usb_unauthenticated);
         assert_eq!(cfg.access_control_mode, "localhost_only");
@@ -95,6 +99,7 @@ mod tests {
         }
         let loaded = load_config_at(&paths);
         assert_eq!(loaded.port, 53318);
+        assert!(is_valid_strong_token(&loaded.auth_token));
         let leftovers: Vec<_> = fs::read_dir(&paths.config_dir)
             .unwrap()
             .flatten()
@@ -174,13 +179,54 @@ mod tests {
 
     #[test]
     fn token_constant_time_and_status_strings() {
-        let tok = generate_token_hex(4);
-        assert_eq!(tok.len(), 8);
+        let legacy = generate_token_hex(4);
+        assert_eq!(legacy.len(), 8);
+        assert!(!is_valid_strong_token(&legacy));
+        assert!(!is_valid_strong_token("550e8400-e29b-41d4-a716-446655440000"));
+
+        let strong = generate_pairing_token();
+        assert_eq!(strong.len(), STRONG_TOKEN_LEN);
+        assert!(strong.starts_with("si_"));
+        assert!(is_valid_strong_token(&strong));
+        assert_ne!(strong, generate_pairing_token());
+
         assert!(constant_time_token_eq("ab12cd34", "ab12cd34"));
         assert!(constant_time_token_eq("  ab12cd34\n", "ab12cd34"));
         assert!(!constant_time_token_eq("", "ab12cd34"));
         assert!(!constant_time_token_eq("ab12cd35", "ab12cd34"));
         assert!(!constant_time_token_eq("short", "longertoken"));
+
+        let tmp = tempfile_dir("pairing_and_certs");
+        let paths = SilentInputPaths::from_dir(&tmp);
+        ensure_certificates_at(&paths).unwrap();
+        let fp = certs::get_cert_sha256_hex_at(&paths).unwrap();
+        assert_eq!(fp.len(), 64);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+        let short_fp = certs::format_short_fingerprint(&fp);
+        assert_eq!(short_fp.len(), 19);
+        assert!(short_fp.contains(':'));
+
+        let payload = pairing::PairingQrPayload {
+            name: "workstation 01".to_string(),
+            ips: vec!["192.168.1.10".to_string(), "100.64.0.1".to_string()],
+            port: 53318,
+            token: strong.clone(),
+            tls: true,
+            fingerprint: Some(fp.clone()),
+        };
+        let uri = pairing::build_pairing_uri(&payload);
+        let parsed = pairing::parse_pairing_uri(&uri).expect("valid pairing URI");
+        assert_eq!(parsed, payload);
+        assert!(pairing::parse_pairing_uri(
+            "silentinput://pair?v=1&name=pc&ips=192.168.1.2&port=53318&token=ab12cd34&tls=1"
+        )
+        .is_none());
+
+        let (width, matrix) = pairing::get_qr_matrix(&uri).expect("qr matrix");
+        assert!(width >= 21);
+        assert_eq!(matrix.len(), width * width);
+        assert!(pairing::render_qr_terminal(&uri).is_some());
+        let _ = fs::remove_dir_all(&tmp);
 
         let def_cfg = SilentInputConfig::default();
         assert_eq!(def_cfg.token_expire_mode, "1h");

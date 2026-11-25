@@ -44,7 +44,7 @@ pub fn expire_options(is_zh: bool) -> Vec<PickOption> {
         },
         PickOption {
             key: "1h",
-            label: if is_zh { "1 小时临时" } else { "1h temporary" },
+            label: if is_zh { "1 小时" } else { "1 hour" },
         },
     ]
 }
@@ -54,17 +54,17 @@ pub fn acl_mode_options(is_zh: bool) -> Vec<PickOption> {
         PickOption {
             key: "whitelist",
             label: if is_zh {
-                "白名单模式 (仅允许白名单 IP)"
+                "白名单 (仅允许列表 IP)"
             } else {
-                "Whitelist (allow listed IPs only)"
+                "Whitelist (listed IPs only)"
             },
         },
         PickOption {
             key: "blacklist",
             label: if is_zh {
-                "黑名单模式 (仅拒绝黑名单 IP)"
+                "黑名单 (拦截列表 IP)"
             } else {
-                "Blacklist (block listed IPs only)"
+                "Blacklist (block listed IPs)"
             },
         },
         PickOption {

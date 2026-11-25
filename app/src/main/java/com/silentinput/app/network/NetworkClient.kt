@@ -339,6 +339,21 @@ class NetworkClient(
         }
     }
 
+    fun pinCertificateFingerprint(
+        rawIp: String,
+        defaultPort: Int = DEFAULT_PORT,
+        fingerprintHex: String
+    ): Boolean {
+        val prefs = tofuPrefs ?: return false
+        val endpoint = parseServerEndpoint(rawIp, defaultPort) ?: return false
+        val cleanFp = fingerprintHex.trim().lowercase()
+        if (cleanFp.length != 64 || !cleanFp.all { it in '0'..'9' || it in 'a'..'f' }) {
+            return false
+        }
+        prefs.edit().putString(endpoint.hostKey, cleanFp).apply()
+        return true
+    }
+
     fun trustNewCertificateAndReconnect() {
         synchronized(stateLock) {
             val hostKey = _certMismatchHost.value

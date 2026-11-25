@@ -3,12 +3,15 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use clap::{Parser, Subcommand};
+use silentinput_core::certs::{format_short_fingerprint, get_cert_sha256_hex_at};
 use silentinput_core::config::{
-    generate_token_hex, get_token_status_text, load_config, regenerate_token, save_config,
+    generate_pairing_token, get_token_status_text, load_config, regenerate_token, save_config,
     set_tls_enabled, unix_timestamp_secs, SilentInputConfig,
 };
 use silentinput_core::i18n::resolve_gui_is_zh;
 use silentinput_core::logs::{select_log_source, LogSource};
+use silentinput_core::pairing::{build_pairing_payload_at, build_pairing_uri, render_qr_terminal};
+use silentinput_core::paths::SilentInputPaths;
 use silentinput_core::process::{
     get_all_host_ips, get_connected_usb_devices, get_package_uninstall_command,
     is_autostart_enabled, is_daemon_running, is_system_package_install, service_restart,
@@ -39,12 +42,16 @@ enum Commands {
     Status,
     #[command(visible_alias = "bt", about = "查看电脑蓝牙名称、MAC 地址及配对指引")]
     Bluetooth,
+    #[command(about = "在终端显示扫码配对二维码")]
+    Qr,
     #[command(about = "查看或管理配对密钥")]
     Token {
         #[arg(long)]
         reset: bool,
         #[arg(long)]
         expire: Option<String>,
+        #[arg(long)]
+        qr: bool,
     },
     #[command(about = "查看或切换 TLS 传输加密 (on/off)")]
     Tls { state: Option<String> },
@@ -81,10 +88,11 @@ SilentInput 管理命令:
   silentinput restart     - 重启后台服务
   silentinput status      - 查看运行状态、IP、端口及配对密钥
   silentinput bluetooth   - 查看电脑蓝牙名称、MAC 地址及配对指引
-  silentinput token       - 查看当前安全配对密钥 (--reset 可重新生成)
-  silentinput tls         - 查看或切换 TLS 传输加密 (on/off)
+  silentinput qr          - 在终端显示手机扫码配对二维码
+  silentinput token       - 查看当前配对密钥 (--reset 重新生成, --qr 显示二维码)
+  silentinput tls         - 查看或切换 TLS 加密 (on/off)
   silentinput autostart   - 查看或切换开机自动启动 (on/off)
-  silentinput reset       - 恢复出厂默认配置并重启服务
+  silentinput reset       - 恢复默认配置并重启服务
   silentinput logs        - 实时跟踪后台服务运行日志
   silentinput gui         - 打开桌面控制中心界面
   silentinput install     - 安装到系统 (开机自启、桌面图标、CLI 命令)
@@ -187,13 +195,13 @@ fn cmd_status() {
     println!(
         " 流量加密:    {}",
         if config.enable_tls {
-            "🔒 TLS 传输加密 (WSS)"
+            "🔒 TLS 开启 (WSS)"
         } else {
-            "明文传输 (WS)"
+            "WS 明文"
         }
     );
-    println!(" USB 模式:    物理线连接自动信任");
-    println!(" 蓝牙信道:    📶 RFCOMM Channel 1 (SPP 标准串口)");
+    println!(" USB 模式:    物理线连接免密");
+    println!(" 蓝牙信道:    📶 RFCOMM Channel 1 (SPP 串口)");
     let autostart_str = if is_autostart_enabled() {
         "🟢 已开启"
     } else {
@@ -203,11 +211,47 @@ fn cmd_status() {
     println!("=========================================");
 }
 
-fn cmd_token(reset: bool, expire: Option<String>) {
+fn cmd_qr() {
+    let paths = SilentInputPaths::system();
+    let config = load_config();
+    let payload = build_pairing_payload_at(&paths, &config);
+    let uri = build_pairing_uri(&payload);
+    println!("=========================================");
+    println!("         SilentInput 扫码配对");
+    println!("=========================================");
+    println!(" 主机名称:    {}", payload.name);
+    if payload.ips.is_empty() {
+        println!(" 局域网 IP:   (未检测到非回环 IP，请确认网络连接)");
+    } else {
+        println!(" 局域网 IP:   {}", payload.ips.join(", "));
+    }
+    println!(" 监听端口:    {}", payload.port);
+    if config.enable_tls {
+        let fp_short = get_cert_sha256_hex_at(&paths)
+            .map(|h| format_short_fingerprint(&h))
+            .unwrap_or_else(|| "待生成".to_string());
+        println!(" 传输加密:    TLS 开启 ({fp_short})");
+    } else {
+        println!(" 传输加密:    TLS 已关闭 (明文 WS)");
+    }
+    if config.access_control_mode == "localhost_only" {
+        println!(" ⚠️ 当前访问控制为「仅限本机」，手机局域网扫码前需先切换为「白名单」模式。");
+    }
+    println!();
+    if let Some(qr) = render_qr_terminal(&uri) {
+        println!("{qr}");
+    } else {
+        eprintln!("生成二维码失败");
+    }
+    println!("请使用手机 App「网络设置 -> 扫码配对」扫描上方二维码。");
+    println!("=========================================");
+}
+
+fn cmd_token(reset: bool, expire: Option<String>, qr: bool) {
     let mut config = load_config();
     if reset {
         let new_token = regenerate_token();
-        println!("✅ 已生成新的随机配对密钥: {new_token}");
+        println!("✅ 已生成新配对密钥: {new_token}");
         println!("提示：如果后台服务正在运行，请执行 'silentinput restart' 使新密钥生效。");
     } else if let Some(raw_mode) = expire {
         let mode = raw_mode.trim().to_ascii_lowercase();
@@ -218,7 +262,7 @@ fn cmd_token(reset: bool, expire: Option<String>) {
         config.token_expire_mode = mode.clone();
         config.token_created_at = unix_timestamp_secs();
         let _ = save_config(&config);
-        println!("✅ 已设置配对密钥有效期模式为: {mode}");
+        println!("✅ 已设置密钥有效期: {mode}");
     } else {
         let expire_desc = get_token_status_text(&config, true);
         println!("=========================================");
@@ -226,11 +270,16 @@ fn cmd_token(reset: bool, expire: Option<String>) {
         println!(" 密钥有效期:   {expire_desc}");
         println!("=========================================");
         println!("常用管理选项:");
-        println!("  silentinput token --reset              - 立即轮换并生成新的随机密钥");
+        println!("  silentinput token --reset              - 生成新配对密钥");
+        println!("  silentinput token --qr                 - 显示配对二维码");
         println!("  silentinput token --expire never       - 设置为永不过期");
-        println!("  silentinput token --expire 24h         - 设置为 24 小时自动刷新轮换");
-        println!("  silentinput token --expire 7d          - 设置为 7 天自动刷新轮换");
-        println!("  silentinput token --expire 1h          - 设置为 1 小时临时有效");
+        println!("  silentinput token --expire 24h         - 设置为 24 小时轮换");
+        println!("  silentinput token --expire 7d          - 设置为 7 天轮换");
+        println!("  silentinput token --expire 1h          - 设置为 1 小时有效");
+    }
+    if qr {
+        println!();
+        cmd_qr();
     }
 }
 
@@ -238,27 +287,27 @@ fn cmd_tls(state: Option<String>) {
     let config = load_config();
     let Some(raw) = state else {
         let state_str = if config.enable_tls {
-            "🟢 已开启 (严格 WSS 传输加密，手机端需同步开启)"
+            "🟢 已开启 (WSS，手机端需同步开启)"
         } else {
-            "⚪ 已关闭 (明文 WS，手机端需同步关闭)"
+            "⚪ 已关闭 (WS，手机端需同步关闭)"
         };
-        println!("当前 TLS 传输加密: {state_str}");
+        println!("当前 TLS 加密: {state_str}");
         println!("用法:");
-        println!("  silentinput tls on     - 启用 TLS 传输加密 (默认)");
-        println!("  silentinput tls off    - 停用 TLS 传输加密 (明文传输)");
-        println!("\n注: 为防止中间人攻击与降级攻击，手机端与电脑端必须保持相同的加密设置。");
+        println!("  silentinput tls on     - 启用 TLS 加密 (默认)");
+        println!("  silentinput tls off    - 停用 TLS 加密 (明文)");
+        println!("\n注: 手机端与电脑端需保持相同的加密设置。");
         return;
     };
 
     match raw.trim().to_ascii_lowercase().as_str() {
         "on" | "enable" | "true" | "1" => {
             set_tls_enabled(true);
-            println!("✅ 已开启 TLS 传输加密 (WSS)。正在重启服务生效...");
+            println!("✅ 已开启 TLS 加密 (WSS)。正在重启服务...");
             cmd_restart();
         }
         "off" | "disable" | "false" | "0" => {
             set_tls_enabled(false);
-            println!("⚠️ 已关闭 TLS 传输加密 (明文 WS)。正在重启服务生效...");
+            println!("⚠️ 已关闭 TLS 加密 (WS)。正在重启服务...");
             cmd_restart();
         }
         other => eprintln!("❌ 未知参数: {other}。请使用 on 或 off。"),
@@ -403,8 +452,8 @@ fn cmd_bluetooth() {
             println!(" 蓝牙 MAC:    {addr}");
             println!(" 伴侣信道:    RFCOMM Channel 1 (SPP 标准串口)");
             println!("\n💡 配对指引:");
-            println!("  1. 在手机系统设置 -> 蓝牙中，搜索并连接配对这台电脑。");
-            println!("  2. 打开 SilentInput 手机 App，在设置面板切换至「蓝牙」一键连接即可！");
+            println!("  1. 在手机系统蓝牙设置中配对这台电脑。");
+            println!("  2. 打开 SilentInput App，切至「蓝牙」页面选择电脑连接。");
         }
         Err(e) => {
             println!(" 查询蓝牙状态失败: {e}");
@@ -415,22 +464,22 @@ fn cmd_bluetooth() {
 
 fn cmd_reset() {
     let default_cfg = SilentInputConfig {
-        auth_token: generate_token_hex(4),
+        auth_token: generate_pairing_token(),
         token_created_at: unix_timestamp_secs(),
         ..SilentInputConfig::default()
     };
     if let Err(e) = save_config(&default_cfg) {
-        eprintln!("❌ 恢复出厂默认配置失败: {e}");
+        eprintln!("❌ 恢复默认配置失败: {e}");
         return;
     }
     println!("=========================================");
-    println!("       已恢复出厂默认配置 (最小权限模式)   ");
+    println!("            已恢复默认配置");
     println!("=========================================");
-    println!(" 访问控制模式: 🔒 本地模式 (localhost_only, 权限最小)");
-    println!(" 密钥有效期:   ⏱️  1小时 (1h, 最短有效，自动轮换)");
+    println!(" 访问控制模式: 🔒 仅限本机 (localhost_only)");
+    println!(" 密钥有效期:   ⏱️  1 小时 (1h)");
     println!(" 默认服务端口: 53318");
     println!(" 传输加密:     TLS 开启 (WSS)");
-    println!(" USB 免密:     已开启 (仅限本机 127.0.0.1)");
+    println!(" USB 免密:     已开启 (仅限 127.0.0.1)");
     println!(" 白名单网段:   127.0.0.1, 10.*, 192.168.*, 100.*, 172.16.0.0/12");
     println!(" 新配对密钥:   {}", default_cfg.auth_token);
     println!("=========================================");
@@ -455,7 +504,8 @@ fn main() {
         Some(Commands::Restart) => cmd_restart(),
         Some(Commands::Status) => cmd_status(),
         Some(Commands::Bluetooth) => cmd_bluetooth(),
-        Some(Commands::Token { reset, expire }) => cmd_token(reset, expire),
+        Some(Commands::Qr) => cmd_qr(),
+        Some(Commands::Token { reset, expire, qr }) => cmd_token(reset, expire, qr),
         Some(Commands::Tls { state }) => cmd_tls(state),
         Some(Commands::Autostart { state }) => cmd_autostart(state),
         Some(Commands::Logs) => cmd_logs(),

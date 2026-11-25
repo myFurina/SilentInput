@@ -1,5 +1,9 @@
 package com.silentinput.app.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -20,11 +24,15 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.ConnectionMode
+import com.silentinput.app.model.PairingQrPayload
+import com.silentinput.app.model.SavedLanHost
 import com.silentinput.app.model.StatusTone
 import com.silentinput.app.network.NetworkClient
 import com.silentinput.app.ui.theme.SilentMotion
@@ -51,6 +59,7 @@ fun UnifiedConnectionDialog(
     val activeServerIp by viewModel.activeServerIp.collectAsState()
     val savedLanIp by viewModel.lanIp.collectAsState()
     val savedToken by viewModel.savedAuthToken.collectAsState()
+    val savedLanHosts by viewModel.savedLanHosts.collectAsState()
     val isTlsEnabled by viewModel.isTlsEnabled.collectAsState()
     val hasBtPermission by viewModel.hasBtPermission.collectAsState()
     val bondedDevices by viewModel.bondedBtDevices.collectAsState()
@@ -101,7 +110,25 @@ fun UnifiedConnectionDialog(
     var ipInput by rememberSaveable { mutableStateOf(savedLanIp) }
     var tokenInput by rememberSaveable { mutableStateOf(savedToken) }
     var pinnedCertNonce by remember { mutableIntStateOf(0) }
+    var showQrScanner by remember { mutableStateOf(false) }
+    var cameraPermissionDenied by remember { mutableStateOf(false) }
+    var isProbingQrIps by remember { mutableStateOf(false) }
+    var pendingQrPayload by remember { mutableStateOf<PairingQrPayload?>(null) }
+    var pendingReachableIps by remember { mutableStateOf<List<String>>(emptyList()) }
+    var renamingHost by remember { mutableStateOf<SavedLanHost?>(null) }
     val dialogScrollState = rememberScrollState()
+    val context = LocalContext.current
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            cameraPermissionDenied = false
+            showQrScanner = true
+        } else {
+            cameraPermissionDenied = true
+        }
+    }
 
     val isUsbTarget = currentMode == ConnectionMode.USB.wireValue
     val isUsbConnected = isNetConnected && isUsbTarget
@@ -179,6 +206,37 @@ fun UnifiedConnectionDialog(
                                 tokenInput = it
                                 viewModel.clearLanInputError()
                             },
+                            savedHosts = savedLanHosts,
+                            activeServerIp = activeServerIp,
+                            onSelectSavedHost = { host ->
+                                ipInput = host.endpoint
+                                tokenInput = host.token
+                                viewModel.clearLanInputError()
+                                if (host.token.isBlank()) {
+                                    viewModel.toggleTlsEncryption(host.tlsEnabled)
+                                    viewModel.notifyUserToast { it.lanSavedHostNeedsKeyToast }
+                                } else {
+                                    viewModel.connectLan(host.endpoint, host.token, host.tlsEnabled, host.name)
+                                    pinnedCertNonce++
+                                }
+                            },
+                            onToggleSavedHostFavorite = { viewModel.toggleSavedHostFavorite(it) },
+                            onRequestRenameSavedHost = { renamingHost = it },
+                            onDeleteSavedHost = { viewModel.deleteSavedHost(it) },
+                            onScanQrClick = {
+                                val granted = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.CAMERA
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (granted) {
+                                    cameraPermissionDenied = false
+                                    showQrScanner = true
+                                } else {
+                                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                                }
+                            },
+                            isProbingQrIps = isProbingQrIps,
+                            cameraPermissionDenied = cameraPermissionDenied,
                             isTlsEnabled = isTlsEnabled,
                             onToggleTls = { viewModel.toggleTlsEncryption(it) },
                             isLanConnected = isLanConnected,
@@ -244,6 +302,108 @@ fun UnifiedConnectionDialog(
         confirmButton = {
             TextButton(onClick = onDismiss) {
                 Text(strings.done)
+            }
+        }
+    )
+
+    if (showQrScanner) {
+        QrScannerDialog(
+            onPayloadScanned = { payload ->
+                showQrScanner = false
+                when {
+                    payload.ips.isEmpty() -> {
+                        viewModel.notifyUserToast { it.lanQrNoIpErr }
+                    }
+                    payload.ips.size == 1 -> {
+                        val endpoint = viewModel.applyScannedPairing(payload, payload.ips.first())
+                        ipInput = endpoint
+                        tokenInput = payload.token
+                        pinnedCertNonce++
+                    }
+                    else -> {
+                        isProbingQrIps = true
+                        viewModel.probeReachableHostIps(payload.ips, payload.port) { reachable ->
+                            isProbingQrIps = false
+                            if (reachable.size == 1) {
+                                val endpoint = viewModel.applyScannedPairing(payload, reachable.first())
+                                ipInput = endpoint
+                                tokenInput = payload.token
+                                pinnedCertNonce++
+                            } else {
+                                pendingReachableIps = reachable
+                                pendingQrPayload = payload
+                            }
+                        }
+                    }
+                }
+            },
+            onInvalidQr = {},
+            onDismiss = { showQrScanner = false }
+        )
+    }
+
+    pendingQrPayload?.let { payload ->
+        QrIpPickerDialog(
+            payload = payload,
+            reachableIps = pendingReachableIps,
+            onSelectIp = { chosenIp ->
+                val endpoint = viewModel.applyScannedPairing(payload, chosenIp)
+                ipInput = endpoint
+                tokenInput = payload.token
+                pinnedCertNonce++
+                pendingQrPayload = null
+                pendingReachableIps = emptyList()
+            },
+            onDismiss = {
+                pendingQrPayload = null
+                pendingReachableIps = emptyList()
+            }
+        )
+    }
+
+    renamingHost?.let { host ->
+        RenameSavedHostDialog(
+            initialName = host.name,
+            onConfirm = { newName ->
+                viewModel.renameSavedHost(host.id, newName)
+                renamingHost = null
+            },
+            onDismiss = { renamingHost = null }
+        )
+    }
+}
+
+@Composable
+private fun RenameSavedHostDialog(
+    initialName: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val strings = LocalAppStrings.current
+    var nameInput by remember { mutableStateOf(initialName) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(strings.lanSavedHostRenameTitle, fontWeight = FontWeight.Bold) },
+        text = {
+            OutlinedTextField(
+                value = nameInput,
+                onValueChange = { nameInput = it },
+                label = { Text(strings.lanSavedHostNameLabel) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(nameInput) },
+                enabled = nameInput.isNotBlank()
+            ) {
+                Text(strings.btnSave)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(strings.btnCancel)
             }
         }
     )

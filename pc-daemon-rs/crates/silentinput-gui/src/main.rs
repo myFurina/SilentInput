@@ -13,12 +13,14 @@ use iced::widget::{
 };
 use iced::{window, Alignment, Element, Font, Length, Size, Subscription, Task, Theme};
 use silentinput_core::acl::find_invalid_ip_patterns;
+use silentinput_core::certs::format_short_fingerprint;
 use silentinput_core::config::{
-    generate_token_hex, get_token_status_text, load_config_at, regenerate_token_at,
+    generate_pairing_token, get_token_status_text, load_config_at, regenerate_token_at,
     save_config_at, unix_timestamp_secs, SilentInputConfig,
 };
 use silentinput_core::i18n::{resolve_gui_is_zh, t};
 use silentinput_core::logs::read_log_tail_at;
+use silentinput_core::pairing::{build_pairing_payload_at, build_pairing_uri, get_qr_matrix};
 use silentinput_core::paths::SilentInputPaths;
 use silentinput_core::process::{
     get_all_host_ips, get_connected_usb_devices_if_server_running, get_package_uninstall_command,
@@ -53,7 +55,18 @@ struct ProbeSnapshot {
 }
 
 #[derive(Debug, Clone)]
+struct QrPairingData {
+    name: String,
+    ips: Vec<String>,
+    port: u16,
+    tls: bool,
+    fingerprint_short: Option<String>,
+    uri: String,
+}
+
+#[derive(Debug, Clone)]
 enum ModalView {
+    QrPairing(QrPairingData),
     Help,
     ResetConfigConfirm,
     Logs(String),
@@ -75,6 +88,7 @@ enum Message {
     AutostartActionFinished(bool, String),
     CopyToken,
     RegenerateToken,
+    OpenQrPairing,
     ExpireModeSelected(PickOption),
     ToggleUsbNoAuth(bool),
     ToggleTls(bool),
@@ -141,6 +155,23 @@ impl ControlCenterState {
             "dark" => true,
             "light" => false,
             _ => self.system_dark,
+        }
+    }
+
+    fn build_qr_data(&self) -> QrPairingData {
+        let payload = build_pairing_payload_at(&self.paths, &self.config);
+        let uri = build_pairing_uri(&payload);
+        let fingerprint_short = payload
+            .fingerprint
+            .as_deref()
+            .map(format_short_fingerprint);
+        QrPairingData {
+            name: payload.name,
+            ips: payload.ips,
+            port: payload.port,
+            tls: payload.tls,
+            fingerprint_short,
+            uri,
         }
     }
 
@@ -421,12 +452,19 @@ impl ControlCenterState {
                 self.config_generation += 1;
                 let new_tok = regenerate_token_at(&self.paths);
                 self.config = load_config_at(&self.paths);
+                if matches!(self.modal, Some(ModalView::QrPairing(_))) {
+                    self.modal = Some(ModalView::QrPairing(self.build_qr_data()));
+                }
                 let msg = if self.is_zh {
-                    format!("已生成新密钥: {new_tok}")
+                    format!("已生成新密钥: {}...", new_tok.chars().take(12).collect::<String>())
                 } else {
-                    format!("Generated new key: {new_tok}")
+                    format!("New key generated: {}...", new_tok.chars().take(12).collect::<String>())
                 };
                 self.show_toast(msg)
+            }
+            Message::OpenQrPairing => {
+                self.modal = Some(ModalView::QrPairing(self.build_qr_data()));
+                Task::none()
             }
             Message::ExpireModeSelected(opt) => {
                 self.config_generation += 1;
@@ -585,7 +623,7 @@ impl ControlCenterState {
             Message::ConfirmResetConfig => {
                 self.modal = None;
                 let default_cfg = SilentInputConfig {
-                    auth_token: generate_token_hex(4),
+                    auth_token: generate_pairing_token(),
                     token_created_at: unix_timestamp_secs(),
                     ..SilentInputConfig::default()
                 };
@@ -850,18 +888,18 @@ impl ControlCenterState {
         let usb_sub = if self.usb_devices.is_empty() {
             t(
                 zh,
-                "通过 USB 数据线直连输入（当前未检测到 USB 设备）",
-                "Auto-trust USB adb reverse (No USB device connected)",
+                "通过 USB 数据线免密直连（当前未检测到 USB 设备）",
+                "Trust local USB adb reverse (no USB device detected)",
             )
             .to_string()
         } else if zh {
             format!(
-                "通过 USB 数据线直连输入 · 已连接: {} (免配对直连，延迟最低)",
+                "通过 USB 数据线免密直连 · 已连接: {}",
                 self.usb_devices.join(", ")
             )
         } else {
             format!(
-                "Auto-trust USB adb reverse · Connected: {} (trusted direct, lowest latency)",
+                "Trust local USB adb reverse · Connected: {}",
                 self.usb_devices.join(", ")
             )
         };
@@ -875,35 +913,37 @@ impl ControlCenterState {
             t(zh, "安全与配对", "Security & Pairing"),
             is_dark,
             column![
-                row![
-                    column![
-                        text(t(zh, "配对密钥", "Pairing Key")).size(15),
-                        row![
-                            text(self.config.auth_token.as_str())
-                                .font(self.mono_font)
-                                .size(13)
-                                .color(muted),
-                            text(format!("  ({exp_desc})"))
-                                .size(13)
-                                .color(muted),
-                        ]
-                        .align_y(Alignment::Center),
-                    ]
-                    .spacing(3)
-                    .width(Length::Fill),
+                column![
                     row![
-                        button(text(t(zh, "复制", "Copy")).size(13))
-                            .style(style::secondary_button_style)
-                            .padding([6, 12])
-                            .on_press(Message::CopyToken),
-                        button(text(t(zh, "重新生成", "Regenerate")).size(13))
-                            .style(style::secondary_button_style)
-                            .padding([6, 12])
-                            .on_press(Message::RegenerateToken),
+                        row![
+                            text(t(zh, "配对密钥", "Pairing Key")).size(15),
+                            text(format!("  ·  {exp_desc}")).size(12).color(muted),
+                        ]
+                        .align_y(Alignment::Center)
+                        .width(Length::Fill),
+                        row![
+                            button(text(t(zh, "扫码配对", "QR Pair")).size(13))
+                                .style(style::primary_button_style)
+                                .padding([6, 12])
+                                .on_press(Message::OpenQrPairing),
+                            button(text(t(zh, "复制", "Copy")).size(13))
+                                .style(style::secondary_button_style)
+                                .padding([6, 12])
+                                .on_press(Message::CopyToken),
+                            button(text(t(zh, "重新生成", "Regenerate")).size(13))
+                                .style(style::secondary_button_style)
+                                .padding([6, 12])
+                                .on_press(Message::RegenerateToken),
+                        ]
+                        .spacing(8),
                     ]
-                    .spacing(8),
+                    .align_y(Alignment::Center),
+                    text(self.config.auth_token.as_str())
+                        .font(self.mono_font)
+                        .size(11)
+                        .color(muted),
                 ]
-                .align_y(Alignment::Center),
+                .spacing(4),
                 row![
                     text(t(zh, "密钥有效期", "Key Expiration"))
                         .size(15)
@@ -932,8 +972,8 @@ impl ControlCenterState {
                         text(t(zh, "TLS 传输加密 (WSS)", "TLS Encryption (WSS)")).size(15),
                         text(t(
                             zh,
-                            "强制端到端加密（手机端与电脑端需保持一致）",
-                            "Require E2E TLS encryption (must match mobile app setting)",
+                            "启用 WSS 加密连接（需与手机端设置一致）",
+                            "Use encrypted WSS connection (must match mobile app)",
                         ))
                         .size(12)
                         .color(muted),
@@ -961,8 +1001,8 @@ impl ControlCenterState {
                 container(
                     text(t(
                         zh,
-                        "💡 当前访问控制为「仅限本机」最小权限模式（局域网不可连接，USB 可用）。若手机需通过 Wi-Fi 局域网输入，请在下方访问控制切换为「局域网白名单」。",
-                        "💡 Access control is 'Localhost Only' (LAN blocked, USB active). Switch to 'Whitelist' below if connecting via Wi-Fi.",
+                        "💡 当前为「仅限本机」模式（仅接收 USB 转发，局域网不可连）。如需 Wi-Fi 连接，请在下方访问控制切换为「白名单」。",
+                        "💡 Access control is 'Localhost Only' (USB active, LAN disabled). Switch to 'Whitelist' below for Wi-Fi.",
                     ))
                     .size(12)
                     .color(muted),
@@ -1261,10 +1301,101 @@ impl ControlCenterState {
 
         if let Some(modal) = &self.modal {
             let dialog: Element<'_, Message> = match modal {
+                ModalView::QrPairing(qr_data) => {
+                    let ips_str = if qr_data.ips.is_empty() {
+                        t(zh, "未检测到局域网 IP", "No LAN IP detected").to_string()
+                    } else {
+                        qr_data.ips.join(", ")
+                    };
+                    let tls_line = if qr_data.tls {
+                        match &qr_data.fingerprint_short {
+                            Some(fp) => {
+                                if zh {
+                                    format!("TLS 开启 · 指纹 {fp}")
+                                } else {
+                                    format!("TLS On · {fp}")
+                                }
+                            }
+                            None => t(zh, "TLS 开启", "TLS On").to_string(),
+                        }
+                    } else {
+                        t(zh, "TLS 已关闭 (明文 WS)", "TLS Off (Plain WS)").to_string()
+                    };
+
+                    let mut body = column![
+                        row![
+                            text(t(zh, "扫码配对手机端", "Scan QR Code to Pair"))
+                                .size(17),
+                            space::horizontal(),
+                            button(text(t(zh, "更换密钥", "New Key")).size(12))
+                                .style(style::secondary_button_style)
+                                .padding([5, 10])
+                                .on_press(Message::RegenerateToken),
+                            button(text(t(zh, "关闭", "Close")).size(12))
+                                .style(style::primary_button_style)
+                                .padding([5, 12])
+                                .on_press(Message::CloseModal),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                        container(build_qr_code_element(&qr_data.uri))
+                            .width(Length::Fill)
+                            .center_x(Length::Fill),
+                        text(t(
+                            zh,
+                            "在手机端「网络设置 -> 扫码配对」扫描即可写入主机、密钥与证书指纹。",
+                            "Scan with the mobile app under Network Settings -> Scan QR to save host, key, and TLS fingerprint.",
+                        ))
+                        .size(12)
+                        .color(muted),
+                        container(
+                            column![
+                                text(format!(
+                                    "{}: {}",
+                                    t(zh, "主机", "Host"),
+                                    qr_data.name
+                                ))
+                                .size(12),
+                                text(format!(
+                                    "{}: {ips_str}:{}",
+                                    t(zh, "地址", "Address"),
+                                    qr_data.port
+                                ))
+                                .font(self.mono_font)
+                                .size(12),
+                                text(tls_line).font(self.mono_font).size(11).color(muted),
+                            ]
+                            .spacing(4),
+                        )
+                        .style(style::subtle_box_style)
+                        .padding(10)
+                        .width(Length::Fill),
+                    ]
+                    .spacing(12);
+
+                    if self.config.access_control_mode == "localhost_only" {
+                        body = body.push(
+                            text(t(
+                                zh,
+                                "提示：当前访问控制为「仅限本机」，局域网扫码连接前请先改为「白名单」。",
+                                "Note: Access control is 'Localhost Only'. Switch to 'Whitelist' before LAN QR pairing.",
+                            ))
+                            .size(12)
+                            .color(style::warning_color(is_dark)),
+                        );
+                    }
+
+                    container(body)
+                        .style(style::card_style)
+                        .padding(18)
+                        .width(Length::Fixed(390.0))
+                        .into()
+                }
+
                 ModalView::Help => container(
                     column![
                         row![
-                            text(t(zh, "SilentInput 电脑伴侣 · 使用指引", "SilentInput · User Guide"))
+                            text(t(zh, "SilentInput 电脑端 · 使用指引", "SilentInput · User Guide"))
                                 .size(17),
                             space::horizontal(),
                             button(text(t(zh, "关闭", "Close")).size(12))
@@ -1278,14 +1409,14 @@ impl ControlCenterState {
                                 column![
                                     text(t(
                                         zh,
-                                        "🔌 1. USB 有线直连（推荐，延迟极低且免密）",
-                                        "🔌 1. USB Wired Connection (Recommended, Zero Latency)",
+                                        "🔌 1. USB 有线连接（默认免密）",
+                                        "🔌 1. USB Wired Connection",
                                     ))
                                     .size(14),
                                     text(t(
                                         zh,
-                                        "• 手机开启「开发者选项」并开启「USB 调试」。\n• 使用数据线连接手机与电脑，保持电脑后台服务运行。\n• 手机 App 连接模式选择「USB 有线」，无需输入电脑 IP 和密钥，即插即用自动信任直连！",
-                                        "• Enable Developer Options and USB Debugging on phone.\n• Connect phone to PC via USB cable.\n• Switch to 'USB Wired' on phone, auto connects without IP or pairing key!",
+                                        "• 手机开启「开发者选项」和「USB 调试」，用数据线连接电脑。\n• 手机端选择「USB 有线」即可自动通过 adb 转发连接，无需输入 IP 和密钥。",
+                                        "• Enable Developer Options and USB Debugging on your phone and plug in via USB.\n• Select 'USB Wired' on the phone to connect over adb forward without IP or key.",
                                     ))
                                     .size(12)
                                     .color(muted),
@@ -1295,8 +1426,8 @@ impl ControlCenterState {
                                         .size(14),
                                     text(t(
                                         zh,
-                                        "• 确保手机与电脑连接同一 Wi-Fi 网络（同一局域网）。\n• 在下方访问控制中将模式切换为「局域网白名单」（开箱支持 192.168.* 与 10.* 等网段）。\n• 在手机 App 中输入本页显示的电脑局域网 IP 与安全配对密钥即可连接。\n• 放行防火墙 53318/udp 可开启极速加密 UDP 鼠标通道（未放行会自动回退至 TCP）。",
-                                        "• Ensure phone and PC are on the same Wi-Fi network.\n• Set Access Control mode to 'Whitelist' below.\n• Enter the PC LAN IP and Pairing Key in mobile app to connect.\n• Allow 53318/udp in firewall for low-latency encrypted UDP mouse (auto-falls back to TCP).",
+                                        "• 确保手机与电脑在同一局域网，并将访问控制设为「白名单」。\n• 点击「扫码配对」用手机扫码，或手动输入本机 IP 与配对密钥。\n• 放行防火墙 53318/udp 可使用加密 UDP 鼠标通道（否则自动使用 TCP）。",
+                                        "• Ensure phone and PC are on the same LAN and set Access Control to 'Whitelist'.\n• Click 'QR Pair' to scan from the mobile app, or enter IP and Pairing Key manually.\n• Allow 53318/udp in your firewall for encrypted UDP mouse packets (falls back to TCP).",
                                     ))
                                     .size(12)
                                     .color(muted),
@@ -1306,19 +1437,19 @@ impl ControlCenterState {
                                         .size(14),
                                     text(t(
                                         zh,
-                                        "• 在系统蓝牙设置中，搜索此电脑名称并完成配对。\n• 手机端切换至「蓝牙模式」，点击此电脑即可连接作为外接键盘输入文字与按键。",
-                                        "• Pair phone with this PC in system Bluetooth settings.\n• Switch to 'Bluetooth' in mobile app to type directly.",
+                                        "• 在系统蓝牙设置中配对此电脑与手机。\n• 手机端切换至「蓝牙」标签页，选择此电脑即可输入。",
+                                        "• Pair the phone and PC in system Bluetooth settings.\n• Switch to 'Bluetooth' in the mobile app and select this PC.",
                                     ))
                                     .size(12)
                                     .color(muted),
 
                                     space::vertical().height(8),
-                                    text(t(zh, "🛡️ 4. 最小权限安全防护", "🛡️ 4. Security & Least Privilege"))
+                                    text(t(zh, "🛡️ 4. 访问控制与密钥", "🛡️ 4. Access Control & Keys"))
                                         .size(14),
                                     text(t(
                                         zh,
-                                        "• 出厂默认采用「仅限本机」最小权限原则，不暴露任何局域网端口，USB 走本机通道依然畅通。\n• 配对密钥默认 1 小时自动轮换过期，强化无线链路新鲜度。\n• 白名单网段支持通配符（如 192.168.*）与 CIDR 掩码（如 172.16.0.0/12）。输入非法网段将实时提示。",
-                                        "• Defaults to 'Localhost Only' for zero-trust protection while USB remains active.\n• Pairing key expires in 1 hour by default.\n• Whitelist supports wildcards (192.168.*) and CIDR (172.16.0.0/12).",
+                                        "• 默认使用「仅限本机」，仅接收本机 USB 转发，不接受局域网连接。\n• 配对密钥默认每 1 小时自动轮换一次，可按需调整。\n• 白名单支持通配符（192.168.*）和 CIDR（172.16.0.0/12）。",
+                                        "• Defaults to 'Localhost Only' so only local USB forwarding is accepted.\n• Pairing key rotates every 1 hour by default.\n• Whitelist supports wildcards (192.168.*) and CIDR (172.16.0.0/12).",
                                     ))
                                     .size(12)
                                     .color(muted),
@@ -1341,12 +1472,12 @@ impl ControlCenterState {
 
                 ModalView::ResetConfigConfirm => container(
                     column![
-                        text(t(zh, "确认恢复出厂默认设置？", "Reset to Factory Defaults?"))
+                        text(t(zh, "确认恢复默认设置？", "Reset to Factory Defaults?"))
                             .size(17),
                         text(t(
                             zh,
-                            "此操作将重置以下安全配置：\n• 访问控制模式：恢复为「仅限本机」（遵循最小权限原则）\n• 密钥有效期：恢复为「1小时」（最短有效，定时轮换）\n• 重新生成一套全新的安全配对密钥\n• 白名单网段：恢复为标准默认网段（127.0.0.1, 10.*, 192.168.*, 100.*, 172.16.0.0/12）\n• 自动重启后台输入服务使设置生效",
-                            "This will reset the following security settings:\n• Access mode: Localhost Only (least privilege)\n• Key expiration: 1 Hour (auto rotate)\n• Generate a new pairing key\n• Subnets: Standard whitelist\n• Automatically restart background daemon",
+                            "此操作将重置以下配置并重启服务：\n• 访问控制：仅限本机\n• 密钥有效期：1 小时\n• 生成新的 256 位配对密钥\n• 白名单恢复默认网段（127.0.0.1, 10.*, 192.168.*, 100.*, 172.16.0.0/12）",
+                            "This resets the following settings and restarts the service:\n• Access mode: Localhost Only\n• Key expiration: 1 hour\n• Generate a new 256-bit pairing key\n• Restore default whitelist subnets",
                         ))
                         .size(13)
                         .color(muted),
@@ -1526,6 +1657,43 @@ impl ControlCenterState {
     }
 }
 
+fn build_qr_code_element<'a>(uri: &str) -> Element<'a, Message> {
+    let Some((mods, dark_cells)) = get_qr_matrix(uri) else {
+        return text("QR error").size(12).into();
+    };
+    let target_px = 216.0_f32;
+    let module_px = (target_px / mods as f32).floor().clamp(3.0, 7.0);
+    let mut rows_col = column![].spacing(0);
+    for y in 0..mods {
+        let mut r = row![].spacing(0);
+        let mut x = 0;
+        while x < mods {
+            let is_dark = dark_cells[y * mods + x];
+            let mut run = 1;
+            while x + run < mods && dark_cells[y * mods + x + run] == is_dark {
+                run += 1;
+            }
+            let cell_style = if is_dark {
+                style::qr_dark_style
+            } else {
+                style::qr_light_style
+            };
+            r = r.push(
+                container(space().width(Length::Fill).height(Length::Fill))
+                    .width(Length::Fixed(run as f32 * module_px))
+                    .height(Length::Fixed(module_px))
+                    .style(cell_style),
+            );
+            x += run;
+        }
+        rows_col = rows_col.push(r);
+    }
+    container(rows_col)
+        .style(style::qr_paper_style)
+        .padding(14)
+        .into()
+}
+
 fn section_card<'a>(
     title: &'a str,
     dark: bool,
@@ -1577,7 +1745,9 @@ mod tests {
     use std::fs;
 
     use iced::theme::Mode;
-    use silentinput_core::config::{load_config_at, save_config_at, SilentInputConfig};
+    use silentinput_core::config::{
+        is_valid_strong_token, load_config_at, save_config_at, SilentInputConfig, STRONG_TOKEN_LEN,
+    };
     use silentinput_core::paths::SilentInputPaths;
 
     use crate::helpers::parse_ip_list;
@@ -1889,7 +2059,8 @@ mod tests {
         assert!(state.modal.is_none());
         assert_eq!(state.config.access_control_mode, "localhost_only");
         assert_eq!(state.config.token_expire_mode, "1h");
-        assert_eq!(state.config.auth_token.len(), 8);
+        assert_eq!(state.config.auth_token.len(), STRONG_TOKEN_LEN);
+        assert!(is_valid_strong_token(&state.config.auth_token));
         assert!(state.whitelist_input.contains("127.0.0.1"));
         assert!(state.whitelist_input.contains("172.16.0.0/12"));
         assert!(state.toast.is_some());
@@ -1899,6 +2070,29 @@ mod tests {
         assert_eq!(disk_cfg.access_control_mode, "localhost_only");
         assert_eq!(disk_cfg.token_expire_mode, "1h");
         assert_eq!(disk_cfg.auth_token, state.config.auth_token);
+
+        // 4. Open QR Pairing modal and regenerate key live inside it
+        let old_token = state.config.auth_token.clone();
+        let _ = state.update(Message::OpenQrPairing);
+        let old_uri = match &state.modal {
+            Some(ModalView::QrPairing(qr)) => {
+                assert!(qr.uri.starts_with("silentinput://pair?v=1&"));
+                assert!(qr.uri.contains(&old_token));
+                qr.uri.clone()
+            }
+            other => panic!("expected QrPairing modal, got {other:?}"),
+        };
+        let _ = state.update(Message::RegenerateToken);
+        assert_ne!(state.config.auth_token, old_token);
+        match &state.modal {
+            Some(ModalView::QrPairing(qr)) => {
+                assert_ne!(qr.uri, old_uri);
+                assert!(qr.uri.contains(&state.config.auth_token));
+            }
+            other => panic!("expected updated QrPairing modal, got {other:?}"),
+        }
+        let _ = state.update(Message::CloseModal);
+        assert!(state.modal.is_none());
 
         let _ = fs::remove_dir_all(&paths.config_dir);
     }

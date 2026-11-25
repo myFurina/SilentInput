@@ -78,3 +78,100 @@ pub fn ensure_certificates_at(paths: &SilentInputPaths) -> Result<(PathBuf, Path
 pub fn ensure_certificates() -> Result<(PathBuf, PathBuf), String> {
     ensure_certificates_at(&SilentInputPaths::system())
 }
+
+fn decode_base64_std(input: &str) -> Option<Vec<u8>> {
+    let clean: Vec<u8> = input
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    if clean.is_empty() || !clean.len().is_multiple_of(4) {
+        return None;
+    }
+    let val = |c: u8| -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let mut out = Vec::with_capacity((clean.len() / 4) * 3);
+    for (idx, chunk) in clean.chunks(4).enumerate() {
+        let is_last = (idx + 1) * 4 == clean.len();
+        let a = val(chunk[0])?;
+        let b = val(chunk[1])?;
+        let pad2 = chunk[2] == b'=';
+        let pad3 = chunk[3] == b'=';
+        if (pad2 || pad3) && !is_last {
+            return None;
+        }
+        if pad2 && !pad3 {
+            return None;
+        }
+        let c = if pad2 { 0 } else { val(chunk[2])? };
+        let d = if pad3 { 0 } else { val(chunk[3])? };
+        let t = (a << 18) | (b << 12) | (c << 6) | d;
+        out.push(((t >> 16) & 0xff) as u8);
+        if !pad2 {
+            out.push(((t >> 8) & 0xff) as u8);
+        }
+        if !pad3 {
+            out.push((t & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
+pub fn cert_pem_sha256_hex(pem_text: &str) -> Option<String> {
+    let mut in_cert = false;
+    let mut b64 = String::new();
+    for line in pem_text.lines() {
+        let trimmed = line.trim();
+        if trimmed == "-----BEGIN CERTIFICATE-----" {
+            in_cert = true;
+            continue;
+        }
+        if trimmed == "-----END CERTIFICATE-----" {
+            break;
+        }
+        if in_cert {
+            b64.push_str(trimmed);
+        }
+    }
+    if b64.is_empty() {
+        return None;
+    }
+    let der = decode_base64_std(&b64)?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, &der);
+    let mut hex = String::with_capacity(64);
+    for byte in digest.as_ref() {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    Some(hex)
+}
+
+pub fn get_cert_sha256_hex_at(paths: &SilentInputPaths) -> Option<String> {
+    let pem = fs::read_to_string(paths.cert_file()).ok()?;
+    cert_pem_sha256_hex(&pem)
+}
+
+pub fn format_short_fingerprint(hex: &str) -> String {
+    let clean: String = hex
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(16)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if clean.is_empty() {
+        return String::new();
+    }
+    clean
+        .as_bytes()
+        .chunks(4)
+        .map(|c| std::str::from_utf8(c).unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join(":")
+}

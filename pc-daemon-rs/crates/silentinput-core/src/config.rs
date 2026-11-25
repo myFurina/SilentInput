@@ -108,6 +108,61 @@ pub fn unix_timestamp_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+pub const TOKEN_PREFIX: &str = "si_";
+pub const STRONG_TOKEN_LEN: usize = 46;
+
+pub fn encode_base64url_nopad(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[(triple >> 18) & 0x3f] as char);
+        out.push(TABLE[(triple >> 12) & 0x3f] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(triple >> 6) & 0x3f] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[triple & 0x3f] as char);
+        }
+    }
+    out
+}
+
+pub fn generate_pairing_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    format!("{TOKEN_PREFIX}{}", encode_base64url_nopad(&bytes))
+}
+
+pub fn is_valid_strong_token(token: &str) -> bool {
+    let t = token.trim();
+    let Some(body) = t.strip_prefix(TOKEN_PREFIX) else {
+        return false;
+    };
+    if body.len() != 43 {
+        return false;
+    }
+    let bytes = body.as_bytes();
+    if !bytes
+        .iter()
+        .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'))
+    {
+        return false;
+    }
+    let last_val = match bytes[42] {
+        b'A'..=b'Z' => bytes[42] - b'A',
+        b'a'..=b'z' => bytes[42] - b'a' + 26,
+        b'0'..=b'9' => bytes[42] - b'0' + 52,
+        b'-' => 62,
+        b'_' => 63,
+        _ => return false,
+    };
+    (last_val & 0x03) == 0
+}
+
 pub fn generate_token_hex(byte_len: usize) -> String {
     let mut bytes = vec![0u8; byte_len];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -222,7 +277,7 @@ fn check_and_rotate_token_locked(paths: &SilentInputPaths, config: &mut SilentIn
     let now = unix_timestamp_secs();
 
     let mut need_new = false;
-    if config.auth_token.is_empty() {
+    if !is_valid_strong_token(&config.auth_token) {
         need_new = true;
     } else if expire_sec > 0 {
         let created_at = config.token_created_at;
@@ -232,7 +287,7 @@ fn check_and_rotate_token_locked(paths: &SilentInputPaths, config: &mut SilentIn
     }
 
     if need_new {
-        config.auth_token = generate_token_hex(4);
+        config.auth_token = generate_pairing_token();
         config.token_created_at = now;
         let _ = save_config_unlocked(paths, config);
         return true;
@@ -288,7 +343,7 @@ pub fn save_config_at(paths: &SilentInputPaths, config: &SilentInputConfig) -> s
 
 pub fn regenerate_token_at(paths: &SilentInputPaths) -> String {
     let mut config = load_config_at(paths);
-    let new_token = generate_token_hex(4);
+    let new_token = generate_pairing_token();
     config.auth_token = new_token.clone();
     config.token_created_at = unix_timestamp_secs();
     let _ = save_config_at(paths, &config);

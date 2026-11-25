@@ -100,6 +100,32 @@ pub fn card_style(theme: &Theme) -> container::Style {
     }
 }
 
+pub fn qr_paper_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::WHITE)),
+        border: Border {
+            color: BORDER_HAIRLINE,
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+pub fn qr_dark_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb(0.06, 0.07, 0.09))),
+        ..Default::default()
+    }
+}
+
+pub fn qr_light_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::WHITE)),
+        ..Default::default()
+    }
+}
+
 pub fn subtle_box_style(theme: &Theme) -> container::Style {
     let dark = is_dark_theme(theme);
     container::Style {

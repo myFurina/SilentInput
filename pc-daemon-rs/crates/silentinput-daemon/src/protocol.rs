@@ -146,7 +146,10 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
         }
 
         let token = map.get("token").and_then(|v| v.as_str()).unwrap_or("");
-        if constant_time_token_eq(token, &ctx.config.auth_token) {
+        if silentinput_core::config::is_valid_strong_token(token)
+            && silentinput_core::config::is_valid_strong_token(&ctx.config.auth_token)
+            && constant_time_token_eq(token, &ctx.config.auth_token)
+        {
             ctx.auth_limiter.clear(ctx.peer_ip);
             println!("[SilentInput] Authentication SUCCESS via auth token");
             let mut reply = json!({

@@ -15,10 +15,19 @@ import com.silentinput.app.model.ImeSwitchShortcut
 import com.silentinput.app.model.InputTransport
 import com.silentinput.app.model.MouseAction
 import com.silentinput.app.model.MouseButton
+import com.silentinput.app.model.PairingQrPayload
+import com.silentinput.app.model.PairingQrParser
+import com.silentinput.app.model.PairingTokenValidator
+import com.silentinput.app.model.SavedLanHost
+import com.silentinput.app.model.SavedLanHostsStore
 import com.silentinput.app.model.SendTargetMode
 import com.silentinput.app.network.NetworkClient
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,7 +40,11 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
+import java.net.InetSocketAddress
+import java.net.Socket
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -43,6 +56,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_SERVER_IP = "server_ip"
         private const val KEY_LAN_IP = "lan_ip"
         private const val KEY_AUTH_TOKEN = "auth_token"
+        private const val KEY_SAVED_LAN_HOSTS = "saved_lan_hosts_json"
         private const val KEY_TLS_ENCRYPTION = "tls_encryption"
         private const val KEY_LAST_BT_ADDRESS = "last_bt_device_address"
         private const val KEY_BT_MANUAL_DISCONNECTED = "bt_manual_disconnected"
@@ -90,11 +104,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     val lanIp: StateFlow<String> = _lanIp.asStateFlow()
 
-    private val _savedAuthToken = MutableStateFlow(prefs.getString(KEY_AUTH_TOKEN, "") ?: "")
+    private val _savedAuthToken = MutableStateFlow(
+        PairingTokenValidator.sanitizeMigratedToken(prefs.getString(KEY_AUTH_TOKEN, ""))
+    )
     val savedAuthToken: StateFlow<String> = _savedAuthToken.asStateFlow()
 
     private val _isTlsEnabled = MutableStateFlow(prefs.getBoolean(KEY_TLS_ENCRYPTION, true))
     val isTlsEnabled: StateFlow<Boolean> = _isTlsEnabled.asStateFlow()
+
+    private val _savedLanHosts = MutableStateFlow(loadAndMigrateSavedLanHosts())
+    val savedLanHosts: StateFlow<List<SavedLanHost>> = _savedLanHosts.asStateFlow()
 
     private val _hasBtPermission = MutableStateFlow(false)
     val hasBtPermission: StateFlow<Boolean> = _hasBtPermission.asStateFlow()
@@ -240,6 +259,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     init {
+        val rawStoredToken = prefs.getString(KEY_AUTH_TOKEN, "").orEmpty()
+        if (rawStoredToken.isNotBlank() && _savedAuthToken.value.isEmpty()) {
+            prefs.edit().putString(KEY_AUTH_TOKEN, "").apply()
+        }
         networkClient.serverIp = _activeServerIp.value
         networkClient.serverPort = NetworkClient.DEFAULT_PORT
         networkClient.authToken = if (_connectionMode.value == ConnectionMode.USB.wireValue) "" else _savedAuthToken.value
@@ -255,6 +278,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             btClient.pasteQueueBusyEvent.collect {
                 _userToastEvent.tryEmit { strings -> strings.txtQueueBusyToast }
+            }
+        }
+        viewModelScope.launch {
+            isNetReady.collectLatest { ready ->
+                if (ready && _connectionMode.value == ConnectionMode.LAN.wireValue) {
+                    val endpoint = _activeServerIp.value.trim()
+                    if (endpoint.isNotEmpty() && !NetworkClient.isLoopbackHost(endpoint)) {
+                        updateSavedLanHosts(
+                            SavedLanHostsStore.upsert(
+                                hosts = _savedLanHosts.value,
+                                name = null,
+                                endpoint = endpoint,
+                                token = _savedAuthToken.value,
+                                tlsEnabled = _isTlsEnabled.value,
+                                nowMs = System.currentTimeMillis(),
+                                markConnected = true
+                            )
+                        )
+                    }
+                }
             }
         }
         viewModelScope.launch {
@@ -437,7 +480,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun connectLan(ip: String, token: String, tlsEnabled: Boolean) {
+    fun connectLan(ip: String, token: String, tlsEnabled: Boolean, hostName: String? = null) {
         val cleanIp = ip.trim()
         val cleanToken = token.trim()
         if (cleanIp.isEmpty()) {
@@ -457,13 +500,124 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             setLanInputError { it.netErrEmptyToken }
             return
         }
+        if (!PairingTokenValidator.isStrongToken(cleanToken)) {
+            setLanInputError { it.netErrInvalidTokenFormat }
+            return
+        }
 
+        updateSavedLanHosts(
+            SavedLanHostsStore.upsert(
+                hosts = _savedLanHosts.value,
+                name = hostName,
+                endpoint = cleanIp,
+                token = cleanToken,
+                tlsEnabled = tlsEnabled,
+                nowMs = System.currentTimeMillis(),
+                markConnected = true
+            )
+        )
         applyNetworkConnection(
             mode = ConnectionMode.LAN,
             serverIp = cleanIp,
             authToken = cleanToken,
             tlsEnabled = tlsEnabled
         )
+    }
+
+    fun toggleSavedHostFavorite(id: String) {
+        updateSavedLanHosts(SavedLanHostsStore.toggleFavorite(_savedLanHosts.value, id))
+    }
+
+    fun renameSavedHost(id: String, newName: String) {
+        updateSavedLanHosts(SavedLanHostsStore.rename(_savedLanHosts.value, id, newName))
+    }
+
+    fun deleteSavedHost(id: String) {
+        updateSavedLanHosts(SavedLanHostsStore.remove(_savedLanHosts.value, id))
+    }
+
+    fun notifyUserToast(formatter: (AppStrings) -> String) {
+        _userToastEvent.tryEmit(formatter)
+    }
+
+    fun probeReachableHostIps(
+        ips: List<String>,
+        port: Int,
+        onResult: (List<String>) -> Unit
+    ) {
+        viewModelScope.launch {
+            val reachable = withContext(Dispatchers.IO) {
+                coroutineScope {
+                    ips.map { ip ->
+                        async {
+                            val ok = withTimeoutOrNull(700L) {
+                                runCatching {
+                                    Socket().use { socket ->
+                                        socket.connect(InetSocketAddress(ip, port), 500)
+                                        true
+                                    }
+                                }.getOrDefault(false)
+                            } ?: false
+                            if (ok) ip else null
+                        }
+                    }.awaitAll().filterNotNull()
+                }
+            }
+            onResult(reachable)
+        }
+    }
+
+    fun applyScannedPairing(payload: PairingQrPayload, chosenIp: String): String {
+        val endpoint = PairingQrParser.formatEndpoint(chosenIp, payload.port, NetworkClient.DEFAULT_PORT)
+        val fp = payload.fingerprint
+        if (payload.tls && !fp.isNullOrBlank()) {
+            for (candidateIp in (payload.ips + chosenIp).distinct()) {
+                networkClient.pinCertificateFingerprint(candidateIp, payload.port, fp)
+            }
+        }
+        updateSavedLanHosts(
+            SavedLanHostsStore.upsert(
+                hosts = _savedLanHosts.value,
+                name = payload.name,
+                endpoint = endpoint,
+                token = payload.token,
+                tlsEnabled = payload.tls,
+                nowMs = System.currentTimeMillis(),
+                markConnected = true
+            )
+        )
+        applyNetworkConnection(
+            mode = ConnectionMode.LAN,
+            serverIp = endpoint,
+            authToken = payload.token,
+            tlsEnabled = payload.tls
+        )
+        notifyUserToast { strings -> strings.lanQrPairedToast(payload.name, endpoint) }
+        return endpoint
+    }
+
+    private fun loadAndMigrateSavedLanHosts(): List<SavedLanHost> {
+        val existing = SavedLanHostsStore.fromJson(prefs.getString(KEY_SAVED_LAN_HOSTS, null))
+        if (existing.isNotEmpty()) {
+            return existing
+        }
+        val legacyIp = prefs.getString(
+            KEY_LAN_IP,
+            prefs.getString(KEY_SERVER_IP, "")?.takeIf { it != "127.0.0.1" } ?: ""
+        )
+        val legacyToken = prefs.getString(KEY_AUTH_TOKEN, "")
+        val legacyTls = prefs.getBoolean(KEY_TLS_ENCRYPTION, true)
+        val migrated = SavedLanHostsStore.migrateLegacyHost(existing, legacyIp, legacyToken, legacyTls)
+        if (migrated.isNotEmpty()) {
+            prefs.edit().putString(KEY_SAVED_LAN_HOSTS, SavedLanHostsStore.toJson(migrated)).apply()
+        }
+        return migrated
+    }
+
+    private fun updateSavedLanHosts(hosts: List<SavedLanHost>) {
+        val sorted = SavedLanHostsStore.sorted(hosts)
+        _savedLanHosts.value = sorted
+        prefs.edit().putString(KEY_SAVED_LAN_HOSTS, SavedLanHostsStore.toJson(sorted)).apply()
     }
 
     fun disconnectNetwork() {

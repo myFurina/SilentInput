@@ -7,24 +7,35 @@ import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.silentinput.app.model.ConnectionStatusFormatter
 import com.silentinput.app.model.ResolvedLanguage
+import com.silentinput.app.model.SavedLanHost
 import com.silentinput.app.network.NetworkClient
 import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.ui.theme.pressScale
@@ -87,6 +98,15 @@ internal fun LanConnectionTab(
     onIpChange: (String) -> Unit,
     token: String,
     onTokenChange: (String) -> Unit,
+    savedHosts: List<SavedLanHost> = emptyList(),
+    activeServerIp: String = "",
+    onSelectSavedHost: (SavedLanHost) -> Unit = {},
+    onToggleSavedHostFavorite: (String) -> Unit = {},
+    onRequestRenameSavedHost: (SavedLanHost) -> Unit = {},
+    onDeleteSavedHost: (String) -> Unit = {},
+    onScanQrClick: () -> Unit = {},
+    isProbingQrIps: Boolean = false,
+    cameraPermissionDenied: Boolean = false,
     isTlsEnabled: Boolean,
     onToggleTls: (Boolean) -> Unit,
     isLanConnected: Boolean,
@@ -110,6 +130,64 @@ internal fun LanConnectionTab(
     val strings = LocalAppStrings.current
     var tokenVisible by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        OutlinedButton(
+            onClick = onScanQrClick,
+            enabled = !isProbingQrIps,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            if (isProbingQrIps) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(strings.lanQrProbingIp)
+            } else {
+                Icon(
+                    imageVector = Icons.Default.QrCodeScanner,
+                    contentDescription = strings.lanQrScanBtn,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(strings.lanQrScanBtn)
+            }
+        }
+
+        if (cameraPermissionDenied) {
+            Text(
+                text = strings.lanQrCameraDenied,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+
+        AnimatedVisibility(
+            visible = savedHosts.isNotEmpty(),
+            enter = SilentMotion.expandSectionTransition(),
+            exit = SilentMotion.collapseSectionTransition()
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = strings.lanSavedHostsTitle,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                savedHosts.forEach { host ->
+                    val isActive = isLanConnected &&
+                        activeServerIp.trim().equals(host.endpoint.trim(), ignoreCase = true)
+                    SavedLanHostCard(
+                        host = host,
+                        isActive = isActive,
+                        onSelect = { onSelectSavedHost(host) },
+                        onToggleFavorite = { onToggleSavedHostFavorite(host.id) },
+                        onRequestRename = { onRequestRenameSavedHost(host) },
+                        onDelete = { onDeleteSavedHost(host.id) }
+                    )
+                }
+            }
+        }
+
         OutlinedTextField(
             value = ip,
             onValueChange = onIpChange,
@@ -296,5 +374,117 @@ private fun NetworkConnectButton(
                 else -> strings.btnConnect
             }
         )
+    }
+}
+
+@Composable
+private fun SavedLanHostCard(
+    host: SavedLanHost,
+    isActive: Boolean,
+    onSelect: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onRequestRename: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val strings = LocalAppStrings.current
+    val shape = RoundedCornerShape(10.dp)
+    val bgColor = if (isActive) {
+        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+    }
+    val borderColor = if (isActive) {
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+    } else {
+        MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+    }
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .clickable(onClick = onSelect),
+        shape = shape,
+        color = bgColor,
+        border = BorderStroke(1.dp, borderColor)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onToggleFavorite,
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    imageVector = if (host.isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+                    contentDescription = if (host.isFavorite) strings.lanSavedHostStarRemoveDesc else strings.lanSavedHostStarAddDesc,
+                    tint = if (host.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = host.name,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (isActive) {
+                        Text(
+                            text = strings.lanSavedHostActiveTag,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else if (host.token.isBlank()) {
+                        Text(
+                            text = strings.lanSavedHostNeedsKeyTag,
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+                Text(
+                    text = if (host.tlsEnabled) "${host.endpoint} · WSS" else "${host.endpoint} · WS",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            IconButton(
+                onClick = onRequestRename,
+                modifier = Modifier.size(30.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Edit,
+                    contentDescription = strings.lanSavedHostRenameDesc,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+            IconButton(
+                onClick = onDelete,
+                modifier = Modifier.size(30.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.DeleteOutline,
+                    contentDescription = strings.lanSavedHostDeleteDesc,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
     }
 }
