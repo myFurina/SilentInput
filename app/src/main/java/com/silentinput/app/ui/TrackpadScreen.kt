@@ -1,31 +1,33 @@
 package com.silentinput.app.ui
 
 import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.pointerInteropFilter
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.silentinput.app.model.TrackpadAccumulator
+import com.silentinput.app.model.TrackpadGestureProcessor
 import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.ui.theme.pressScale
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Locale
-import kotlin.math.hypot
 
 @Composable
 fun TrackpadScreen(
@@ -228,6 +230,7 @@ fun TrackpadScreen(
     }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun TrackpadSurface(
     sensitivity: Float,
@@ -241,6 +244,8 @@ fun TrackpadSurface(
     hintText: String? = null
 ) {
     val view = LocalView.current
+    val density = LocalDensity.current.density
+    val coroutineScope = rememberCoroutineScope()
     val resolvedHintText = hintText ?: LocalAppStrings.current.tpSurfaceStandaloneDefaultHint
 
     val currentSensitivity by rememberUpdatedState(sensitivity)
@@ -261,6 +266,20 @@ fun TrackpadSurface(
         currentOnMouseClick(btnStr)
     }
 
+    val gestureProcessor = remember { TrackpadGestureProcessor(TrackpadAccumulator()) }
+    val longPressJobState = remember { mutableStateOf<Job?>(null) }
+    val pointerIdsBuf = remember { IntArray(10) }
+    val pointerXsBuf = remember { FloatArray(10) }
+    val pointerYsBuf = remember { FloatArray(10) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            longPressJobState.value?.cancel()
+            longPressJobState.value = null
+            gestureProcessor.reset()
+        }
+    }
+
     val borderWidth by animateDpAsState(
         targetValue = if (isLeftHeld) 2.dp else 1.dp,
         animationSpec = tween(200),
@@ -278,64 +297,127 @@ fun TrackpadSurface(
 
     Card(
         modifier = modifier
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onTap = { dispatchClick("left") },
-                    onLongPress = { dispatchClick("right") }
-                )
-            }
-            .pointerInput(Unit) {
-                val accumulator = TrackpadAccumulator()
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    accumulator.reset()
-                    var totalDragDist = 0f
-                    var gestureStarted = false
-                    var hadMultiTouch = false
-                    val touchSlop = viewConfiguration.touchSlop
-
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val pressedChanges = event.changes.filter { it.pressed }
-                        if (pressedChanges.isEmpty()) break
-
-                        val sens = currentSensitivity
-                        if (pressedChanges.size >= 2) {
-                            hadMultiTouch = true
-                            gestureStarted = true
-                            val avgDy = pressedChanges.map { it.positionChange().y }.average().toFloat()
-                            pressedChanges.forEach { it.consume() }
-                            val intWheel = accumulator.addScrollDelta(
-                                avgDy = avgDy,
-                                sensitivity = sens,
-                                naturalScrolling = currentNaturalScrolling
-                            )
-                            if (intWheel != 0) {
-                                currentOnMouseScroll(intWheel.toFloat())
-                            }
-                        } else {
-                            val change = pressedChanges[0]
-                            if (hadMultiTouch) {
-                                // Ignore residual single-finger lift after a two-finger scroll
-                                change.consume()
-                                continue
-                            }
-                            val delta = change.positionChange()
-                            if (!gestureStarted) {
-                                totalDragDist += hypot(delta.x, delta.y)
-                                if (totalDragDist > touchSlop) {
-                                    gestureStarted = true
-                                }
-                            }
-                            if (gestureStarted) {
-                                change.consume()
-                                val (intX, intY) = accumulator.addMoveDelta(delta.x, delta.y, sens)
-                                if (intX != 0 || intY != 0) {
-                                    currentOnMouseMove(intX.toFloat(), intY.toFloat())
-                                }
+            .pointerInteropFilter { event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        // Bypass VSync touch batching so 120Hz/240Hz digitizer events fire immediately
+                        view.requestUnbufferedDispatch(event)
+                        longPressJobState.value?.cancel()
+                        gestureProcessor.onPrimaryDown(
+                            pointerId = event.getPointerId(0),
+                            x = event.getX(0),
+                            y = event.getY(0),
+                            timeMs = event.eventTime
+                        )
+                        longPressJobState.value = coroutineScope.launch {
+                            delay(420L)
+                            if (gestureProcessor.onLongPressTimeout() == TrackpadGestureProcessor.TapAction.RIGHT_CLICK) {
+                                dispatchClick("right")
                             }
                         }
+                        true
                     }
+                    MotionEvent.ACTION_POINTER_DOWN -> {
+                        longPressJobState.value?.cancel()
+                        longPressJobState.value = null
+                        val idx = event.actionIndex
+                        gestureProcessor.onPointerDown(
+                            pointerId = event.getPointerId(idx),
+                            x = event.getX(idx),
+                            y = event.getY(idx)
+                        )
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val pCount = event.pointerCount.coerceAtMost(pointerIdsBuf.size)
+                        for (p in 0 until pCount) {
+                            pointerIdsBuf[p] = event.getPointerId(p)
+                        }
+                        var sumDx = 0
+                        var sumDy = 0
+                        var sumWheel = 0
+                        val sens = currentSensitivity
+                        val natural = currentNaturalScrolling
+
+                        val histSize = event.historySize
+                        for (h in 0 until histSize) {
+                            for (p in 0 until pCount) {
+                                pointerXsBuf[p] = event.getHistoricalX(p, h)
+                                pointerYsBuf[p] = event.getHistoricalY(p, h)
+                            }
+                            val out = gestureProcessor.onMoveSample(
+                                pointerIds = pointerIdsBuf,
+                                xs = pointerXsBuf,
+                                ys = pointerYsBuf,
+                                count = pCount,
+                                sampleTimeMs = event.getHistoricalEventTime(h),
+                                density = density,
+                                sensitivity = sens,
+                                naturalScrolling = natural
+                            )
+                            if (out.dragStartedNow) {
+                                longPressJobState.value?.cancel()
+                                longPressJobState.value = null
+                            }
+                            sumDx += out.moveDx
+                            sumDy += out.moveDy
+                            sumWheel += out.wheelDelta
+                        }
+
+                        for (p in 0 until pCount) {
+                            pointerXsBuf[p] = event.getX(p)
+                            pointerYsBuf[p] = event.getY(p)
+                        }
+                        val out = gestureProcessor.onMoveSample(
+                            pointerIds = pointerIdsBuf,
+                            xs = pointerXsBuf,
+                            ys = pointerYsBuf,
+                            count = pCount,
+                            sampleTimeMs = event.eventTime,
+                            density = density,
+                            sensitivity = sens,
+                            naturalScrolling = natural
+                        )
+                        if (out.dragStartedNow) {
+                            longPressJobState.value?.cancel()
+                            longPressJobState.value = null
+                        }
+                        sumDx += out.moveDx
+                        sumDy += out.moveDy
+                        sumWheel += out.wheelDelta
+
+                        if (sumWheel != 0) {
+                            currentOnMouseScroll(sumWheel.toFloat())
+                        }
+                        if (sumDx != 0 || sumDy != 0) {
+                            currentOnMouseMove(sumDx.toFloat(), sumDy.toFloat())
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_POINTER_UP -> {
+                        val idx = event.actionIndex
+                        gestureProcessor.onPointerUp(
+                            pointerId = event.getPointerId(idx),
+                            x = event.getX(idx),
+                            y = event.getY(idx)
+                        )
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        longPressJobState.value?.cancel()
+                        longPressJobState.value = null
+                        if (gestureProcessor.onAllUp(event.eventTime) == TrackpadGestureProcessor.TapAction.LEFT_CLICK) {
+                            dispatchClick("left")
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        longPressJobState.value?.cancel()
+                        longPressJobState.value = null
+                        gestureProcessor.reset()
+                        true
+                    }
+                    else -> true
                 }
             },
         shape = RoundedCornerShape(16.dp),

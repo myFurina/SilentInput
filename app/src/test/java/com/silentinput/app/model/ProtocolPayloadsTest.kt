@@ -93,6 +93,19 @@ class ProtocolPayloadsTest {
             ProtocolPayloads.parseServerMessage("""{"type":"auth_result","status":"ok","unicode_direct_typing":false}""")
         )
         assertEquals(
+            ServerMessage.AuthResult(
+                status = "ok",
+                message = "Authenticated",
+                unicodeDirectTyping = true,
+                udpPort = 53318,
+                udpSessionId = "0123456789abcdef",
+                udpKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            ),
+            ProtocolPayloads.parseServerMessage(
+                """{"type":"auth_result","status":"ok","message":"Authenticated","unicode_direct_typing":true,"udp_port":53318,"udp_session_id":"0123456789abcdef","udp_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}"""
+            )
+        )
+        assertEquals(
             ServerMessage.AuthResult("error", "Too many \"failed\" attempts", null),
             ProtocolPayloads.parseServerMessage("""{"type":"auth_result","status":"error","message":"Too many \"failed\" attempts"}""")
         )

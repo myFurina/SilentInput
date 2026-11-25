@@ -3,11 +3,13 @@ use std::time::Duration;
 
 use evdev::{EventType, InputEvent, Key, RelativeAxisType};
 use serde_json::{json, Map, Value};
+use silentinput_core::acl::is_localhost_ip;
 use silentinput_core::config::{constant_time_token_eq, unix_timestamp_secs, SilentInputConfig};
 use silentinput_core::keymap::{lookup_char, normalize_line_endings};
 
 use crate::auth_limiter::{AuthRateLimiter, AUTH_LOCKOUT_SECS};
 use crate::input::InputController;
+use crate::udp_mouse::UdpSessionRegistry;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MAX_PENDING_PASTE_TASKS: usize = 16;
@@ -17,6 +19,18 @@ pub struct ProcessOutcome {
     pub authenticated: bool,
     pub should_close: bool,
     pub reply: Option<String>,
+    pub udp_session_id: Option<u64>,
+}
+
+impl ProcessOutcome {
+    fn plain(authenticated: bool, should_close: bool, reply: Option<String>) -> Self {
+        Self {
+            authenticated,
+            should_close,
+            reply,
+            udp_session_id: None,
+        }
+    }
 }
 
 pub fn safe_round_int(value: Option<&Value>) -> i32 {
@@ -73,32 +87,21 @@ pub struct SessionContext<'a> {
     pub input: Arc<dyn InputController>,
     pub paste_lock: Arc<tokio::sync::Mutex<()>>,
     pub paste_semaphore: Arc<tokio::sync::Semaphore>,
+    pub udp_registry: Option<&'a UdpSessionRegistry>,
 }
 
 pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessOutcome {
     let trimmed = msg_str.trim();
     if trimmed.is_empty() || !trimmed.starts_with('{') {
-        return ProcessOutcome {
-            authenticated: ctx.authenticated,
-            should_close: false,
-            reply: None,
-        };
+        return ProcessOutcome::plain(ctx.authenticated, false, None);
     }
 
     let Ok(Value::Object(map)) = serde_json::from_str::<Value>(trimmed) else {
-        return ProcessOutcome {
-            authenticated: ctx.authenticated,
-            should_close: false,
-            reply: None,
-        };
+        return ProcessOutcome::plain(ctx.authenticated, false, None);
     };
 
     let Some(msg_type) = map.get("type").and_then(|v| v.as_str()) else {
-        return ProcessOutcome {
-            authenticated: ctx.authenticated,
-            should_close: false,
-            reply: None,
-        };
+        return ProcessOutcome::plain(ctx.authenticated, false, None);
     };
 
     if msg_type == "ping" {
@@ -108,11 +111,7 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
         if let Some(t_val) = map.get("t") {
             resp.insert("t".to_string(), t_val.clone());
         }
-        return ProcessOutcome {
-            authenticated: ctx.authenticated,
-            should_close: false,
-            reply: Some(Value::Object(resp).to_string()),
-        };
+        return ProcessOutcome::plain(ctx.authenticated, false, Some(Value::Object(resp).to_string()));
     }
 
     if msg_type == "get_status" {
@@ -123,11 +122,7 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
             "access_control_mode": ctx.config.access_control_mode,
             "unicode_direct_typing": ctx.input.is_graphical_session(),
         });
-        return ProcessOutcome {
-            authenticated: ctx.authenticated,
-            should_close: false,
-            reply: Some(reply.to_string()),
-        };
+        return ProcessOutcome::plain(ctx.authenticated, false, Some(reply.to_string()));
     }
 
     if msg_type == "auth" {
@@ -138,11 +133,7 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                 "message": "Authenticated",
                 "unicode_direct_typing": ctx.input.is_graphical_session(),
             });
-            return ProcessOutcome {
-                authenticated: true,
-                should_close: false,
-                reply: Some(reply.to_string()),
-            };
+            return ProcessOutcome::plain(true, false, Some(reply.to_string()));
         }
 
         if ctx.auth_limiter.is_locked(ctx.peer_ip) {
@@ -151,27 +142,35 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                 "status": "fail",
                 "message": "Too many failed attempts. Try again later.",
             });
-            return ProcessOutcome {
-                authenticated: false,
-                should_close: true,
-                reply: Some(reply.to_string()),
-            };
+            return ProcessOutcome::plain(false, true, Some(reply.to_string()));
         }
 
         let token = map.get("token").and_then(|v| v.as_str()).unwrap_or("");
         if constant_time_token_eq(token, &ctx.config.auth_token) {
             ctx.auth_limiter.clear(ctx.peer_ip);
             println!("[SilentInput] Authentication SUCCESS via auth token");
-            let reply = json!({
+            let mut reply = json!({
                 "type": "auth_result",
                 "status": "ok",
                 "message": "Authenticated",
                 "unicode_direct_typing": ctx.input.is_graphical_session(),
             });
+            let mut created_udp_id = None;
+            if !is_localhost_ip(ctx.peer_ip) {
+                if let Some(creds) = ctx.udp_registry.and_then(|r| r.create_session(ctx.peer_ip)) {
+                    if let Some(obj) = reply.as_object_mut() {
+                        obj.insert("udp_port".to_string(), json!(creds.port));
+                        obj.insert("udp_session_id".to_string(), json!(creds.session_id_hex));
+                        obj.insert("udp_key".to_string(), json!(creds.key_b64));
+                    }
+                    created_udp_id = Some(creds.session_id);
+                }
+            }
             return ProcessOutcome {
                 authenticated: true,
                 should_close: false,
                 reply: Some(reply.to_string()),
+                udp_session_id: created_udp_id,
             };
         }
 
@@ -193,11 +192,7 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
             "status": "fail",
             "message": "Invalid token",
         });
-        return ProcessOutcome {
-            authenticated: false,
-            should_close: locked_now,
-            reply: Some(reply.to_string()),
-        };
+        return ProcessOutcome::plain(false, locked_now, Some(reply.to_string()));
     }
 
     if !ctx.authenticated {
@@ -207,21 +202,13 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
             "status": "unauthorized",
             "message": "Authentication required. Please send token.",
         });
-        return ProcessOutcome {
-            authenticated: false,
-            should_close: false,
-            reply: Some(reply.to_string()),
-        };
+        return ProcessOutcome::plain(false, false, Some(reply.to_string()));
     }
 
     match msg_type {
         "paste" | "text" | "type" => {
             let Some(content) = map.get("content").and_then(|v| v.as_str()) else {
-                return ProcessOutcome {
-                    authenticated: true,
-                    should_close: false,
-                    reply: None,
-                };
+                return ProcessOutcome::plain(true, false, None);
             };
             let content = content.to_string();
             let enter_after = json_truthy(map.get("enter"));
@@ -244,11 +231,7 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                     "status": "busy",
                     "message": "Input queue full, please slow down.",
                 });
-                return ProcessOutcome {
-                    authenticated: true,
-                    should_close: false,
-                    reply: Some(reply.to_string()),
-                };
+                return ProcessOutcome::plain(true, false, Some(reply.to_string()));
             };
 
             let input = Arc::clone(&ctx.input);
@@ -433,9 +416,5 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
         _ => {}
     }
 
-    ProcessOutcome {
-        authenticated: ctx.authenticated,
-        should_close: false,
-        reply: None,
-    }
+    ProcessOutcome::plain(ctx.authenticated, false, None)
 }

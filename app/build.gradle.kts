@@ -5,6 +5,8 @@ plugins {
 
 val rawRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
 val appBuildNumber = if (rawRunNumber != null) (rawRunNumber - 30).coerceAtLeast(1) else 1
+val envVersionName = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() }
+val envVersionCode = System.getenv("VERSION_CODE")?.toIntOrNull()
 
 val signingStoreFilePath = System.getenv("SIGNING_STORE_FILE")?.takeIf { it.isNotBlank() }
 val signingStorePassword = System.getenv("SIGNING_STORE_PASSWORD")?.takeIf { it.isNotBlank() }
@@ -23,8 +25,8 @@ android {
         applicationId = "com.silentinput.app"
         minSdk = 28
         targetSdk = 34
-        versionCode = appBuildNumber
-        versionName = "1.0.$appBuildNumber"
+        versionCode = envVersionCode ?: appBuildNumber
+        versionName = envVersionName ?: "1.0.$appBuildNumber"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

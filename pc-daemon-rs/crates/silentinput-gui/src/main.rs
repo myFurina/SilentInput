@@ -1295,8 +1295,8 @@ impl ControlCenterState {
                                         .size(14),
                                     text(t(
                                         zh,
-                                        "• 确保手机与电脑连接同一 Wi-Fi 网络（同一局域网）。\n• 在下方访问控制中将模式切换为「局域网白名单」（开箱支持 192.168.* 与 10.* 等网段）。\n• 在手机 App 中输入本页显示的电脑局域网 IP 与安全配对密钥即可连接。",
-                                        "• Ensure phone and PC are on the same Wi-Fi network.\n• Set Access Control mode to 'Whitelist' below.\n• Enter the PC LAN IP and Pairing Key in mobile app to connect.",
+                                        "• 确保手机与电脑连接同一 Wi-Fi 网络（同一局域网）。\n• 在下方访问控制中将模式切换为「局域网白名单」（开箱支持 192.168.* 与 10.* 等网段）。\n• 在手机 App 中输入本页显示的电脑局域网 IP 与安全配对密钥即可连接。\n• 放行防火墙 53318/udp 可开启极速加密 UDP 鼠标通道（未放行会自动回退至 TCP）。",
+                                        "• Ensure phone and PC are on the same Wi-Fi network.\n• Set Access Control mode to 'Whitelist' below.\n• Enter the PC LAN IP and Pairing Key in mobile app to connect.\n• Allow 53318/udp in firewall for low-latency encrypted UDP mouse (auto-falls back to TCP).",
                                     ))
                                     .size(12)
                                     .color(muted),

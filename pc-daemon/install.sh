@@ -280,10 +280,10 @@ fi
 
 # 9. Firewall reminder
 if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-    if ! firewall-cmd --list-ports 2>/dev/null | grep -q "53318/tcp"; then
+    if ! firewall-cmd --list-ports 2>/dev/null | grep -q "53318/tcp" || ! firewall-cmd --list-ports 2>/dev/null | grep -q "53318/udp"; then
         echo ""
-        echo "ℹ️ 提示: 检测到 firewalld 正在运行，若局域网手机无法连接，请放行端口:"
-        echo "   sudo firewall-cmd --add-port=53318/tcp --permanent && sudo firewall-cmd --reload"
+        echo "ℹ️ 提示: 检测到 firewalld 正在运行，若局域网手机无法连接或需启用低延迟 UDP 鼠标，请放行端口:"
+        echo "   sudo firewall-cmd --add-port=53318/tcp --add-port=53318/udp --permanent && sudo firewall-cmd --reload"
     fi
 fi
 

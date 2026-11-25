@@ -3,6 +3,7 @@ mod auth_limiter;
 mod bluetooth;
 mod input;
 mod protocol;
+mod udp_mouse;
 mod ws_server;
 
 use std::fs;
@@ -15,7 +16,7 @@ use silentinput_core::certs::ensure_certificates;
 use silentinput_core::config::{ensure_config_dir_at, load_config};
 use silentinput_core::paths::SilentInputPaths;
 use silentinput_core::process::get_all_host_ips;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::signal::unix::{signal, SignalKind};
 
 use crate::adb::maintain_adb_reverse;
@@ -23,6 +24,7 @@ use crate::auth_limiter::AuthRateLimiter;
 use crate::bluetooth::{run_bluetooth_server, BtServerDeps};
 use crate::input::{maintain_uinput_device, InputController, SystemInputController};
 use crate::protocol::DAEMON_VERSION;
+use crate::udp_mouse::{run_udp_mouse_server, UdpSessionRegistry};
 use crate::ws_server::{load_tls_acceptor, run_ws_listener, WsServerDeps};
 
 fn cleanup_pid(paths: &SilentInputPaths) {
@@ -123,6 +125,45 @@ async fn main() {
         }
     );
 
+    let mut udp_handles = Vec::new();
+    let udp_enabled = config.access_control_mode != "localhost_only";
+    let mut udp_bound = false;
+    let udp_registry = if udp_enabled {
+        UdpSessionRegistry::new(port, true)
+    } else {
+        UdpSessionRegistry::disabled()
+    };
+
+    if udp_enabled {
+        for addr in &bind_addrs {
+            let bind_spec = format!("{addr}:{port}");
+            match UdpSocket::bind(&bind_spec).await {
+                Ok(udp_sock) => {
+                    udp_bound = true;
+                    println!(
+                        "[SilentInput] UDP low-latency mouse channel listening on {bind_spec}"
+                    );
+                    udp_handles.push(tokio::spawn(run_udp_mouse_server(
+                        udp_sock,
+                        Arc::clone(&udp_registry),
+                        Arc::clone(&input),
+                    )));
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[SilentInput] Warning: Failed to bind UDP mouse socket on {bind_spec}: {err}"
+                    );
+                }
+            }
+        }
+    }
+
+    let active_udp_registry = if udp_bound {
+        udp_registry
+    } else {
+        UdpSessionRegistry::disabled()
+    };
+
     let mut ws_deps = WsServerDeps::new(
         Arc::clone(&auth_limiter),
         Arc::clone(&input),
@@ -130,6 +171,7 @@ async fn main() {
         Arc::clone(&next_conn_id),
     );
     ws_deps.paste_semaphore = paste_semaphore;
+    ws_deps.udp_registry = active_udp_registry;
 
     let mut accept_handles = Vec::new();
     for addr in &bind_addrs {
@@ -156,6 +198,9 @@ async fn main() {
 
     if accept_handles.is_empty() {
         eprintln!("[SilentInput] Error: Could not bind to any address!");
+        for handle in udp_handles {
+            handle.abort();
+        }
         uinput_handle.abort();
         adb_handle.abort();
         bt_handle.abort();
@@ -177,6 +222,9 @@ async fn main() {
 
     println!("\n[SilentInput] Shutting down daemon...");
     for handle in accept_handles {
+        handle.abort();
+    }
+    for handle in udp_handles {
         handle.abort();
     }
     uinput_handle.abort();
@@ -209,6 +257,7 @@ mod tests {
     };
     use crate::input::{BoxFuture, InputController, MouseHoldGuard};
     use crate::protocol::{process_message, safe_round_int, SessionContext};
+    use crate::udp_mouse::UdpSessionRegistry;
     use crate::ws_server::{handle_tcp_client, WsServerDeps};
 
     #[derive(Default)]
@@ -379,6 +428,7 @@ mod tests {
                 input: Arc::clone(&input) as Arc<dyn InputController>,
                 paste_lock: Arc::clone(&paste_lock),
                 paste_semaphore: Arc::clone(&paste_sem),
+                udp_registry: None,
             },
         )
         .await;
@@ -398,6 +448,7 @@ mod tests {
                 input: Arc::clone(&input) as Arc<dyn InputController>,
                 paste_lock: Arc::clone(&paste_lock),
                 paste_semaphore: Arc::clone(&paste_sem),
+                udp_registry: None,
             },
         )
         .await;
@@ -418,6 +469,7 @@ mod tests {
                     input: Arc::clone(&input) as Arc<dyn InputController>,
                     paste_lock: Arc::clone(&paste_lock),
                     paste_semaphore: Arc::clone(&paste_sem),
+                    udp_registry: None,
                 },
             )
             .await;
@@ -435,6 +487,7 @@ mod tests {
                 input: Arc::clone(&input) as Arc<dyn InputController>,
                 paste_lock: Arc::clone(&paste_lock),
                 paste_semaphore: Arc::clone(&paste_sem),
+                udp_registry: None,
             },
         )
         .await;
@@ -459,6 +512,7 @@ mod tests {
                 input: Arc::clone(&input) as Arc<dyn InputController>,
                 paste_lock: Arc::clone(&paste_lock),
                 paste_semaphore: Arc::clone(&paste_sem),
+                udp_registry: None,
             },
         )
         .await;
@@ -479,6 +533,7 @@ mod tests {
                 input: Arc::clone(&input) as Arc<dyn InputController>,
                 paste_lock,
                 paste_semaphore: tiny_sem,
+                udp_registry: None,
             },
         )
         .await;
@@ -633,6 +688,7 @@ mod tests {
                     input: Arc::clone(&input) as Arc<dyn InputController>,
                     paste_lock,
                     paste_semaphore: paste_sem,
+                    udp_registry: None,
                 },
             )
             .await;
@@ -644,5 +700,69 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0], vec![(EventType::KEY.0, Key::BTN_LEFT.code(), 1)]);
         assert_eq!(events[1], vec![(EventType::KEY.0, Key::BTN_LEFT.code(), 0)]);
+    }
+
+    #[tokio::test]
+    async fn udp_credentials_issued_only_for_non_localhost_auth() {
+        let input = MockInput::new();
+        let paste_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let paste_sem = Arc::new(tokio::sync::Semaphore::new(
+            crate::protocol::MAX_PENDING_PASTE_TASKS,
+        ));
+        let limiter = AuthRateLimiter::new();
+        let registry = UdpSessionRegistry::new(53318, true);
+        let cfg = SilentInputConfig {
+            auth_token: "secret12".to_string(),
+            access_control_mode: "whitelist".to_string(),
+            ..SilentInputConfig::default()
+        };
+
+        // Localhost (USB) does not receive UDP credentials
+        let usb_auth = process_message(
+            r#"{"type":"auth","token":"secret12"}"#,
+            SessionContext {
+                authenticated: false,
+                config: &cfg,
+                peer_ip: "127.0.0.1",
+                conn_id: 1,
+                auth_limiter: &limiter,
+                input: Arc::clone(&input) as Arc<dyn InputController>,
+                paste_lock: Arc::clone(&paste_lock),
+                paste_semaphore: Arc::clone(&paste_sem),
+                udp_registry: Some(&registry),
+            },
+        )
+        .await;
+        assert!(usb_auth.authenticated);
+        assert!(usb_auth.udp_session_id.is_none());
+        let usb_json: Value = serde_json::from_str(usb_auth.reply.as_deref().unwrap()).unwrap();
+        assert!(usb_json.get("udp_port").is_none());
+
+        // Non-localhost LAN peer receives UDP port, session_id, and 32-byte key
+        let lan_auth = process_message(
+            r#"{"type":"auth","token":"secret12"}"#,
+            SessionContext {
+                authenticated: false,
+                config: &cfg,
+                peer_ip: "192.168.1.55",
+                conn_id: 2,
+                auth_limiter: &limiter,
+                input: Arc::clone(&input) as Arc<dyn InputController>,
+                paste_lock,
+                paste_semaphore: paste_sem,
+                udp_registry: Some(&registry),
+            },
+        )
+        .await;
+        assert!(lan_auth.authenticated);
+        let sid = lan_auth.udp_session_id.unwrap();
+        assert_eq!(registry.session_count(), 1);
+        let lan_json: Value = serde_json::from_str(lan_auth.reply.as_deref().unwrap()).unwrap();
+        assert_eq!(lan_json["udp_port"], 53318);
+        assert_eq!(
+            lan_json["udp_session_id"].as_str().unwrap(),
+            format!("{sid:016x}")
+        );
+        assert_eq!(lan_json["udp_key"].as_str().unwrap().len(), 44);
     }
 }

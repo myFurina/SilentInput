@@ -23,6 +23,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::auth_limiter::AuthRateLimiter;
 use crate::input::{InputController, MouseHoldGuard};
 use crate::protocol::{process_message, SessionContext, MAX_PENDING_PASTE_TASKS};
+use crate::udp_mouse::UdpSessionRegistry;
 
 pub const MAX_WS_FRAME_SIZE: usize = 1024 * 1024; // 1 MiB
 pub const MAX_WS_CONNECTIONS: usize = 32;
@@ -127,6 +128,7 @@ pub struct WsServerDeps {
     pub max_ws_connections: usize,
     pub auth_deadline: Duration,
     pub idle_timeout: Duration,
+    pub udp_registry: Arc<UdpSessionRegistry>,
 }
 
 impl WsServerDeps {
@@ -146,6 +148,30 @@ impl WsServerDeps {
             max_ws_connections: MAX_WS_CONNECTIONS,
             auth_deadline: Duration::from_secs(WS_AUTH_DEADLINE_SECS),
             idle_timeout: Duration::from_secs(WS_IDLE_TIMEOUT_SECS),
+            udp_registry: UdpSessionRegistry::disabled(),
+        }
+    }
+}
+
+struct UdpSessionGuard {
+    registry: Arc<UdpSessionRegistry>,
+    session_id: Option<u64>,
+}
+
+impl UdpSessionGuard {
+    fn set(&mut self, id: u64) {
+        if let Some(old) = self.session_id.replace(id) {
+            if old != id {
+                self.registry.remove_session(old);
+            }
+        }
+    }
+}
+
+impl Drop for UdpSessionGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.session_id.take() {
+            self.registry.remove_session(id);
         }
     }
 }
@@ -188,6 +214,7 @@ pub async fn handle_tcp_client(
         return;
     };
 
+    let _ = stream.set_nodelay(true);
     enable_tcp_keepalive(&stream);
     let peer_ip = normalize_ip_str(&peer_addr.ip().to_string());
 
@@ -269,6 +296,10 @@ pub async fn handle_ws_stream<S>(
 
     let conn_id = deps.next_conn_id.fetch_add(1, Ordering::Relaxed);
     let _mouse_guard = MouseHoldGuard::new(Arc::clone(&deps.input), conn_id);
+    let mut udp_guard = UdpSessionGuard {
+        registry: Arc::clone(&deps.udp_registry),
+        session_id: None,
+    };
     let (mut sink, mut stream_rx) = ws_stream.split();
 
     let mut authenticated = initial_authenticated;
@@ -316,11 +347,15 @@ pub async fn handle_ws_stream<S>(
                         input: Arc::clone(&deps.input),
                         paste_lock: Arc::clone(&deps.paste_lock),
                         paste_semaphore: Arc::clone(&deps.paste_semaphore),
+                        udp_registry: Some(&deps.udp_registry),
                     },
                 )
                 .await;
 
                 authenticated = outcome.authenticated;
+                if let Some(udp_sid) = outcome.udp_session_id {
+                    udp_guard.set(udp_sid);
+                }
                 if let Some(reply) = outcome.reply {
                     if sink.send(Message::Text(reply)).await.is_err() {
                         break;

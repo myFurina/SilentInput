@@ -5,7 +5,10 @@ sealed class ServerMessage {
     data class AuthResult(
         val status: String,
         val message: String,
-        val unicodeDirectTyping: Boolean?
+        val unicodeDirectTyping: Boolean?,
+        val udpPort: Int? = null,
+        val udpSessionId: String? = null,
+        val udpKey: String? = null
     ) : ServerMessage()
     data class Status(
         val unicodeDirectTyping: Boolean?,
@@ -113,7 +116,17 @@ object ProtocolPayloads {
                 val status = (obj["status"] as? String).orEmpty()
                 val message = (obj["message"] as? String).orEmpty()
                 val unicode = obj["unicode_direct_typing"] as? Boolean
-                ServerMessage.AuthResult(status, message, unicode)
+                val udpPort = (obj["udp_port"] as? Number)?.toInt()
+                val udpSessionId = obj["udp_session_id"] as? String
+                val udpKey = obj["udp_key"] as? String
+                ServerMessage.AuthResult(
+                    status = status,
+                    message = message,
+                    unicodeDirectTyping = unicode,
+                    udpPort = udpPort,
+                    udpSessionId = udpSessionId,
+                    udpKey = udpKey
+                )
             }
             "status" -> {
                 val unicode = obj["unicode_direct_typing"] as? Boolean

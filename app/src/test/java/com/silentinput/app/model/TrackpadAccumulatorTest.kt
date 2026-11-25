@@ -1,6 +1,8 @@
 package com.silentinput.app.model
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TrackpadAccumulatorTest {
@@ -54,5 +56,87 @@ class TrackpadAccumulatorTest {
         assertEquals(0 to 0, acc.addMoveDelta(Float.NaN, Float.POSITIVE_INFINITY, sensitivity = 1.0f))
         // Remainder 0.5f must remain intact after NaN input
         assertEquals(1 to 0, acc.addMoveDelta(0.6f, 0f, sensitivity = 1.0f))
+    }
+
+    @Test
+    fun `pointer acceleration curve scales monotonically from precision to fast flick`() {
+        val slow = TrackpadAccumulator.computePointerGain(0.02f)
+        val medium = TrackpadAccumulator.computePointerGain(0.4f)
+        val fast = TrackpadAccumulator.computePointerGain(2.0f)
+
+        assertTrue(slow in 0.65f..0.9f)
+        assertTrue(medium > 1.0f && medium < fast)
+        assertTrue(fast > 2.2f && fast <= 3.0f)
+    }
+
+    @Test
+    fun `gesture processor eliminates touchSlop deadzone and flushes initial delta cleanly`() {
+        val processor = TrackpadGestureProcessor(TrackpadAccumulator())
+        val ids = intArrayOf(0)
+        val xs = floatArrayOf(0f)
+        val ys = floatArrayOf(0f)
+        val density = 3.0f // micro threshold = 4.5 px (much smaller than Android 24-48px touchSlop)
+
+        processor.onPrimaryDown(pointerId = 0, x = 100f, y = 100f, timeMs = 1000L)
+        assertFalse(processor.isDragging)
+
+        // Small micro-movement within 1.5dp (2px) stays pending so taps do not jitter
+        xs[0] = 102f
+        ys[0] = 100f
+        val preDrag = processor.onMoveSample(
+            pointerIds = ids,
+            xs = xs,
+            ys = ys,
+            count = 1,
+            sampleTimeMs = 1008L,
+            density = density,
+            sensitivity = 1.0f,
+            naturalScrolling = true
+        )
+        assertFalse(processor.isDragging)
+        assertEquals(0, preDrag.moveDx)
+
+        // Moving past 4.5px flushes ALL accumulated raw displacement (no eaten pixels!)
+        xs[0] = 106f
+        ys[0] = 100f
+        val dragStart = processor.onMoveSample(
+            pointerIds = ids,
+            xs = xs,
+            ys = ys,
+            count = 1,
+            sampleTimeMs = 1016L,
+            density = density,
+            sensitivity = 1.0f,
+            naturalScrolling = true
+        )
+        assertTrue(processor.isDragging)
+        assertTrue(dragStart.dragStartedNow)
+        assertTrue(dragStart.moveDx >= 4)
+
+        // Lifting after a drag must NOT fire a left click
+        assertEquals(
+            TrackpadGestureProcessor.TapAction.NONE,
+            processor.onAllUp(timeMs = 1040L)
+        )
+    }
+
+    @Test
+    fun `gesture processor distinguishes clean tap and long press`() {
+        val processor = TrackpadGestureProcessor(TrackpadAccumulator())
+        processor.onPrimaryDown(pointerId = 1, x = 50f, y = 50f, timeMs = 2000L)
+        assertEquals(
+            TrackpadGestureProcessor.TapAction.LEFT_CLICK,
+            processor.onAllUp(timeMs = 2120L)
+        )
+
+        processor.onPrimaryDown(pointerId = 2, x = 50f, y = 50f, timeMs = 3000L)
+        assertEquals(
+            TrackpadGestureProcessor.TapAction.RIGHT_CLICK,
+            processor.onLongPressTimeout()
+        )
+        assertEquals(
+            TrackpadGestureProcessor.TapAction.NONE,
+            processor.onAllUp(timeMs = 3500L)
+        )
     }
 }

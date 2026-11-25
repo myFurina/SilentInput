@@ -7,6 +7,7 @@ import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.AppStrings
 import com.silentinput.app.model.BaseInputTransport
 import com.silentinput.app.model.InputTransport
+import com.silentinput.app.model.MouseAction
 import com.silentinput.app.model.ProtocolPayloads
 import com.silentinput.app.model.ServerMessage
 import kotlinx.coroutines.*
@@ -17,14 +18,18 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import okhttp3.*
+import java.net.InetAddress
+import java.net.Socket
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
+import javax.net.SocketFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import kotlin.math.roundToInt
 
 class NetworkClient(
     context: Context? = null,
@@ -112,11 +117,37 @@ class NetworkClient(
     private val tofuPrefs = context?.applicationContext?.getSharedPreferences(TOFU_PREFS_NAME, Context.MODE_PRIVATE)
 
     @Volatile
+    private var udpMouseChannel: UdpMouseChannel? = null
+
+    private val _isUdpMouseActive = MutableStateFlow(false)
+    val isUdpMouseActive = _isUdpMouseActive.asStateFlow()
+
+    @Volatile
     private var baseClientInitialized = false
+
+    private class TcpNoDelaySocketFactory : SocketFactory() {
+        private val delegate = getDefault()
+
+        private fun configure(socket: Socket): Socket {
+            try {
+                socket.tcpNoDelay = true
+            } catch (_: Exception) {}
+            return socket
+        }
+
+        override fun createSocket(): Socket = configure(delegate.createSocket())
+        override fun createSocket(host: String?, port: Int): Socket = configure(delegate.createSocket(host, port))
+        override fun createSocket(host: String?, port: Int, localHost: InetAddress?, localPort: Int): Socket =
+            configure(delegate.createSocket(host, port, localHost, localPort))
+        override fun createSocket(host: InetAddress?, port: Int): Socket = configure(delegate.createSocket(host, port))
+        override fun createSocket(address: InetAddress?, port: Int, localAddress: InetAddress?, localPort: Int): Socket =
+            configure(delegate.createSocket(address, port, localAddress, localPort))
+    }
 
     // Base OkHttpClient owning the shared Dispatcher and ConnectionPool
     private val baseClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .socketFactory(TcpNoDelaySocketFactory())
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .pingInterval(30, TimeUnit.SECONDS) // Fallback keepalive; foreground JSON ping measures RTT
             .retryOnConnectionFailure(true)
@@ -419,6 +450,7 @@ class NetworkClient(
                     }
                     is ServerMessage.AuthResult -> {
                         if (msg.status == "ok") {
+                            var udpToStart: UdpMouseChannel? = null
                             synchronized(stateLock) {
                                 if (this@NetworkClient.webSocket !== webSocket) return
                                 _isAuthenticated.value = true
@@ -428,7 +460,28 @@ class NetworkClient(
                                     _supportsUnicodeDirectTyping.value = it
                                 }
                                 setConnectionError(null)
+                                closeUdpChannelLocked()
+                                if (!isLoopbackHost(endpoint.host) && msg.udpPort != null && msg.udpSessionId != null && msg.udpKey != null) {
+                                    val sid = UdpMouseCodec.parseSessionIdHex(msg.udpSessionId)
+                                    val key = UdpMouseCodec.decodeAes256Key(msg.udpKey)
+                                    if (sid != null && key != null && msg.udpPort in 1..65535) {
+                                        val ch = UdpMouseChannel(
+                                            host = endpoint.host,
+                                            port = msg.udpPort,
+                                            sessionId = sid,
+                                            secretKey = key,
+                                            onReadyChanged = { ready ->
+                                                if (!closedMatches(this@NetworkClient.webSocket, webSocket)) {
+                                                    _isUdpMouseActive.value = ready
+                                                }
+                                            }
+                                        )
+                                        udpMouseChannel = ch
+                                        udpToStart = ch
+                                    }
+                                }
                             }
+                            udpToStart?.start()
                         } else {
                             val serverMsg = msg.message
                             val tooManyAttempts = serverMsg.contains("Too many", ignoreCase = true)
@@ -536,7 +589,19 @@ class NetworkClient(
         webSocket = newSocket
     }
 
+    private fun closedMatches(current: WebSocket?, expected: WebSocket): Boolean {
+        return current !== expected
+    }
+
+    private fun closeUdpChannelLocked() {
+        val ch = udpMouseChannel
+        udpMouseChannel = null
+        _isUdpMouseActive.value = false
+        ch?.close()
+    }
+
     private fun handleDisconnectedLocked() {
+        closeUdpChannelLocked()
         webSocket = null
         _isConnected.value = false
         _isConnecting.value = false
@@ -738,6 +803,17 @@ class NetworkClient(
     }
 
     override fun sendMouse(dx: Float, dy: Float, action: String, wheel: Float): Boolean {
+        if (action == MouseAction.MOVE.wireValue) {
+            val udp = udpMouseChannel
+            if (udp != null && udp.isReady) {
+                val ix = if (dx.isFinite()) dx.roundToInt() else 0
+                val iy = if (dy.isFinite()) dy.roundToInt() else 0
+                if (ix != 0 || iy != 0) {
+                    udp.enqueueMove(ix, iy)
+                }
+                return true
+            }
+        }
         return sendJson(ProtocolPayloads.buildMouseJson(dx, dy, action = action, wheel = wheel))
     }
 
@@ -759,6 +835,7 @@ class NetworkClient(
 
     private fun disconnectSocketOnlyLocked() {
         stopPingLoopLocked()
+        closeUdpChannelLocked()
         val old = webSocket
         webSocket = null
         try {

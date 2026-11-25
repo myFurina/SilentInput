@@ -11,7 +11,7 @@ A remote input companion for **Linux (Wayland / GNOME)** that turns your Android
 
 - **Three Connection Modes**:
   - **USB (`adb reverse`)**: Local passwordless connection forwarded via `adb reverse tcp:53318 tcp:53318` (tracked automatically over ADB TCP protocol; if using a non-default `ANDROID_ADB_SERVER_PORT` under `systemd --user`, configure it persistently in `~/.config/environment.d/adb.conf` or via `systemctl --user edit silentinput.service` with `Environment=...`, as shell `export` and `systemctl --user set-environment` do not persist across reboots).
-  - **LAN (`WebSocket / WSS`)**: Default port `53318`, with pairing token authentication, silent first-use TLS certificate fingerprint pinning (TOFU), and toggleable TLS encryption.
+  - **LAN (`WebSocket / WSS` + `UDP`)**: Default port `53318/tcp` (control, auth, typing) + optional `53318/udp` (AES-256-GCM encrypted binary mouse stream for ultra-low latency, auto-falls back to `TCP_NODELAY` WebSocket if blocked by firewall), with pairing token authentication, silent first-use TLS certificate fingerprint pinning (TOFU), and toggleable TLS encryption.
   - **Bluetooth (`RFCOMM`)**: Direct in-app connection after pairing once in system Bluetooth settings — no Bluetooth tethering required.
 - **Keyboard Tab**: Common shortcut keys, lockable modifiers (`Ctrl` / `Alt` / `Shift` / `Win`), arrow keys, and a collapsible compact full keyboard (letters, numbers, `F1–F12`, and navigation keys).
 - **Touchpad Tab**: Single-finger cursor movement, two-finger scrolling, and left/right clicks injected on the PC via kernel `uinput`.
