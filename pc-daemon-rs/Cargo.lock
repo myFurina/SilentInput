@@ -2576,7 +2576,7 @@ dependencies = [
 
 [[package]]
 name = "silentinput-cli"
-version = "1.0.21"
+version = "1.0.22"
 dependencies = [
  "clap",
  "silentinput-core",
@@ -2584,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "silentinput-core"
-version = "1.0.21"
+version = "1.0.22"
 dependencies = [
  "evdev",
  "ipnet",
@@ -2598,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "silentinput-daemon"
-version = "1.0.21"
+version = "1.0.22"
 dependencies = [
  "evdev",
  "futures-util",
@@ -2616,7 +2616,7 @@ dependencies = [
 
 [[package]]
 name = "silentinput-gui"
-version = "1.0.21"
+version = "1.0.22"
 dependencies = [
  "iced",
  "silentinput-core",
