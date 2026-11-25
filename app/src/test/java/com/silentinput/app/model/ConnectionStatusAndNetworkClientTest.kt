@@ -64,8 +64,37 @@ class ConnectionStatusAndNetworkClientTest {
             netLatencyMs = 15L,
             activeServerIp = "192.168.1.20"
         )
-        assertEquals("局域网: 已连接 (15ms) 🔒", ready.text)
+        assertEquals("局域网: 已连接 (15ms) 🔒 · TCP", ready.text)
         assertEquals(StatusTone.NORMAL, ready.tone)
+
+        val readyUdp = ConnectionStatusFormatter.formatTopBarStatus(
+            mode = "lan",
+            isBtConnected = false,
+            isBtConnecting = false,
+            btDeviceName = null,
+            btLatencyMs = null,
+            isNetConnected = true,
+            isNetAuthenticated = true,
+            isNetReconnecting = false,
+            isNetEncrypted = true,
+            netConnectionError = null,
+            netLatencyMs = 15L,
+            activeServerIp = "192.168.1.20",
+            isUdpMouseActive = true
+        )
+        assertEquals("局域网: 已连接 (15ms) 🔒 ⚡UDP", readyUdp.text)
+        assertEquals(StatusTone.NORMAL, readyUdp.tone)
+
+        val lanDialogUdp = ConnectionStatusFormatter.formatLanDialogStatus(
+            isLanConnected = true,
+            isLanAuthenticated = true,
+            isNetEncrypted = true,
+            isNetReconnecting = false,
+            connError = null,
+            latencyMs = 15L,
+            isUdpMouseActive = true
+        )
+        assertEquals("状态: 已连接 (15ms) (TLS加密) [UDP]", lanDialogUdp.text)
 
         val highLatency = ConnectionStatusFormatter.formatTopBarStatus(
             mode = "lan",
@@ -81,7 +110,7 @@ class ConnectionStatusAndNetworkClientTest {
             netLatencyMs = 1200L,
             activeServerIp = "192.168.1.20"
         )
-        assertEquals("局域网: 已连接 (1200ms 卡顿/高延迟) (明文)", highLatency.text)
+        assertEquals("局域网: 已连接 (1200ms 卡顿/高延迟) (明文) · TCP", highLatency.text)
         assertEquals(StatusTone.HIGH_LATENCY, highLatency.tone)
     }
 
@@ -375,7 +404,7 @@ class ConnectionStatusAndNetworkClientTest {
             activeServerIp = "192.168.1.20",
             language = ResolvedLanguage.EN
         )
-        assertEquals("LAN: Connected (1200ms High Latency) (Plaintext)", lanHighEn.text)
+        assertEquals("LAN: Connected (1200ms High Latency) (Plaintext) · TCP", lanHighEn.text)
         assertEquals(StatusTone.HIGH_LATENCY, lanHighEn.tone)
 
         val usbDialogEn = ConnectionStatusFormatter.formatUsbDialogStatus(
@@ -527,7 +556,7 @@ class ConnectionStatusAndNetworkClientTest {
             activeServerIp = "192.168.1.20"
         )
         assertEquals(StatusTone.NORMAL, below.tone)
-        assertEquals("局域网: 已连接 (799ms) 🔒", below.text)
+        assertEquals("局域网: 已连接 (799ms) 🔒 · TCP", below.text)
 
         val atThreshold = ConnectionStatusFormatter.formatTopBarStatus(
             mode = "lan",
@@ -544,7 +573,7 @@ class ConnectionStatusAndNetworkClientTest {
             activeServerIp = "192.168.1.20"
         )
         assertEquals(StatusTone.HIGH_LATENCY, atThreshold.tone)
-        assertEquals("局域网: 已连接 (800ms 卡顿/高延迟) 🔒", atThreshold.text)
+        assertEquals("局域网: 已连接 (800ms 卡顿/高延迟) 🔒 · TCP", atThreshold.text)
     }
 
     @Test

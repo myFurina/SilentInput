@@ -458,6 +458,7 @@ private fun TopBarConnectionStatusSubtitle(
     val isNetConnecting by viewModel.isNetConnecting.collectAsState()
     val isNetReconnecting by viewModel.isNetReconnecting.collectAsState()
     val isNetEncrypted by viewModel.isNetEncrypted.collectAsState()
+    val isUdpMouseActive by viewModel.isUdpMouseActive.collectAsState()
     val connectionError by viewModel.netConnectionError.collectAsState()
     val latencyMs by viewModel.netLatencyMs.collectAsState()
 
@@ -475,6 +476,7 @@ private fun TopBarConnectionStatusSubtitle(
         netConnectionError = connectionError,
         netLatencyMs = latencyMs,
         activeServerIp = activeServerIp,
+        isUdpMouseActive = isUdpMouseActive,
         language = resolvedLanguage
     )
 

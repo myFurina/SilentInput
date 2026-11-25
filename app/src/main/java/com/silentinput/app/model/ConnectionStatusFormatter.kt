@@ -66,6 +66,7 @@ object ConnectionStatusFormatter {
         netLatencyMs: Long?,
         activeServerIp: String,
         isNetConnecting: Boolean = false,
+        isUdpMouseActive: Boolean = false,
         language: ResolvedLanguage = ResolvedLanguage.ZH
     ): StatusDisplay {
         val s = AppStrings.forResolved(language)
@@ -85,8 +86,9 @@ object ConnectionStatusFormatter {
                 val text = when {
                     isNetReady -> {
                         val encTag = if (isNetEncrypted) " 🔒" else s.statusPlaintextShortTag
+                        val mouseTag = if (isUdpMouseActive) " ⚡UDP" else " · TCP"
                         val latText = formatLatencySuffix(netLatencyMs, markHighLatency = true, strings = s)
-                        s.statusNetConnected(prefix, latText, encTag)
+                        s.statusNetConnected(prefix, latText, "$encTag$mouseTag")
                     }
                     isNetConnected && !isNetAuthenticated -> s.statusVerifyingKey(prefix)
                     isNetConnecting -> s.statusConnecting(prefix)
@@ -168,6 +170,7 @@ object ConnectionStatusFormatter {
         connError: String?,
         latencyMs: Long?,
         isLanConnecting: Boolean = false,
+        isUdpMouseActive: Boolean = false,
         language: ResolvedLanguage = ResolvedLanguage.ZH
     ): StatusDisplay {
         val s = AppStrings.forResolved(language)
@@ -175,7 +178,8 @@ object ConnectionStatusFormatter {
             isLanConnected && isLanAuthenticated -> {
                 val latStr = formatLatencySuffix(latencyMs, markHighLatency = true, strings = s)
                 val encStr = if (isNetEncrypted) s.statusDialogTlsTag else s.statusDialogPlaintextTag
-                StatusDisplay(s.statusDialogConnected(latStr, encStr), StatusTone.NORMAL)
+                val mouseTag = if (isUdpMouseActive) " [UDP]" else " [TCP]"
+                StatusDisplay(s.statusDialogConnected(latStr, "$encStr$mouseTag"), StatusTone.NORMAL)
             }
             isLanConnected && !isLanAuthenticated ->
                 StatusDisplay(s.statusDialogVerifyingPairingKey, StatusTone.PENDING)

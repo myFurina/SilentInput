@@ -62,6 +62,7 @@ fun UnifiedConnectionDialog(
     val isNetConnecting by viewModel.isNetConnecting.collectAsState()
     val isNetReconnecting by viewModel.isNetReconnecting.collectAsState()
     val isNetEncrypted by viewModel.isNetEncrypted.collectAsState()
+    val isUdpMouseActive by viewModel.isUdpMouseActive.collectAsState()
     val connError by viewModel.netConnectionError.collectAsState()
     val lanInputError by viewModel.lanInputError.collectAsState()
     val latencyMs by viewModel.netLatencyMs.collectAsState()
@@ -184,6 +185,7 @@ fun UnifiedConnectionDialog(
                             isLanAuthenticated = isNetAuthenticated,
                             isLanConnecting = isLanConnecting,
                             isNetEncrypted = isNetEncrypted,
+                            isUdpMouseActive = isUdpMouseActive,
                             isNetReconnecting = isLanReconnecting,
                             connError = lanConnError,
                             latencyMs = latencyMs,

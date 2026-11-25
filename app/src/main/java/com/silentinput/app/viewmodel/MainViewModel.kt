@@ -180,6 +180,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isNetConnecting: StateFlow<Boolean> = networkClient.isConnecting
     val isNetReconnecting: StateFlow<Boolean> = networkClient.isReconnecting
     val isNetEncrypted: StateFlow<Boolean> = networkClient.isEncrypted
+    val isUdpMouseActive: StateFlow<Boolean> = networkClient.isUdpMouseActive
     val netConnectionError: StateFlow<String?> = networkClient.connectionError
     val netLatencyMs: StateFlow<Long?> = networkClient.latencyMs
     val certMismatchHost: StateFlow<String?> = networkClient.certMismatchHost

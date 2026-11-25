@@ -59,14 +59,24 @@ class TrackpadAccumulatorTest {
     }
 
     @Test
-    fun `pointer acceleration curve scales monotonically from precision to fast flick`() {
+    fun `pointer acceleration curve scales monotonically within gentle host-friendly bounds`() {
         val slow = TrackpadAccumulator.computePointerGain(0.02f)
         val medium = TrackpadAccumulator.computePointerGain(0.4f)
         val fast = TrackpadAccumulator.computePointerGain(2.0f)
 
-        assertTrue(slow in 0.65f..0.9f)
+        assertTrue(slow in 0.80f..0.95f)
         assertTrue(medium > 1.0f && medium < fast)
-        assertTrue(fast > 2.2f && fast <= 3.0f)
+        assertTrue(fast > 1.30f && fast <= 1.45f)
+    }
+
+    @Test
+    fun `accelerated move delta resists 1ms timestamp quantization spikes`() {
+        val acc = TrackpadAccumulator()
+        // Establish steady 0.3 dp/ms baseline
+        acc.addAcceleratedMoveDelta(dx = 7.2f, dy = 0f, dtMs = 8f, density = 3f, sensitivity = 1f)
+        // Suddenly a sample arrives with dtMs=1ms (timestamp quantization); 4ms floor + EMA prevents huge jump
+        val (spikeDx, _) = acc.addAcceleratedMoveDelta(dx = 7.2f, dy = 0f, dtMs = 1f, density = 3f, sensitivity = 1f)
+        assertTrue("Expected smoothed delta <= 9, got $spikeDx", spikeDx in 7..9)
     }
 
     @Test

@@ -14,6 +14,7 @@ class TrackpadAccumulator {
         private set
     var accWheel: Float = 0f
         private set
+    private var smoothedVelocityDpPerMs: Float = 0f
 
     fun addMoveDelta(dx: Float, dy: Float, sensitivity: Float): Pair<Int, Int> {
         if (!dx.isFinite() || !dy.isFinite() || !sensitivity.isFinite()) {
@@ -25,8 +26,10 @@ class TrackpadAccumulator {
     }
 
     /**
-     * Velocity-aware pointer ballistics: smooth slow micro-aiming (<1.0x gain) transitioning
-     * continuously into accelerated fast flicks (up to ~3.0x gain).
+     * Velocity-aware pointer ballistics calibrated for host OS acceleration (libinput):
+     * uses a 4ms sample-interval floor + EMA velocity low-pass filter to eliminate
+     * millisecond timestamp quantization spikes, and a gentle [0.80x..1.45x] curve
+     * so host acceleration never stacks into sudden cursor jumps.
      */
     fun addAcceleratedMoveDelta(
         dx: Float,
@@ -39,10 +42,15 @@ class TrackpadAccumulator {
             return 0 to 0
         }
         val safeDensity = density.coerceAtLeast(1f)
-        val safeDt = dtMs.coerceIn(1f, 40f)
+        val safeDt = dtMs.coerceIn(4f, 40f)
         val distDp = hypot(dx, dy) / safeDensity
-        val velocityDpPerMs = distDp / safeDt
-        val gain = computePointerGain(velocityDpPerMs)
+        val instVelocity = distDp / safeDt
+        smoothedVelocityDpPerMs = if (smoothedVelocityDpPerMs == 0f) {
+            instVelocity
+        } else {
+            smoothedVelocityDpPerMs * 0.65f + instVelocity * 0.35f
+        }
+        val gain = computePointerGain(smoothedVelocityDpPerMs)
 
         accX += dx * sensitivity * gain
         accY += dy * sensitivity * gain
@@ -81,17 +89,18 @@ class TrackpadAccumulator {
         accX = 0f
         accY = 0f
         accWheel = 0f
+        smoothedVelocityDpPerMs = 0f
     }
 
     companion object {
         internal fun computePointerGain(velocityDpPerMs: Float): Float {
             val v = velocityDpPerMs.coerceAtLeast(0f)
             return when {
-                v < 0.15f -> 0.65f + (v / 0.15f) * 0.35f
-                v < 1.2f -> 1.0f + ((v - 0.15f) / 1.05f).pow(1.2f) * 1.1f
+                v < 0.15f -> 0.80f + (v / 0.15f) * 0.20f
+                v < 1.2f -> 1.00f + ((v - 0.15f) / 1.05f).pow(1.1f) * 0.30f
                 else -> {
-                    val extra = ((v - 1.2f) / (v - 1.2f + 1.5f)) * 0.9f
-                    2.1f + extra
+                    val extra = ((v - 1.2f) / (v - 1.2f + 1.5f)) * 0.15f
+                    1.30f + extra
                 }
             }
         }

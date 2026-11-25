@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use evdev::{EventType, InputEvent, RelativeAxisType};
@@ -72,6 +72,7 @@ pub struct UdpSession {
     key: LessSafeKey,
     replay: Mutex<ReplayWindow>,
     server_seq: AtomicU64,
+    probe_logged: AtomicBool,
 }
 
 pub struct UdpSessionRegistry {
@@ -138,6 +139,7 @@ impl UdpSessionRegistry {
             key: LessSafeKey::new(unbound),
             replay: Mutex::new(ReplayWindow::default()),
             server_seq: AtomicU64::new(0),
+            probe_logged: AtomicBool::new(false),
         });
 
         {
@@ -270,6 +272,11 @@ pub fn handle_udp_packet(
         PKT_PROBE => {
             if pt.len() < 4 {
                 return None;
+            }
+            if !session.probe_logged.swap(true, Ordering::AcqRel) {
+                println!(
+                    "[SilentInput] UDP low-latency mouse verified for {peer_addr} (session {session_id:016x})"
+                );
             }
             let ack_seq = session.server_seq.fetch_add(1, Ordering::Relaxed) + 1;
             seal_udp_packet(

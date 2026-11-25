@@ -93,6 +93,7 @@ internal fun LanConnectionTab(
     isLanAuthenticated: Boolean,
     isLanConnecting: Boolean,
     isNetEncrypted: Boolean,
+    isUdpMouseActive: Boolean = false,
     isNetReconnecting: Boolean,
     connError: String?,
     latencyMs: Long?,
@@ -166,6 +167,7 @@ internal fun LanConnectionTab(
             connError = connError,
             latencyMs = latencyMs,
             isLanConnecting = isLanConnecting,
+            isUdpMouseActive = isUdpMouseActive,
             language = resolvedLanguage
         )
         val lanStatusColor by animateColorAsState(
