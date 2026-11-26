@@ -64,9 +64,9 @@ class TrackpadAccumulatorTest {
         val medium = TrackpadAccumulator.computePointerGain(0.4f)
         val fast = TrackpadAccumulator.computePointerGain(2.0f)
 
-        assertTrue(slow in 0.72f..0.96f)
+        assertTrue(slow in 0.95f..1.00f)
         assertTrue(medium > 1.0f && medium < fast)
-        assertTrue(fast > 1.28f && fast <= 1.40f)
+        assertTrue(fast > 1.12f && fast <= 1.18f)
     }
 
     @Test

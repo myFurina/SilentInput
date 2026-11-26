@@ -1,7 +1,6 @@
 package com.silentinput.app.model
 
 import kotlin.math.hypot
-import kotlin.math.pow
 
 /**
  * Sub-pixel movement, velocity-based pointer acceleration, and two-finger scroll
@@ -29,8 +28,8 @@ class TrackpadAccumulator {
 
     /**
      * DPI-normalized, velocity-aware pointer ballistics calibrated for host OS acceleration (libinput):
-     * normalizes raw pixels to a 2.75x (~440ppi) baseline so physical finger travel produces consistent
-     * pointer distance across 1080p/2K/tablet screens, with 4ms floor + EMA filtering + [0.72x..1.40x] gain.
+     * normalizes raw pixels to a 3.0x (~480ppi) baseline with a 4ms floor, EMA filter, and
+     * gentle [0.95x..1.18x] curve so host acceleration never stacks into muddy starts or sudden jumps.
      */
     fun addAcceleratedMoveDelta(
         dx: Float,
@@ -49,7 +48,7 @@ class TrackpadAccumulator {
         smoothedVelocityDpPerMs = if (smoothedVelocityDpPerMs == 0f) {
             instVelocity
         } else {
-            smoothedVelocityDpPerMs * 0.65f + instVelocity * 0.35f
+            smoothedVelocityDpPerMs * 0.50f + instVelocity * 0.50f
         }
         val gain = computePointerGain(smoothedVelocityDpPerMs)
         val dpiScale = REF_DENSITY / safeDensity.coerceIn(1.0f, 5.0f)
@@ -117,17 +116,17 @@ class TrackpadAccumulator {
     }
 
     companion object {
-        const val REF_DENSITY = 2.75f
+        const val REF_DENSITY = 3.0f
         const val HI_RES_UNITS_PER_DP = 12.0f
 
         internal fun computePointerGain(velocityDpPerMs: Float): Float {
             val v = velocityDpPerMs.coerceAtLeast(0f)
             return when {
-                v < 0.12f -> 0.72f + (v / 0.12f) * 0.24f
-                v < 1.2f -> 0.96f + ((v - 0.12f) / 1.08f).pow(1.05f) * 0.32f
+                v < 0.12f -> 0.95f + (v / 0.12f) * 0.05f
+                v < 1.2f -> 1.00f + ((v - 0.12f) / 1.08f) * 0.12f
                 else -> {
-                    val extra = ((v - 1.2f) / (v - 1.2f + 1.5f)) * 0.12f
-                    1.28f + extra
+                    val extra = ((v - 1.2f) / (v - 1.2f + 1.5f)) * 0.06f
+                    1.12f + extra
                 }
             }
         }
@@ -284,7 +283,7 @@ class TrackpadGestureProcessor(
             val (mx, my) = accumulator.addAcceleratedMoveDelta(
                 dx = pendingRawX,
                 dy = pendingRawY,
-                dtMs = pendingDtMs,
+                dtMs = pendingDtMs.coerceIn(4f, 16f),
                 density = density,
                 sensitivity = sensitivity
             )
