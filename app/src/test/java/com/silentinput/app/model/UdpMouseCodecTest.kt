@@ -137,4 +137,64 @@ class UdpMouseCodecTest {
         assertEquals((-3).toShort(), bb.short)
         assertEquals(UdpMouseCodec.FLAG_HI_RES_WHEEL.toShort(), bb.short)
     }
+
+    @Test
+    fun `sealMoveWithFecInto embeds prev1 and prev2 history within 60-byte wire packet`() {
+        val key = UdpMouseCodec.decodeAes256Key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")!!
+        val sessionId = 0x0102030405060708L
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val payloadScratch = ByteArray(UdpMouseCodec.MOVE_FEC_PAYLOAD_LEN)
+        val nonceScratch = ByteArray(UdpMouseCodec.NONCE_LEN)
+        val wireBuf = ByteArray(UdpMouseCodec.MOVE_FEC_WIRE_LEN)
+
+        val totalLen = UdpMouseCodec.sealMoveWithFecInto(
+            secretKey = key,
+            sessionId = sessionId,
+            dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+            seq = 10L,
+            dx = 9,
+            dy = -5,
+            wheel = 0,
+            flags = 0,
+            hasPrev1 = true,
+            prev1Dx = 7,
+            prev1Dy = -3,
+            prev1Wheel = 60,
+            prev1Flags = UdpMouseCodec.FLAG_HI_RES_WHEEL,
+            hasPrev2 = true,
+            prev2Dx = 4,
+            prev2Dy = 2,
+            prev2Wheel = 0,
+            prev2Flags = 0,
+            payloadScratch = payloadScratch,
+            nonceScratch = nonceScratch,
+            wireOut = wireBuf,
+            cipher = cipher
+        )
+        assertEquals(UdpMouseCodec.MOVE_FEC_WIRE_LEN, totalLen)
+
+        val opened = UdpMouseCodec.openPacket(
+            secretKey = key,
+            expectedSessionId = sessionId,
+            expectedDir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+            expectedPktType = UdpMouseCodec.PKT_MOUSE_MOVE,
+            packet = wireBuf,
+            length = totalLen,
+            cipher = cipher
+        )!!
+        assertEquals(24, opened.size)
+        val bb = ByteBuffer.wrap(opened).order(ByteOrder.BIG_ENDIAN)
+        assertEquals(9.toShort(), bb.short)
+        assertEquals((-5).toShort(), bb.short)
+        assertEquals(0.toShort(), bb.short)
+        assertEquals((UdpMouseCodec.FLAG_FEC_PREV1 or UdpMouseCodec.FLAG_FEC_PREV2).toShort(), bb.short)
+        assertEquals(7.toShort(), bb.short)
+        assertEquals((-3).toShort(), bb.short)
+        assertEquals(60.toShort(), bb.short)
+        assertEquals(UdpMouseCodec.FLAG_HI_RES_WHEEL.toShort(), bb.short)
+        assertEquals(4.toShort(), bb.short)
+        assertEquals(2.toShort(), bb.short)
+        assertEquals(0.toShort(), bb.short)
+        assertEquals(0.toShort(), bb.short)
+    }
 }

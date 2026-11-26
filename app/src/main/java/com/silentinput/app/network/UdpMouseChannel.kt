@@ -30,14 +30,18 @@ object UdpMouseCodec {
 
     const val HEADER_LEN: Int = 20
     const val MOVE_PAYLOAD_LEN: Int = 8
+    const val MOVE_FEC_PAYLOAD_LEN: Int = MOVE_PAYLOAD_LEN * 3
     const val GCM_TAG_BITS: Int = 128
     const val GCM_TAG_LEN: Int = 16
     const val NONCE_LEN: Int = 12
     const val MOVE_WIRE_LEN: Int = HEADER_LEN + MOVE_PAYLOAD_LEN + GCM_TAG_LEN
+    const val MOVE_FEC_WIRE_LEN: Int = HEADER_LEN + MOVE_FEC_PAYLOAD_LEN + GCM_TAG_LEN
 
     const val DIR_CLIENT_TO_SERVER: Int = 1
     const val DIR_SERVER_TO_CLIENT: Int = 2
     const val FLAG_HI_RES_WHEEL: Int = 0x0001
+    const val FLAG_FEC_PREV1: Int = 0x0002
+    const val FLAG_FEC_PREV2: Int = 0x0004
 
     fun parseSessionIdHex(hex: String): Long? {
         val trimmed = hex.trim()
@@ -74,11 +78,18 @@ object UdpMouseCodec {
         return out
     }
 
-    fun writeMovePayloadInto(out: ByteArray, dx: Int, dy: Int, wheel: Int = 0, flags: Int = 0) {
-        putShortBE(out, 0, dx.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()))
-        putShortBE(out, 2, dy.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()))
-        putShortBE(out, 4, wheel.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()))
-        putShortBE(out, 6, flags and 0xFFFF)
+    fun writeMovePayloadInto(
+        out: ByteArray,
+        dx: Int,
+        dy: Int,
+        wheel: Int = 0,
+        flags: Int = 0,
+        offset: Int = 0
+    ) {
+        putShortBE(out, offset, dx.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()))
+        putShortBE(out, offset + 2, dy.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()))
+        putShortBE(out, offset + 4, wheel.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()))
+        putShortBE(out, offset + 6, flags and 0xFFFF)
     }
 
     fun makeNonce(dir: Int, seq: Long): ByteArray {
@@ -119,12 +130,78 @@ object UdpMouseCodec {
         wireOut: ByteArray,
         cipher: Cipher
     ): Int {
+        return sealMoveWithFecInto(
+            secretKey = secretKey,
+            sessionId = sessionId,
+            dir = dir,
+            seq = seq,
+            dx = dx,
+            dy = dy,
+            wheel = wheel,
+            flags = flags,
+            hasPrev1 = false,
+            prev1Dx = 0,
+            prev1Dy = 0,
+            prev1Wheel = 0,
+            prev1Flags = 0,
+            hasPrev2 = false,
+            prev2Dx = 0,
+            prev2Dy = 0,
+            prev2Wheel = 0,
+            prev2Flags = 0,
+            payloadScratch = payloadScratch,
+            nonceScratch = nonceScratch,
+            wireOut = wireOut,
+            cipher = cipher
+        )
+    }
+
+    /**
+     * Zero-allocation AEAD seal for mouse moves with up to 2 redundant prior frames (`seq-1`, `seq-2`)
+     * so single or double UDP drops on Wi-Fi recover instantly without retransmit stalls.
+     */
+    fun sealMoveWithFecInto(
+        secretKey: SecretKeySpec,
+        sessionId: Long,
+        dir: Int,
+        seq: Long,
+        dx: Int,
+        dy: Int,
+        wheel: Int = 0,
+        flags: Int = 0,
+        hasPrev1: Boolean = false,
+        prev1Dx: Int = 0,
+        prev1Dy: Int = 0,
+        prev1Wheel: Int = 0,
+        prev1Flags: Int = 0,
+        hasPrev2: Boolean = false,
+        prev2Dx: Int = 0,
+        prev2Dy: Int = 0,
+        prev2Wheel: Int = 0,
+        prev2Flags: Int = 0,
+        payloadScratch: ByteArray,
+        nonceScratch: ByteArray,
+        wireOut: ByteArray,
+        cipher: Cipher
+    ): Int {
+        var effectiveFlags = flags and FLAG_HI_RES_WHEEL
+        var payloadLen = MOVE_PAYLOAD_LEN
+        if (hasPrev1) {
+            effectiveFlags = effectiveFlags or FLAG_FEC_PREV1
+            writeMovePayloadInto(payloadScratch, prev1Dx, prev1Dy, prev1Wheel, prev1Flags and FLAG_HI_RES_WHEEL, offset = MOVE_PAYLOAD_LEN)
+            payloadLen = MOVE_PAYLOAD_LEN * 2
+            if (hasPrev2) {
+                effectiveFlags = effectiveFlags or FLAG_FEC_PREV2
+                writeMovePayloadInto(payloadScratch, prev2Dx, prev2Dy, prev2Wheel, prev2Flags and FLAG_HI_RES_WHEEL, offset = MOVE_PAYLOAD_LEN * 2)
+                payloadLen = MOVE_FEC_PAYLOAD_LEN
+            }
+        }
         writeHeaderInto(wireOut, PKT_MOUSE_MOVE, sessionId, seq)
         writeNonceInto(nonceScratch, dir, seq)
-        writeMovePayloadInto(payloadScratch, dx, dy, wheel, flags)
+        writeMovePayloadInto(payloadScratch, dx, dy, wheel, effectiveFlags, offset = 0)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_BITS, nonceScratch))
         cipher.updateAAD(wireOut, 0, HEADER_LEN)
-        val written = cipher.doFinal(payloadScratch, 0, MOVE_PAYLOAD_LEN, wireOut, HEADER_LEN)
+        val written = cipher.doFinal(payloadScratch, 0, payloadLen, wireOut, HEADER_LEN)
         return HEADER_LEN + written
     }
 
@@ -394,11 +471,22 @@ class UdpMouseChannel(
         onReadyChanged(true)
         Log.i(TAG, "UDP low-latency mouse channel active for $host:$port")
 
-        // Phase 2: Dedicated zero-allocation send loop over connected UDP socket
-        val payloadScratch = ByteArray(UdpMouseCodec.MOVE_PAYLOAD_LEN)
+        // Phase 2: Dedicated zero-allocation send loop over connected UDP socket with 2-frame FEC tail
+        val payloadScratch = ByteArray(UdpMouseCodec.MOVE_FEC_PAYLOAD_LEN)
         val nonceScratch = ByteArray(UdpMouseCodec.NONCE_LEN)
-        val wireBuf = ByteArray(UdpMouseCodec.MOVE_WIRE_LEN)
+        val wireBuf = ByteArray(UdpMouseCodec.MOVE_FEC_WIRE_LEN)
         val sendPacket = DatagramPacket(wireBuf, wireBuf.size)
+
+        var hasPrev1 = false
+        var prev1Dx = 0
+        var prev1Dy = 0
+        var prev1Wheel = 0
+        var prev1Flags = 0
+        var hasPrev2 = false
+        var prev2Dx = 0
+        var prev2Dy = 0
+        var prev2Wheel = 0
+        var prev2Flags = 0
 
         while (!closed) {
             val dx = pendingDx.getAndSet(0)
@@ -417,7 +505,7 @@ class UdpMouseChannel(
 
             try {
                 val seq = nextSeq.incrementAndGet()
-                val totalLen = UdpMouseCodec.sealMoveInto(
+                val totalLen = UdpMouseCodec.sealMoveWithFecInto(
                     secretKey = secretKey,
                     sessionId = sessionId,
                     dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
@@ -426,6 +514,16 @@ class UdpMouseChannel(
                     dy = dy,
                     wheel = wheel,
                     flags = flags,
+                    hasPrev1 = hasPrev1,
+                    prev1Dx = prev1Dx,
+                    prev1Dy = prev1Dy,
+                    prev1Wheel = prev1Wheel,
+                    prev1Flags = prev1Flags,
+                    hasPrev2 = hasPrev2,
+                    prev2Dx = prev2Dx,
+                    prev2Dy = prev2Dy,
+                    prev2Wheel = prev2Wheel,
+                    prev2Flags = prev2Flags,
                     payloadScratch = payloadScratch,
                     nonceScratch = nonceScratch,
                     wireOut = wireBuf,
@@ -433,6 +531,19 @@ class UdpMouseChannel(
                 )
                 sendPacket.setLength(totalLen)
                 localSocket.send(sendPacket)
+
+                if (hasPrev1) {
+                    hasPrev2 = true
+                    prev2Dx = prev1Dx
+                    prev2Dy = prev1Dy
+                    prev2Wheel = prev1Wheel
+                    prev2Flags = prev1Flags
+                }
+                hasPrev1 = true
+                prev1Dx = dx
+                prev1Dy = dy
+                prev1Wheel = wheel
+                prev1Flags = flags
             } catch (e: Exception) {
                 if (!closed) {
                     Log.w(TAG, "UDP send error; falling back to WebSocket: ${e.message}")

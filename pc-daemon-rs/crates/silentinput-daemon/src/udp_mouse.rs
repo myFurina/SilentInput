@@ -18,10 +18,13 @@ pub const PKT_PROBE_ACK: u8 = 0x02;
 pub const PKT_MOUSE_MOVE: u8 = 0x03;
 
 pub const FLAG_HI_RES_WHEEL: u16 = 0x0001;
+pub const FLAG_FEC_PREV1: u16 = 0x0002;
+pub const FLAG_FEC_PREV2: u16 = 0x0004;
 
 pub const HEADER_LEN: usize = 20;
 pub const GCM_TAG_LEN: usize = 16;
 pub const MAX_UDP_PACKET_LEN: usize = 128;
+const UDP_PACER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(6);
 
 pub const DIR_CLIENT_TO_SERVER: u32 = 1;
 pub const DIR_SERVER_TO_CLIENT: u32 = 2;
@@ -221,12 +224,87 @@ pub fn seal_udp_packet(
     Some(out)
 }
 
-pub fn handle_udp_packet(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DecodedUdpMove {
+    dx: i32,
+    dy: i32,
+    wheel: i32,
+    is_hi_res: bool,
+}
+
+enum UdpPacketAction {
+    ProbeAck(Vec<u8>),
+    MoveFrames {
+        session: Arc<UdpSession>,
+        frames: Vec<DecodedUdpMove>,
+    },
+}
+
+fn parse_move_frame(bytes: &[u8]) -> (DecodedUdpMove, u16) {
+    let dx = i16::from_be_bytes([bytes[0], bytes[1]]) as i32;
+    let dy = i16::from_be_bytes([bytes[2], bytes[3]]) as i32;
+    let wheel = i16::from_be_bytes([bytes[4], bytes[5]]) as i32;
+    let flags = u16::from_be_bytes([bytes[6], bytes[7]]);
+    (
+        DecodedUdpMove {
+            dx,
+            dy,
+            wheel,
+            is_hi_res: (flags & FLAG_HI_RES_WHEEL) != 0,
+        },
+        flags,
+    )
+}
+
+fn emit_rel_move(input: &dyn InputController, dx: i32, dy: i32) {
+    if (dx == 0 && dy == 0) || !input.ensure_ready(false) {
+        return;
+    }
+    let mut events = Vec::with_capacity(2);
+    if dx != 0 {
+        events.push(InputEvent::new(
+            EventType::RELATIVE,
+            RelativeAxisType::REL_X.0,
+            dx,
+        ));
+    }
+    if dy != 0 {
+        events.push(InputEvent::new(
+            EventType::RELATIVE,
+            RelativeAxisType::REL_Y.0,
+            dy,
+        ));
+    }
+    input.emit_uinput_events(&events);
+}
+
+fn emit_wheel_frames(input: &dyn InputController, session: &UdpSession, frames: &[DecodedUdpMove]) {
+    if !frames.iter().any(|f| f.wheel != 0) || !input.ensure_ready(false) {
+        return;
+    }
+    let mut events = Vec::with_capacity(frames.len() * 2);
+    {
+        let mut acc = session.wheel_hi_acc.lock().unwrap_or_else(|e| e.into_inner());
+        for f in frames {
+            if f.wheel != 0 {
+                if f.is_hi_res {
+                    push_wheel_events(&mut acc, f.wheel, 0, &mut events);
+                } else {
+                    push_wheel_events(&mut acc, 0, f.wheel, &mut events);
+                }
+            }
+        }
+    }
+    if !events.is_empty() {
+        input.emit_uinput_events(&events);
+    }
+}
+
+fn decode_udp_packet_action(
     packet: &[u8],
     peer_addr: SocketAddr,
     registry: &UdpSessionRegistry,
-    input: &dyn InputController,
-) -> Option<Vec<u8>> {
+) -> Option<UdpPacketAction> {
     if packet.len() < HEADER_LEN + GCM_TAG_LEN || packet.len() > MAX_UDP_PACKET_LEN {
         return None;
     }
@@ -265,11 +343,9 @@ pub fn handle_udp_packet(
         .ok()?;
 
     // Enforce anti-replay ONLY after cryptographic authentication succeeds
-    {
-        let mut replay = session.replay.lock().unwrap_or_else(|e| e.into_inner());
-        if !replay.check_and_update(seq) {
-            return None;
-        }
+    let mut replay = session.replay.lock().unwrap_or_else(|e| e.into_inner());
+    if !replay.check_and_update(seq) {
+        return None;
     }
 
     match pkt_type {
@@ -277,6 +353,7 @@ pub fn handle_udp_packet(
             if pt.len() < 4 {
                 return None;
             }
+            drop(replay);
             if !session.probe_logged.swap(true, Ordering::AcqRel) {
                 println!(
                     "[SilentInput] UDP low-latency mouse verified for {peer_addr} (session {session_id:016x})"
@@ -291,45 +368,92 @@ pub fn handle_udp_packet(
                 ack_seq,
                 &pt[..4],
             )
+            .map(UdpPacketAction::ProbeAck)
         }
         PKT_MOUSE_MOVE => {
             if pt.len() < 8 {
                 return None;
             }
-            let dx = i16::from_be_bytes([pt[0], pt[1]]) as i32;
-            let dy = i16::from_be_bytes([pt[2], pt[3]]) as i32;
-            let wheel = i16::from_be_bytes([pt[4], pt[5]]) as i32;
-            let flags = u16::from_be_bytes([pt[6], pt[7]]);
-            let is_hi_res = (flags & FLAG_HI_RES_WHEEL) != 0;
-            if (dx != 0 || dy != 0 || wheel != 0) && input.ensure_ready(false) {
-                let mut events = Vec::with_capacity(4);
-                if dx != 0 {
-                    events.push(InputEvent::new(
-                        EventType::RELATIVE,
-                        RelativeAxisType::REL_X.0,
-                        dx,
-                    ));
-                }
-                if dy != 0 {
-                    events.push(InputEvent::new(
-                        EventType::RELATIVE,
-                        RelativeAxisType::REL_Y.0,
-                        dy,
-                    ));
-                }
-                if wheel != 0 {
-                    let mut acc = session.wheel_hi_acc.lock().unwrap_or_else(|e| e.into_inner());
-                    if is_hi_res {
-                        push_wheel_events(&mut acc, wheel, 0, &mut events);
-                    } else {
-                        push_wheel_events(&mut acc, 0, wheel, &mut events);
+            let (cur_frame, cur_flags) = parse_move_frame(&pt[0..8]);
+            let mut frames = Vec::with_capacity(3);
+            if (cur_flags & FLAG_FEC_PREV2) != 0
+                && pt.len() >= 24
+                && seq > 2
+                && replay.check_and_update(seq - 2)
+            {
+                frames.push(parse_move_frame(&pt[16..24]).0);
+            }
+            if (cur_flags & FLAG_FEC_PREV1) != 0
+                && pt.len() >= 16
+                && seq > 1
+                && replay.check_and_update(seq - 1)
+            {
+                frames.push(parse_move_frame(&pt[8..16]).0);
+            }
+            frames.push(cur_frame);
+            drop(replay);
+            Some(UdpPacketAction::MoveFrames { session, frames })
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+pub fn handle_udp_packet(
+    packet: &[u8],
+    peer_addr: SocketAddr,
+    registry: &UdpSessionRegistry,
+    input: &dyn InputController,
+) -> Option<Vec<u8>> {
+    match decode_udp_packet_action(packet, peer_addr, registry)? {
+        UdpPacketAction::ProbeAck(reply) => Some(reply),
+        UdpPacketAction::MoveFrames { session, frames } => {
+            if input.ensure_ready(false) {
+                let mut sum_dx = 0i32;
+                let mut sum_dy = 0i32;
+                let mut has_wheel = false;
+                for f in &frames {
+                    sum_dx = sum_dx.saturating_add(f.dx);
+                    sum_dy = sum_dy.saturating_add(f.dy);
+                    if f.wheel != 0 {
+                        has_wheel = true;
                     }
                 }
-                input.emit_uinput_events(&events);
+                if sum_dx != 0 || sum_dy != 0 || has_wheel {
+                    let mut events = Vec::with_capacity(4);
+                    if sum_dx != 0 {
+                        events.push(InputEvent::new(
+                            EventType::RELATIVE,
+                            RelativeAxisType::REL_X.0,
+                            sum_dx,
+                        ));
+                    }
+                    if sum_dy != 0 {
+                        events.push(InputEvent::new(
+                            EventType::RELATIVE,
+                            RelativeAxisType::REL_Y.0,
+                            sum_dy,
+                        ));
+                    }
+                    if has_wheel {
+                        let mut acc = session.wheel_hi_acc.lock().unwrap_or_else(|e| e.into_inner());
+                        for f in &frames {
+                            if f.wheel != 0 {
+                                if f.is_hi_res {
+                                    push_wheel_events(&mut acc, f.wheel, 0, &mut events);
+                                } else {
+                                    push_wheel_events(&mut acc, 0, f.wheel, &mut events);
+                                }
+                            }
+                        }
+                    }
+                    if !events.is_empty() {
+                        input.emit_uinput_events(&events);
+                    }
+                }
             }
             None
         }
-        _ => None,
     }
 }
 
@@ -339,16 +463,68 @@ pub async fn run_udp_mouse_server(
     input: Arc<dyn InputController>,
 ) {
     let mut buf = [0u8; 256];
+    let mut pending_dx: i32 = 0;
+    let mut pending_dy: i32 = 0;
+    let mut last_move_emit: Option<tokio::time::Instant> = None;
+    let mut flush_deadline: Option<tokio::time::Instant> = None;
+
     loop {
-        match socket.recv_from(&mut buf).await {
-            Ok((len, peer_addr)) => {
-                if let Some(reply) = handle_udp_packet(&buf[..len], peer_addr, &registry, &*input) {
-                    let _ = socket.send_to(&reply, peer_addr).await;
+        let pacer_sleep = async {
+            if let Some(deadline) = flush_deadline {
+                tokio::time::sleep_until(deadline).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+
+        tokio::select! {
+            recv_res = socket.recv_from(&mut buf) => {
+                match recv_res {
+                    Ok((len, peer_addr)) => {
+                        match decode_udp_packet_action(&buf[..len], peer_addr, &registry) {
+                            Some(UdpPacketAction::ProbeAck(reply)) => {
+                                let _ = socket.send_to(&reply, peer_addr).await;
+                            }
+                            Some(UdpPacketAction::MoveFrames { session, frames }) => {
+                                emit_wheel_frames(&*input, &session, &frames);
+                                let mut frame_dx = 0i32;
+                                let mut frame_dy = 0i32;
+                                for f in &frames {
+                                    frame_dx = frame_dx.saturating_add(f.dx);
+                                    frame_dy = frame_dy.saturating_add(f.dy);
+                                }
+                                if frame_dx != 0 || frame_dy != 0 {
+                                    pending_dx = pending_dx.saturating_add(frame_dx);
+                                    pending_dy = pending_dy.saturating_add(frame_dy);
+                                    let now = tokio::time::Instant::now();
+                                    let can_emit_now = last_move_emit
+                                        .is_none_or(|t| now.duration_since(t) >= UDP_PACER_INTERVAL);
+                                    if can_emit_now {
+                                        emit_rel_move(&*input, pending_dx, pending_dy);
+                                        pending_dx = 0;
+                                        pending_dy = 0;
+                                        last_move_emit = Some(now);
+                                        flush_deadline = None;
+                                    } else if flush_deadline.is_none() {
+                                        flush_deadline = last_move_emit.map(|t| t + UDP_PACER_INTERVAL);
+                                    }
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("[SilentInput] UDP mouse recv error: {err}");
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
                 }
             }
-            Err(err) => {
-                eprintln!("[SilentInput] UDP mouse recv error: {err}");
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            _ = pacer_sleep, if flush_deadline.is_some() => {
+                emit_rel_move(&*input, pending_dx, pending_dy);
+                pending_dx = 0;
+                pending_dy = 0;
+                last_move_emit = Some(tokio::time::Instant::now());
+                flush_deadline = None;
             }
         }
     }
@@ -627,6 +803,86 @@ mod tests {
             vec![
                 (EventType::RELATIVE.0, RelativeAxisType::REL_WHEEL.0, -1),
                 (EventType::RELATIVE.0, RelativeAxisType::REL_WHEEL_HI_RES.0, -120),
+            ]
+        );
+    }
+
+    #[test]
+    fn udp_fec_recovers_dropped_packets_and_rejects_late_duplicates() {
+        let registry = UdpSessionRegistry::new(53318, true);
+        let input = Arc::new(TestUdpInput {
+            ready: AtomicBool::new(true),
+            ..Default::default()
+        });
+        let creds = registry.create_session("192.168.1.50").unwrap();
+        let key_bytes = decode_base64_for_test(&creds.key_b64);
+        let client_key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key_bytes).unwrap());
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 44446);
+
+        let encode_frame = |dx: i16, dy: i16, wheel: i16, flags: u16| -> [u8; 8] {
+            let mut b = [0u8; 8];
+            b[0..2].copy_from_slice(&dx.to_be_bytes());
+            b[2..4].copy_from_slice(&dy.to_be_bytes());
+            b[4..6].copy_from_slice(&wheel.to_be_bytes());
+            b[6..8].copy_from_slice(&flags.to_be_bytes());
+            b
+        };
+
+        // 1. seq=1 arrives normally
+        let pkt1 = seal_udp_packet(
+            &client_key,
+            PKT_MOUSE_MOVE,
+            creds.session_id,
+            DIR_CLIENT_TO_SERVER,
+            1,
+            &encode_frame(5, -2, 0, 0),
+        )
+        .unwrap();
+        assert!(handle_udp_packet(&pkt1, peer, &registry, &*input).is_none());
+
+        // 2. seq=2 (dx=10, dy=1) and seq=3 (dx=12, dy=2) are dropped; seq=4 arrives with FEC history!
+        let pkt2_lost = seal_udp_packet(
+            &client_key,
+            PKT_MOUSE_MOVE,
+            creds.session_id,
+            DIR_CLIENT_TO_SERVER,
+            2,
+            &encode_frame(10, 1, 0, 0),
+        )
+        .unwrap();
+        let mut pt4 = Vec::with_capacity(24);
+        pt4.extend_from_slice(&encode_frame(8, -4, 0, FLAG_FEC_PREV1 | FLAG_FEC_PREV2));
+        pt4.extend_from_slice(&encode_frame(12, 2, 0, 0)); // prev1 = seq 3
+        pt4.extend_from_slice(&encode_frame(10, 1, 0, 0)); // prev2 = seq 2
+        let pkt4 = seal_udp_packet(
+            &client_key,
+            PKT_MOUSE_MOVE,
+            creds.session_id,
+            DIR_CLIENT_TO_SERVER,
+            4,
+            &pt4,
+        )
+        .unwrap();
+        assert!(handle_udp_packet(&pkt4, peer, &registry, &*input).is_none());
+
+        // 3. Delayed seq=2 arrives later -> must be ignored because FEC already applied seq=2
+        assert!(handle_udp_packet(&pkt2_lost, peer, &registry, &*input).is_none());
+
+        let evs = input.events.lock().unwrap();
+        assert_eq!(evs.len(), 2);
+        assert_eq!(
+            evs[0],
+            vec![
+                (EventType::RELATIVE.0, RelativeAxisType::REL_X.0, 5),
+                (EventType::RELATIVE.0, RelativeAxisType::REL_Y.0, -2),
+            ]
+        );
+        // Combined recovered seq=2 (10,1) + seq=3 (12,2) + seq=4 (8,-4) = (30, -1)
+        assert_eq!(
+            evs[1],
+            vec![
+                (EventType::RELATIVE.0, RelativeAxisType::REL_X.0, 30),
+                (EventType::RELATIVE.0, RelativeAxisType::REL_Y.0, -1),
             ]
         );
     }
