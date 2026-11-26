@@ -296,6 +296,14 @@ class UdpMouseChannel(
             targetAddr = InetAddress.getByName(host)
             localSocket = DatagramSocket()
             localSocket.connect(targetAddr, port)
+            try {
+                // DSCP EF (0xB8) maps to WMM AC_VO/AC_VI low-latency queue on Wi-Fi; fall back to IPTOS_LOWDELAY.
+                localSocket.trafficClass = 0xB8
+            } catch (_: Exception) {
+                try {
+                    localSocket.trafficClass = 0x10
+                } catch (_: Exception) {}
+            }
             localSocket.soTimeout = PROBE_TIMEOUT_MS
             socket = localSocket
         } catch (e: Exception) {

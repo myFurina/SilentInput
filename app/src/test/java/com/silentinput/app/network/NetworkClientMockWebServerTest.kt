@@ -130,6 +130,13 @@ class NetworkClientMockWebServerTest {
             assertTrue(client.sendPaste("hello", enter = true, mode = "gui"))
             val pasteMsg = receivedMessages.poll(5, TimeUnit.SECONDS)
             assertEquals("""{"type":"paste","content":"hello","mode":"gui","enter":true}""", pasteMsg)
+
+            assertTrue(client.sendMouse(4f, -3f, action = "move"))
+            assertTrue(client.sendMouse(0f, 0f, action = "click_left"))
+            val moveMsg = receivedMessages.poll(5, TimeUnit.SECONDS)
+            val clickMsg = receivedMessages.poll(5, TimeUnit.SECONDS)
+            assertEquals("""{"type":"mouse","dx":4.0,"dy":-3.0,"action":"move"}""", moveMsg)
+            assertEquals("""{"type":"mouse","dx":0.0,"dy":0.0,"action":"click_left"}""", clickMsg)
         } finally {
             serverSocket.get()?.close(1000, null)
             client.destroy()

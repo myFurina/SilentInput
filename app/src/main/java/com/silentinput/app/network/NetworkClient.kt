@@ -1,6 +1,8 @@
 package com.silentinput.app.network
 
 import android.content.Context
+import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import com.silentinput.app.model.AppLanguage
@@ -54,6 +56,7 @@ class NetworkClient(
         private const val PING_INITIAL_DELAY_MS = 1000L
         private const val PING_INTERVAL_FOREGROUND_MS = 5000L
         private const val PING_TIMEOUT_MS = 5000L
+        private const val WS_MOVE_COALESCE_INTERVAL_MS = 8L
         private const val MAX_RECONNECT_ATTEMPTS = 8
 
         fun isLoopbackHost(rawHost: String): Boolean {
@@ -115,6 +118,15 @@ class NetworkClient(
     }
 
     private val tofuPrefs = context?.applicationContext?.getSharedPreferences(TOFU_PREFS_NAME, Context.MODE_PRIVATE)
+    private val wifiManager = context?.applicationContext?.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var activeHostIsLan = false
+
+    private val wsMoveLock = Any()
+    private var pendingWsMoveDx = 0f
+    private var pendingWsMoveDy = 0f
+    private var hasPendingWsMove = false
+    private var wsMoveFlushJob: Job? = null
 
     @Volatile
     private var udpMouseChannel: UdpMouseChannel? = null
@@ -376,6 +388,7 @@ class NetworkClient(
         disconnectSocketOnlyLocked()
 
         val endpoint = parseServerEndpoint(serverIp, serverPort) ?: return
+        activeHostIsLan = !isLoopbackHost(endpoint.host)
         val useTls = isTlsEnabled
         val proto = if (useTls) "wss" else "ws"
         val url = endpoint.toWebSocketUrl(useTls)
@@ -478,6 +491,7 @@ class NetworkClient(
                                 }
                                 _supportsHiResWheel.value = msg.hiResWheel == true
                                 setConnectionError(null)
+                                acquireWifiLockLocked()
                                 closeUdpChannelLocked()
                                 if (!isLoopbackHost(endpoint.host) && msg.udpPort != null && msg.udpSessionId != null && msg.udpKey != null) {
                                     val sid = UdpMouseCodec.parseSessionIdHex(msg.udpSessionId)
@@ -621,8 +635,56 @@ class NetworkClient(
         ch?.close()
     }
 
+    private fun acquireWifiLockLocked() {
+        val wm = wifiManager ?: return
+        if (isInBackground || !activeHostIsLan) return
+        try {
+            if (wifiLock == null) {
+                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiLock = wm.createWifiLock(mode, "SilentInput:LowLatencyLan")?.apply {
+                    setReferenceCounted(false)
+                }
+            }
+            val lock = wifiLock
+            if (lock != null && !lock.isHeld) {
+                lock.acquire()
+                Log.d(TAG, "Acquired low-latency Wi-Fi lock")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to acquire Wi-Fi lock: ${e.message}")
+        }
+    }
+
+    private fun releaseWifiLockLocked() {
+        try {
+            val lock = wifiLock
+            if (lock != null && lock.isHeld) {
+                lock.release()
+                Log.d(TAG, "Released low-latency Wi-Fi lock")
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun clearPendingWsMoves() {
+        synchronized(wsMoveLock) {
+            wsMoveFlushJob?.cancel()
+            wsMoveFlushJob = null
+            pendingWsMoveDx = 0f
+            pendingWsMoveDy = 0f
+            hasPendingWsMove = false
+        }
+    }
+
     private fun handleDisconnectedLocked() {
+        clearPendingWsMoves()
+        releaseWifiLockLocked()
         closeUdpChannelLocked()
+        activeHostIsLan = false
         webSocket = null
         _isConnected.value = false
         _isConnecting.value = false
@@ -697,6 +759,7 @@ class NetworkClient(
             reconnectJob = null
             _isReconnecting.value = false
             stopPingLoopLocked()
+            releaseWifiLockLocked()
         }
     }
 
@@ -722,6 +785,9 @@ class NetworkClient(
             isInBackground = false
             val ws = webSocket
             if (_isConnected.value && ws != null) {
+                if (_isAuthenticated.value) {
+                    acquireWifiLockLocked()
+                }
                 startPingLoopLocked(ws)
             } else if (shouldBeConnected && !_isConnecting.value) {
                 Log.d(TAG, "App resumed into foreground, immediately reconnecting...")
@@ -844,6 +910,9 @@ class NetworkClient(
                 return true
             }
         }
+        if (action == MouseAction.MOVE.wireValue && wheel == 0f) {
+            return enqueueOrSendWsMove(dx, dy)
+        }
         return sendJson(
             ProtocolPayloads.buildMouseJson(
                 dx,
@@ -855,8 +924,69 @@ class NetworkClient(
         )
     }
 
+    private fun enqueueOrSendWsMove(dx: Float, dy: Float): Boolean {
+        val ws = webSocket ?: return false
+        if (!dx.isFinite() || !dy.isFinite() || (dx == 0f && dy == 0f)) return true
+
+        val directPayload: String? = synchronized(wsMoveLock) {
+            if (!hasPendingWsMove && ws.queueSize() == 0L) {
+                ProtocolPayloads.buildMouseJson(dx, dy, action = MouseAction.MOVE.wireValue)
+            } else {
+                pendingWsMoveDx += dx
+                pendingWsMoveDy += dy
+                hasPendingWsMove = true
+                if (wsMoveFlushJob?.isActive != true) {
+                    wsMoveFlushJob = scope.launch {
+                        while (isActive && webSocket === ws) {
+                            delay(WS_MOVE_COALESCE_INTERVAL_MS)
+                            if (!flushPendingWsMoves(ws)) break
+                            val morePending = synchronized(wsMoveLock) {
+                                hasPendingWsMove
+                            }
+                            if (!morePending) break
+                        }
+                        synchronized(wsMoveLock) {
+                            if (wsMoveFlushJob === coroutineContext[Job]) {
+                                wsMoveFlushJob = null
+                            }
+                        }
+                    }
+                }
+                null
+            }
+        }
+        return if (directPayload != null) {
+            sendRawJson(ws, directPayload)
+        } else {
+            true
+        }
+    }
+
+    private fun flushPendingWsMoves(expectedWs: WebSocket): Boolean {
+        val payload = synchronized(wsMoveLock) {
+            if (!hasPendingWsMove) return true
+            val dx = pendingWsMoveDx
+            val dy = pendingWsMoveDy
+            pendingWsMoveDx = 0f
+            pendingWsMoveDy = 0f
+            hasPendingWsMove = false
+            if (dx == 0f && dy == 0f) return true
+            ProtocolPayloads.buildMouseJson(
+                dx,
+                dy,
+                action = MouseAction.MOVE.wireValue
+            )
+        }
+        return sendRawJson(expectedWs, payload)
+    }
+
     private fun sendJson(payload: String): Boolean {
         val ws = webSocket ?: return false
+        if (!flushPendingWsMoves(ws)) return false
+        return sendRawJson(ws, payload)
+    }
+
+    private fun sendRawJson(ws: WebSocket, payload: String): Boolean {
         val sent = ws.send(payload)
         if (!sent) {
             synchronized(stateLock) {
@@ -872,8 +1002,11 @@ class NetworkClient(
     }
 
     private fun disconnectSocketOnlyLocked() {
+        clearPendingWsMoves()
+        releaseWifiLockLocked()
         stopPingLoopLocked()
         closeUdpChannelLocked()
+        activeHostIsLan = false
         val wasConnected = _isConnected.value
         val old = webSocket
         webSocket = null
