@@ -25,6 +25,57 @@ pub const HEADER_LEN: usize = 20;
 pub const GCM_TAG_LEN: usize = 16;
 pub const MAX_UDP_PACKET_LEN: usize = 128;
 const UDP_PACER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(6);
+const UDP_SMOOTHER_DRAIN_RATIO: f64 = 0.60;
+const UDP_SMOOTHER_SNAP_THRESHOLD: i32 = 4;
+
+#[derive(Default)]
+struct UdpMoveSmoother {
+    pending_dx: i32,
+    pending_dy: i32,
+    last_emit: Option<tokio::time::Instant>,
+}
+
+impl UdpMoveSmoother {
+    fn push(&mut self, dx: i32, dy: i32) {
+        self.pending_dx = self.pending_dx.saturating_add(dx);
+        self.pending_dy = self.pending_dy.saturating_add(dy);
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending_dx != 0 || self.pending_dy != 0
+    }
+
+    fn next_deadline(&self) -> Option<tokio::time::Instant> {
+        if self.has_pending() {
+            self.last_emit.map(|t| t + UDP_PACER_INTERVAL)
+        } else {
+            None
+        }
+    }
+
+    fn take_step(&mut self, now: tokio::time::Instant) -> Option<(i32, i32)> {
+        if !self.has_pending() {
+            return None;
+        }
+        if let Some(last) = self.last_emit {
+            if now.duration_since(last) < UDP_PACER_INTERVAL {
+                return None;
+            }
+        }
+        let max_abs = self.pending_dx.abs().max(self.pending_dy.abs());
+        let (step_x, step_y) = if max_abs <= UDP_SMOOTHER_SNAP_THRESHOLD {
+            (self.pending_dx, self.pending_dy)
+        } else {
+            let sx = (self.pending_dx as f64 * UDP_SMOOTHER_DRAIN_RATIO).round() as i32;
+            let sy = (self.pending_dy as f64 * UDP_SMOOTHER_DRAIN_RATIO).round() as i32;
+            (sx, sy)
+        };
+        self.pending_dx -= step_x;
+        self.pending_dy -= step_y;
+        self.last_emit = Some(now);
+        Some((step_x, step_y))
+    }
+}
 
 pub const DIR_CLIENT_TO_SERVER: u32 = 1;
 pub const DIR_SERVER_TO_CLIENT: u32 = 2;
@@ -463,12 +514,10 @@ pub async fn run_udp_mouse_server(
     input: Arc<dyn InputController>,
 ) {
     let mut buf = [0u8; 256];
-    let mut pending_dx: i32 = 0;
-    let mut pending_dy: i32 = 0;
-    let mut last_move_emit: Option<tokio::time::Instant> = None;
-    let mut flush_deadline: Option<tokio::time::Instant> = None;
+    let mut smoother = UdpMoveSmoother::default();
 
     loop {
+        let flush_deadline = smoother.next_deadline();
         let pacer_sleep = async {
             if let Some(deadline) = flush_deadline {
                 tokio::time::sleep_until(deadline).await;
@@ -494,19 +543,9 @@ pub async fn run_udp_mouse_server(
                                     frame_dy = frame_dy.saturating_add(f.dy);
                                 }
                                 if frame_dx != 0 || frame_dy != 0 {
-                                    pending_dx = pending_dx.saturating_add(frame_dx);
-                                    pending_dy = pending_dy.saturating_add(frame_dy);
-                                    let now = tokio::time::Instant::now();
-                                    let can_emit_now = last_move_emit
-                                        .is_none_or(|t| now.duration_since(t) >= UDP_PACER_INTERVAL);
-                                    if can_emit_now {
-                                        emit_rel_move(&*input, pending_dx, pending_dy);
-                                        pending_dx = 0;
-                                        pending_dy = 0;
-                                        last_move_emit = Some(now);
-                                        flush_deadline = None;
-                                    } else if flush_deadline.is_none() {
-                                        flush_deadline = last_move_emit.map(|t| t + UDP_PACER_INTERVAL);
+                                    smoother.push(frame_dx, frame_dy);
+                                    if let Some((sx, sy)) = smoother.take_step(tokio::time::Instant::now()) {
+                                        emit_rel_move(&*input, sx, sy);
                                     }
                                 }
                             }
@@ -520,11 +559,11 @@ pub async fn run_udp_mouse_server(
                 }
             }
             _ = pacer_sleep, if flush_deadline.is_some() => {
-                emit_rel_move(&*input, pending_dx, pending_dy);
-                pending_dx = 0;
-                pending_dy = 0;
-                last_move_emit = Some(tokio::time::Instant::now());
-                flush_deadline = None;
+                let now = tokio::time::Instant::now();
+                let step_time = flush_deadline.map_or(now, |d| now.max(d));
+                if let Some((sx, sy)) = smoother.take_step(step_time) {
+                    emit_rel_move(&*input, sx, sy);
+                }
             }
         }
     }
@@ -885,5 +924,49 @@ mod tests {
                 (EventType::RELATIVE.0, RelativeAxisType::REL_Y.0, -1),
             ]
         );
+    }
+
+    #[test]
+    fn udp_move_smoother_paces_bursts_losslessly_and_cancels_reversals() {
+        let mut smoother = UdpMoveSmoother::default();
+        let t0 = tokio::time::Instant::now();
+
+        // 1. Small delta <= 4 emits 100% immediately on cold arrival
+        smoother.push(3, -2);
+        assert_eq!(smoother.take_step(t0), Some((3, -2)));
+        assert!(!smoother.has_pending());
+
+        // 2. Arrival < 6ms waits until next tick
+        smoother.push(20, -10);
+        assert_eq!(smoother.take_step(t0 + std::time::Duration::from_millis(2)), None);
+        assert!(smoother.next_deadline().is_some());
+
+        // 3. Proportional drain across 6ms ticks with zero total drift
+        let mut sum_x = 0;
+        let mut sum_y = 0;
+        let mut steps = Vec::new();
+        let mut cur = t0 + UDP_PACER_INTERVAL;
+        while smoother.has_pending() {
+            if let Some((sx, sy)) = smoother.take_step(cur) {
+                sum_x += sx;
+                sum_y += sy;
+                steps.push((sx, sy));
+            }
+            cur += UDP_PACER_INTERVAL;
+        }
+        assert!(steps.len() >= 2, "expected multi-tick smoothing, got {steps:?}");
+        assert_eq!((sum_x, sum_y), (20, -10));
+
+        // 4. Rapid reversal cancels stale backlog cleanly
+        smoother.push(20, 0);
+        assert_eq!(smoother.take_step(cur), Some((12, 0))); // 8 remaining
+        smoother.push(-14, 0); // net backlog = -6
+        assert!(smoother.take_step(cur + std::time::Duration::from_millis(1)).is_none());
+        assert_eq!(smoother.take_step(cur + UDP_PACER_INTERVAL), Some((-4, 0)));
+        assert_eq!(
+            smoother.take_step(cur + UDP_PACER_INTERVAL * 2),
+            Some((-2, 0))
+        );
+        assert!(!smoother.has_pending());
     }
 }
