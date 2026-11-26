@@ -75,34 +75,35 @@ object QuickEditKeys {
                 val active = imeSwitchKey.ifBlank { ImeSwitchShortcut.DEFAULT }
                 strings.imeSwitchQuickChip(ImeSwitchShortcut.formatLabel(active))
             }
-            "ctrl+a" -> strings.qeSelectAll
-            "ctrl+c" -> strings.qeCopy
-            "ctrl+v" -> strings.qePaste
+            "ctrl+a" -> strings.quickEdit.selectAll
+            "ctrl+c" -> strings.quickEdit.copy
+            "ctrl+v" -> strings.quickEdit.paste
             "tab" -> "Tab"
             "esc" -> "Esc"
-            "home" -> strings.qeHome
-            "end" -> strings.qeEnd
+            "home" -> strings.quickEdit.home
+            "end" -> strings.quickEdit.end
             else -> id
         }
     }
 
     fun settingLabel(id: String, strings: AppStrings): String {
+        val qe = strings.quickEdit
         return when (id) {
-            "left" -> strings.qeOptLeft
-            "right" -> strings.qeOptRight
-            "up" -> strings.qeOptUp
-            "down" -> strings.qeOptDown
-            "backspace" -> strings.qeOptBackspace
-            "delete" -> strings.qeOptDelete
-            "ctrl+z" -> strings.qeOptUndo
-            IME_SWITCH_ID -> strings.qeOptImeSwitch
-            "ctrl+a" -> strings.qeOptSelectAll
-            "ctrl+c" -> strings.qeOptCopy
-            "ctrl+v" -> strings.qeOptPaste
+            "left" -> qe.optLeft
+            "right" -> qe.optRight
+            "up" -> qe.optUp
+            "down" -> qe.optDown
+            "backspace" -> qe.optBackspace
+            "delete" -> qe.optDelete
+            "ctrl+z" -> qe.optUndo
+            IME_SWITCH_ID -> qe.optImeSwitch
+            "ctrl+a" -> qe.optSelectAll
+            "ctrl+c" -> qe.optCopy
+            "ctrl+v" -> qe.optPaste
             "tab" -> "Tab"
             "esc" -> "Esc"
-            "home" -> strings.qeOptHome
-            "end" -> strings.qeOptEnd
+            "home" -> qe.optHome
+            "end" -> qe.optEnd
             else -> id
         }
     }

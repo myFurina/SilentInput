@@ -19,6 +19,89 @@ enum class ResolvedLanguage {
     EN
 }
 
+data class QuickEditStrings(
+    val title: String,
+    val subtitle: String,
+    val reset: String,
+    val addEditKeyChip: String,
+    val newlineBtn: String,
+    val enterBtn: String,
+    val selectAll: String,
+    val copy: String,
+    val paste: String,
+    val home: String,
+    val end: String,
+    val optLeft: String,
+    val optRight: String,
+    val optUp: String,
+    val optDown: String,
+    val optBackspace: String,
+    val optDelete: String,
+    val optUndo: String,
+    val optImeSwitch: String,
+    val optSelectAll: String,
+    val optCopy: String,
+    val optPaste: String,
+    val optHome: String,
+    val optEnd: String
+) {
+    companion object {
+        val ZH = QuickEditStrings(
+            title = "文本页快捷编辑键",
+            subtitle = "点击勾选显示在文本页横向滑动条中的按钮",
+            reset = "恢复默认",
+            addEditKeyChip = "+",
+            newlineBtn = "换行",
+            enterBtn = "回车",
+            selectAll = "全选",
+            copy = "复制",
+            paste = "粘贴",
+            home = "行首",
+            end = "行尾",
+            optLeft = "← 左移",
+            optRight = "→ 右移",
+            optUp = "↑ 上移",
+            optDown = "↓ 下移",
+            optBackspace = "退格",
+            optDelete = "Del 删除",
+            optUndo = "撤销 Ctrl+Z",
+            optImeSwitch = "切换输入法",
+            optSelectAll = "全选 Ctrl+A",
+            optCopy = "复制 Ctrl+C",
+            optPaste = "粘贴 Ctrl+V",
+            optHome = "行首 Home",
+            optEnd = "行尾 End"
+        )
+
+        val EN = QuickEditStrings(
+            title = "Text Tab Quick Edit Keys",
+            subtitle = "Select buttons shown on the Text tab horizontal bar",
+            reset = "Reset",
+            addEditKeyChip = "+",
+            newlineBtn = "Newline",
+            enterBtn = "Enter",
+            selectAll = "All",
+            copy = "Copy",
+            paste = "Paste",
+            home = "Home",
+            end = "End",
+            optLeft = "← Left",
+            optRight = "→ Right",
+            optUp = "↑ Up",
+            optDown = "↓ Down",
+            optBackspace = "Backspace",
+            optDelete = "Del",
+            optUndo = "Undo Ctrl+Z",
+            optImeSwitch = "IME Switch",
+            optSelectAll = "Select All",
+            optCopy = "Copy Ctrl+C",
+            optPaste = "Paste Ctrl+V",
+            optHome = "Home",
+            optEnd = "End"
+        )
+    }
+}
+
 object AppLocaleResolver {
     fun resolve(
         language: AppLanguage,
@@ -278,38 +361,13 @@ data class AppStrings(
     val txtSendToPc: String,
     val txtUndoBtn: String,
     val txtAddSnippetChip: String,
-    val txtAddEditKeyChip: String,
-    val txtNewlineBtn: String,
-    val txtEnterBtn: String,
     val txtCursorEditTitle: String,
     val txtCursorBackspace: String,
     val txtCursorEnter: String,
     val txtInlineTrackpadHint: String,
     val txtTextTooLongError: (limit: Int) -> String,
     val txtQueueBusyToast: String,
-
-    // Quick Edit Bar Customization
-    val quickEditKeysTitle: String,
-    val quickEditKeysSubtitle: String,
-    val quickEditKeysReset: String,
-    val qeSelectAll: String,
-    val qeCopy: String,
-    val qePaste: String,
-    val qeHome: String,
-    val qeEnd: String,
-    val qeOptLeft: String,
-    val qeOptRight: String,
-    val qeOptUp: String,
-    val qeOptDown: String,
-    val qeOptBackspace: String,
-    val qeOptDelete: String,
-    val qeOptUndo: String,
-    val qeOptImeSwitch: String,
-    val qeOptSelectAll: String,
-    val qeOptCopy: String,
-    val qeOptPaste: String,
-    val qeOptHome: String,
-    val qeOptEnd: String
+    val quickEdit: QuickEditStrings
 ) {
     companion object {
         val ZH = AppStrings(
@@ -547,37 +605,13 @@ data class AppStrings(
             txtSendToPc = "发送到电脑",
             txtUndoBtn = "撤销",
             txtAddSnippetChip = "+ 短语",
-            txtAddEditKeyChip = "+",
-            txtNewlineBtn = "换行",
-            txtEnterBtn = "回车",
             txtCursorEditTitle = "编辑与光标",
             txtCursorBackspace = "退格",
             txtCursorEnter = "⏎",
             txtInlineTrackpadHint = "单指移动 · 双指滚动 · 轻点左键",
             txtTextTooLongError = { limit -> "文本过长 (已超出 $limit 字上限)" },
             txtQueueBusyToast = "电脑输入队列已满，请稍后再试",
-
-            quickEditKeysTitle = "文本页快捷编辑键",
-            quickEditKeysSubtitle = "点击勾选显示在文本页横向滑动条中的按钮",
-            quickEditKeysReset = "恢复默认",
-            qeSelectAll = "全选",
-            qeCopy = "复制",
-            qePaste = "粘贴",
-            qeHome = "行首",
-            qeEnd = "行尾",
-            qeOptLeft = "← 左移",
-            qeOptRight = "→ 右移",
-            qeOptUp = "↑ 上移",
-            qeOptDown = "↓ 下移",
-            qeOptBackspace = "退格",
-            qeOptDelete = "Del 删除",
-            qeOptUndo = "撤销 Ctrl+Z",
-            qeOptImeSwitch = "切换输入法",
-            qeOptSelectAll = "全选 Ctrl+A",
-            qeOptCopy = "复制 Ctrl+C",
-            qeOptPaste = "粘贴 Ctrl+V",
-            qeOptHome = "行首 Home",
-            qeOptEnd = "行尾 End"
+            quickEdit = QuickEditStrings.ZH
         )
 
         val EN = AppStrings(
@@ -815,37 +849,13 @@ data class AppStrings(
             txtSendToPc = "Send to PC",
             txtUndoBtn = "Undo",
             txtAddSnippetChip = "+ Snippet",
-            txtAddEditKeyChip = "+",
-            txtNewlineBtn = "Newline",
-            txtEnterBtn = "Enter",
             txtCursorEditTitle = "Edit & Cursor",
             txtCursorBackspace = "Bksp",
             txtCursorEnter = "⏎",
             txtInlineTrackpadHint = "1-finger move · 2-finger scroll · Tap left-click",
             txtTextTooLongError = { limit -> "Text too long (exceeds $limit characters limit)" },
             txtQueueBusyToast = "PC input queue is busy, please slow down",
-
-            quickEditKeysTitle = "Text Tab Quick Edit Keys",
-            quickEditKeysSubtitle = "Select buttons shown on the Text tab horizontal bar",
-            quickEditKeysReset = "Reset",
-            qeSelectAll = "All",
-            qeCopy = "Copy",
-            qePaste = "Paste",
-            qeHome = "Home",
-            qeEnd = "End",
-            qeOptLeft = "← Left",
-            qeOptRight = "→ Right",
-            qeOptUp = "↑ Up",
-            qeOptDown = "↓ Down",
-            qeOptBackspace = "Backspace",
-            qeOptDelete = "Del",
-            qeOptUndo = "Undo Ctrl+Z",
-            qeOptImeSwitch = "IME Switch",
-            qeOptSelectAll = "Select All",
-            qeOptCopy = "Copy Ctrl+C",
-            qeOptPaste = "Paste Ctrl+V",
-            qeOptHome = "Home",
-            qeOptEnd = "End"
+            quickEdit = QuickEditStrings.EN
         )
 
         fun forResolved(language: ResolvedLanguage): AppStrings {

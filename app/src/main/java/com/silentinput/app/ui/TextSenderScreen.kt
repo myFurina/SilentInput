@@ -518,7 +518,7 @@ fun TextSenderScreen(
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = strings.txtAddEditKeyChip,
+                                    text = strings.quickEdit.addEditKeyChip,
                                     fontSize = 16.sp,
                                     fontWeight = FontWeight.Medium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -556,7 +556,7 @@ fun TextSenderScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = strings.txtNewlineBtn,
+                                text = strings.quickEdit.newlineBtn,
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.onSurface,
@@ -600,7 +600,7 @@ fun TextSenderScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = strings.txtEnterBtn,
+                                text = strings.quickEdit.enterBtn,
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer,

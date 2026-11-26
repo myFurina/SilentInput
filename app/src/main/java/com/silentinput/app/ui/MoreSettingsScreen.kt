@@ -459,9 +459,9 @@ private fun QuickEditKeysSection(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(strings.quickEditKeysTitle, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text(strings.quickEdit.title, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Text(
-                    text = strings.quickEditKeysSubtitle,
+                    text = strings.quickEdit.subtitle,
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -471,7 +471,7 @@ private fun QuickEditKeysSection(
                     onClick = onResetDefaults,
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                 ) {
-                    Text(strings.quickEditKeysReset, fontSize = 12.sp)
+                    Text(strings.quickEdit.reset, fontSize = 12.sp)
                 }
             }
         }
