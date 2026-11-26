@@ -6,6 +6,7 @@ import org.junit.Test
 import com.silentinput.app.network.UdpMouseCodec
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import javax.crypto.Cipher
 
 class UdpMouseCodecTest {
 
@@ -94,5 +95,45 @@ class UdpMouseCodecTest {
                 packet = moveWire
             )
         )
+    }
+
+    @Test
+    fun `sealMoveInto zero-alloc path encodes move and wheel identically to sealPacket`() {
+        val key = UdpMouseCodec.decodeAes256Key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")!!
+        val sessionId = 0x0102030405060708L
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val payloadScratch = ByteArray(UdpMouseCodec.MOVE_PAYLOAD_LEN)
+        val nonceScratch = ByteArray(UdpMouseCodec.NONCE_LEN)
+        val wireBuf = ByteArray(UdpMouseCodec.MOVE_WIRE_LEN)
+
+        val totalLen = UdpMouseCodec.sealMoveInto(
+            secretKey = key,
+            sessionId = sessionId,
+            dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+            seq = 42L,
+            dx = -12,
+            dy = 34,
+            wheel = -3,
+            payloadScratch = payloadScratch,
+            nonceScratch = nonceScratch,
+            wireOut = wireBuf,
+            cipher = cipher
+        )
+        assertEquals(UdpMouseCodec.MOVE_WIRE_LEN, totalLen)
+
+        val opened = UdpMouseCodec.openPacket(
+            secretKey = key,
+            expectedSessionId = sessionId,
+            expectedDir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+            expectedPktType = UdpMouseCodec.PKT_MOUSE_MOVE,
+            packet = wireBuf,
+            length = totalLen,
+            cipher = cipher
+        )!!
+        val bb = ByteBuffer.wrap(opened).order(ByteOrder.BIG_ENDIAN)
+        assertEquals((-12).toShort(), bb.short)
+        assertEquals(34.toShort(), bb.short)
+        assertEquals((-3).toShort(), bb.short)
+        assertEquals(0.toShort(), bb.short)
     }
 }

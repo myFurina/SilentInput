@@ -529,7 +529,7 @@ data class AppStrings(
             imeSwitchPresetOff = "隐藏",
             imeSwitchCustomPlaceholder = "例如: ctrl+space",
             imeSwitchSaveBtn = "保存",
-            imeSwitchQuickChip = { label -> "中/英 · $label" },
+            imeSwitchQuickChip = { label -> label },
             imeSwitchQuickMenuSettings = "自定义...",
             snippetsTitle = "常用短语",
             snippetsPlaceholder = "输入新短语...",

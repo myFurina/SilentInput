@@ -148,6 +148,7 @@ class NetworkClient(
     private val baseClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .socketFactory(TcpNoDelaySocketFactory())
+            .connectTimeout(4, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .pingInterval(30, TimeUnit.SECONDS) // Fallback keepalive; foreground JSON ping measures RTT
             .retryOnConnectionFailure(true)
@@ -818,13 +819,20 @@ class NetworkClient(
     }
 
     override fun sendMouse(dx: Float, dy: Float, action: String, wheel: Float): Boolean {
-        if (action == MouseAction.MOVE.wireValue) {
+        if (action == MouseAction.MOVE.wireValue || action == MouseAction.SCROLL.wireValue) {
             val udp = udpMouseChannel
             if (udp != null && udp.isReady) {
-                val ix = if (dx.isFinite()) dx.roundToInt() else 0
-                val iy = if (dy.isFinite()) dy.roundToInt() else 0
-                if (ix != 0 || iy != 0) {
-                    udp.enqueueMove(ix, iy)
+                if (action == MouseAction.MOVE.wireValue) {
+                    val ix = if (dx.isFinite()) dx.roundToInt() else 0
+                    val iy = if (dy.isFinite()) dy.roundToInt() else 0
+                    if (ix != 0 || iy != 0) {
+                        udp.enqueueMove(ix, iy)
+                    }
+                } else {
+                    val iw = if (wheel.isFinite()) wheel.roundToInt() else 0
+                    if (iw != 0) {
+                        udp.enqueueScroll(iw)
+                    }
                 }
                 return true
             }

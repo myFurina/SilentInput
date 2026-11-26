@@ -52,9 +52,9 @@ class QuickEditKeysTest {
         assertEquals("←", QuickEditKeys.chipLabel("left", AppStrings.ZH, "shift"))
         assertEquals("退格", QuickEditKeys.chipLabel("backspace", AppStrings.ZH, "shift"))
         assertEquals("Bksp", QuickEditKeys.chipLabel("backspace", AppStrings.EN, "shift"))
-        assertTrue(
+        assertEquals(
+            "Ctrl+Space",
             QuickEditKeys.chipLabel(QuickEditKeys.IME_SWITCH_ID, AppStrings.ZH, "ctrl+space")
-                .contains("Ctrl+Space")
         )
         assertTrue(
             QuickEditKeys.chipLabel(QuickEditKeys.IME_SWITCH_ID, AppStrings.EN, "")

@@ -4,9 +4,8 @@ import android.util.Log
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.PortUnreachableException
 import java.net.SocketTimeoutException
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicInteger
@@ -29,9 +28,11 @@ object UdpMouseCodec {
     const val PKT_MOUSE_MOVE: Byte = 0x03
 
     const val HEADER_LEN: Int = 20
+    const val MOVE_PAYLOAD_LEN: Int = 8
     const val GCM_TAG_BITS: Int = 128
     const val GCM_TAG_LEN: Int = 16
     const val NONCE_LEN: Int = 12
+    const val MOVE_WIRE_LEN: Int = HEADER_LEN + MOVE_PAYLOAD_LEN + GCM_TAG_LEN
 
     const val DIR_CLIENT_TO_SERVER: Int = 1
     const val DIR_SERVER_TO_CLIENT: Int = 2
@@ -60,25 +61,69 @@ object UdpMouseCodec {
     }
 
     fun encodeProbePayload(tag: Int): ByteArray {
-        val buf = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN)
-        buf.putInt(tag)
-        return buf.array()
+        val out = ByteArray(4)
+        putIntBE(out, 0, tag)
+        return out
     }
 
     fun encodeMovePayload(dx: Int, dy: Int, wheel: Int = 0, flags: Int = 0): ByteArray {
-        val buf = ByteBuffer.allocate(8).order(ByteOrder.BIG_ENDIAN)
-        buf.putShort(dx.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort())
-        buf.putShort(dy.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort())
-        buf.putShort(wheel.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort())
-        buf.putShort((flags and 0xFFFF).toShort())
-        return buf.array()
+        val out = ByteArray(MOVE_PAYLOAD_LEN)
+        writeMovePayloadInto(out, dx, dy, wheel, flags)
+        return out
+    }
+
+    fun writeMovePayloadInto(out: ByteArray, dx: Int, dy: Int, wheel: Int = 0, flags: Int = 0) {
+        putShortBE(out, 0, dx.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()))
+        putShortBE(out, 2, dy.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()))
+        putShortBE(out, 4, wheel.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()))
+        putShortBE(out, 6, flags and 0xFFFF)
     }
 
     fun makeNonce(dir: Int, seq: Long): ByteArray {
-        val buf = ByteBuffer.allocate(NONCE_LEN).order(ByteOrder.BIG_ENDIAN)
-        buf.putInt(dir)
-        buf.putLong(seq)
-        return buf.array()
+        val out = ByteArray(NONCE_LEN)
+        writeNonceInto(out, dir, seq)
+        return out
+    }
+
+    fun writeNonceInto(out: ByteArray, dir: Int, seq: Long) {
+        putIntBE(out, 0, dir)
+        putLongBE(out, 4, seq)
+    }
+
+    fun writeHeaderInto(out: ByteArray, pktType: Byte, sessionId: Long, seq: Long) {
+        out[0] = MAGIC_0
+        out[1] = MAGIC_1
+        out[2] = VERSION
+        out[3] = pktType
+        putLongBE(out, 4, sessionId)
+        putLongBE(out, 12, seq)
+    }
+
+    /**
+     * Zero-allocation AEAD seal for 8-byte mouse move/scroll packets using caller-owned scratch arrays.
+     * Returns total packet bytes written to [wireOut] ([MOVE_WIRE_LEN] = 44 bytes).
+     */
+    fun sealMoveInto(
+        secretKey: SecretKeySpec,
+        sessionId: Long,
+        dir: Int,
+        seq: Long,
+        dx: Int,
+        dy: Int,
+        wheel: Int = 0,
+        flags: Int = 0,
+        payloadScratch: ByteArray,
+        nonceScratch: ByteArray,
+        wireOut: ByteArray,
+        cipher: Cipher
+    ): Int {
+        writeHeaderInto(wireOut, PKT_MOUSE_MOVE, sessionId, seq)
+        writeNonceInto(nonceScratch, dir, seq)
+        writeMovePayloadInto(payloadScratch, dx, dy, wheel, flags)
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_BITS, nonceScratch))
+        cipher.updateAAD(wireOut, 0, HEADER_LEN)
+        val written = cipher.doFinal(payloadScratch, 0, MOVE_PAYLOAD_LEN, wireOut, HEADER_LEN)
+        return HEADER_LEN + written
     }
 
     fun sealPacket(
@@ -90,14 +135,8 @@ object UdpMouseCodec {
         plaintext: ByteArray,
         cipher: Cipher = Cipher.getInstance("AES/GCM/NoPadding")
     ): ByteArray {
-        val header = ByteBuffer.allocate(HEADER_LEN).order(ByteOrder.BIG_ENDIAN)
-            .put(MAGIC_0)
-            .put(MAGIC_1)
-            .put(VERSION)
-            .put(pktType)
-            .putLong(sessionId)
-            .putLong(seq)
-            .array()
+        val header = ByteArray(HEADER_LEN)
+        writeHeaderInto(header, pktType, sessionId, seq)
 
         val nonce = makeNonce(dir, seq)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_BITS, nonce))
@@ -123,10 +162,8 @@ object UdpMouseCodec {
         if (packet[0] != MAGIC_0 || packet[1] != MAGIC_1 || packet[2] != VERSION) return null
         if (packet[3] != expectedPktType) return null
 
-        val headerBuf = ByteBuffer.wrap(packet, 0, HEADER_LEN).order(ByteOrder.BIG_ENDIAN)
-        headerBuf.position(4)
-        val sessionId = headerBuf.long
-        val seq = headerBuf.long
+        val sessionId = getLongBE(packet, 4)
+        val seq = getLongBE(packet, 12)
         if (sessionId != expectedSessionId || seq == 0L) return null
 
         val nonce = makeNonce(expectedDir, seq)
@@ -137,6 +174,37 @@ object UdpMouseCodec {
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun putShortBE(buf: ByteArray, off: Int, value: Int) {
+        buf[off] = (value ushr 8).toByte()
+        buf[off + 1] = value.toByte()
+    }
+
+    private fun putIntBE(buf: ByteArray, off: Int, value: Int) {
+        buf[off] = (value ushr 24).toByte()
+        buf[off + 1] = (value ushr 16).toByte()
+        buf[off + 2] = (value ushr 8).toByte()
+        buf[off + 3] = value.toByte()
+    }
+
+    private fun putLongBE(buf: ByteArray, off: Int, value: Long) {
+        buf[off] = (value ushr 56).toByte()
+        buf[off + 1] = (value ushr 48).toByte()
+        buf[off + 2] = (value ushr 40).toByte()
+        buf[off + 3] = (value ushr 32).toByte()
+        buf[off + 4] = (value ushr 24).toByte()
+        buf[off + 5] = (value ushr 16).toByte()
+        buf[off + 6] = (value ushr 8).toByte()
+        buf[off + 7] = value.toByte()
+    }
+
+    private fun getLongBE(buf: ByteArray, off: Int): Long {
+        var result = 0L
+        for (i in 0 until 8) {
+            result = (result shl 8) or (buf[off + i].toLong() and 0xFFL)
+        }
+        return result
     }
 }
 
@@ -173,6 +241,7 @@ class UdpMouseChannel(
     private val nextSeq = AtomicLong(0L)
     private val pendingDx = AtomicInteger(0)
     private val pendingDy = AtomicInteger(0)
+    private val pendingWheel = AtomicInteger(0)
 
     fun start() {
         val thread = Thread({ runWorker() }, "SilentInput-UDP-Mouse").apply {
@@ -190,6 +259,15 @@ class UdpMouseChannel(
         if (closed || !isReady || (dx == 0 && dy == 0)) return
         if (dx != 0) pendingDx.addAndGet(dx)
         if (dy != 0) pendingDy.addAndGet(dy)
+        LockSupport.unpark(workerThread)
+    }
+
+    /**
+     * Lock-free two-finger scroll accumulation coalesced into the UDP datagram loop.
+     */
+    fun enqueueScroll(wheel: Int) {
+        if (closed || !isReady || wheel == 0) return
+        pendingWheel.addAndGet(wheel)
         LockSupport.unpark(workerThread)
     }
 
@@ -211,6 +289,7 @@ class UdpMouseChannel(
         try {
             targetAddr = InetAddress.getByName(host)
             localSocket = DatagramSocket()
+            localSocket.connect(targetAddr, port)
             localSocket.soTimeout = PROBE_TIMEOUT_MS
             socket = localSocket
         } catch (e: Exception) {
@@ -227,7 +306,7 @@ class UdpMouseChannel(
             return
         }
 
-        // Phase 1: Reachability probe (detect firewall drops and fall back cleanly to TCP)
+        // Phase 1: Reachability probe (detect firewall drops/ICMP reject and fall back cleanly to TCP)
         val probeTag = SecureRandom().nextInt()
         val probePayload = UdpMouseCodec.encodeProbePayload(probeTag)
         val recvBuf = ByteArray(128)
@@ -247,7 +326,7 @@ class UdpMouseChannel(
                     plaintext = probePayload,
                     cipher = cipher
                 )
-                localSocket.send(DatagramPacket(wire, wire.size, targetAddr, port))
+                localSocket.send(DatagramPacket(wire, wire.size))
 
                 val deadlineMs = System.currentTimeMillis() + PROBE_TIMEOUT_MS
                 while (!closed) {
@@ -257,9 +336,6 @@ class UdpMouseChannel(
                     try {
                         recvPacket.setData(recvBuf, 0, recvBuf.size)
                         localSocket.receive(recvPacket)
-                        if (recvPacket.address != targetAddr || recvPacket.port != port) {
-                            continue
-                        }
                         val pt = UdpMouseCodec.openPacket(
                             secretKey = secretKey,
                             expectedSessionId = sessionId,
@@ -270,7 +346,10 @@ class UdpMouseChannel(
                             cipher = cipher
                         )
                         if (pt != null && pt.size >= 4) {
-                            val echoedTag = ByteBuffer.wrap(pt, 0, 4).order(ByteOrder.BIG_ENDIAN).int
+                            val echoedTag = ((pt[0].toInt() and 0xFF) shl 24) or
+                                ((pt[1].toInt() and 0xFF) shl 16) or
+                                ((pt[2].toInt() and 0xFF) shl 8) or
+                                (pt[3].toInt() and 0xFF)
                             if (echoedTag == probeTag) {
                                 probeOk = true
                                 break
@@ -281,6 +360,9 @@ class UdpMouseChannel(
                     }
                 }
                 if (probeOk) break
+            } catch (e: PortUnreachableException) {
+                Log.i(TAG, "UDP port unreachable for $host:$port; falling back immediately to WebSocket")
+                break
             } catch (e: Exception) {
                 Log.d(TAG, "UDP probe attempt $attempt failed: ${e.message}")
             }
@@ -298,31 +380,37 @@ class UdpMouseChannel(
         onReadyChanged(true)
         Log.i(TAG, "UDP low-latency mouse channel active for $host:$port")
 
-        // Phase 2: Dedicated send loop
-        val sendBuf = ByteArray(UdpMouseCodec.HEADER_LEN + 8 + UdpMouseCodec.GCM_TAG_LEN)
-        val sendPacket = DatagramPacket(sendBuf, sendBuf.size, targetAddr, port)
+        // Phase 2: Dedicated zero-allocation send loop over connected UDP socket
+        val payloadScratch = ByteArray(UdpMouseCodec.MOVE_PAYLOAD_LEN)
+        val nonceScratch = ByteArray(UdpMouseCodec.NONCE_LEN)
+        val wireBuf = ByteArray(UdpMouseCodec.MOVE_WIRE_LEN)
+        val sendPacket = DatagramPacket(wireBuf, wireBuf.size)
 
         while (!closed) {
             val dx = pendingDx.getAndSet(0)
             val dy = pendingDy.getAndSet(0)
-            if (dx == 0 && dy == 0) {
+            val wheel = pendingWheel.getAndSet(0)
+            if (dx == 0 && dy == 0 && wheel == 0) {
                 LockSupport.parkNanos(200_000_000L)
                 continue
             }
 
             try {
                 val seq = nextSeq.incrementAndGet()
-                val payload = UdpMouseCodec.encodeMovePayload(dx, dy)
-                val wire = UdpMouseCodec.sealPacket(
+                val totalLen = UdpMouseCodec.sealMoveInto(
                     secretKey = secretKey,
-                    pktType = UdpMouseCodec.PKT_MOUSE_MOVE,
                     sessionId = sessionId,
                     dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
                     seq = seq,
-                    plaintext = payload,
+                    dx = dx,
+                    dy = dy,
+                    wheel = wheel,
+                    payloadScratch = payloadScratch,
+                    nonceScratch = nonceScratch,
+                    wireOut = wireBuf,
                     cipher = cipher
                 )
-                sendPacket.setData(wire, 0, wire.size)
+                sendPacket.setLength(totalLen)
                 localSocket.send(sendPacket)
             } catch (e: Exception) {
                 if (!closed) {
