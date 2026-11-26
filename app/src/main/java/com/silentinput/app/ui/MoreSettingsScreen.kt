@@ -12,6 +12,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -24,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.silentinput.app.model.AppLanguage
 import com.silentinput.app.model.ImeSwitchShortcut
+import com.silentinput.app.model.QuickEditKeys
 import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.ui.theme.pressScale
 import com.silentinput.app.viewmodel.MainViewModel
@@ -42,6 +44,7 @@ internal fun MoreSettingsSectionContent(
     val isNaturalScrolling by viewModel.isNaturalScrolling.collectAsState()
     val imeSwitchKey by viewModel.imeSwitchKey.collectAsState()
     val snippets by viewModel.snippets.collectAsState()
+    val quickEditKeys by viewModel.quickEditKeys.collectAsState()
     val strings = LocalAppStrings.current
 
     Column(
@@ -113,6 +116,14 @@ internal fun MoreSettingsSectionContent(
                 onRequestScrollToBottom()
             },
             onDeleteSnippet = { viewModel.deleteSnippet(it) }
+        )
+
+        SectionDivider()
+
+        QuickEditKeysSection(
+            selectedKeys = quickEditKeys,
+            onToggleKey = { viewModel.toggleQuickEditKey(it) },
+            onResetDefaults = { viewModel.resetQuickEditKeysToDefault() }
         )
 
         SectionDivider()
@@ -427,6 +438,118 @@ private fun CustomSnippetsSection(
                     }
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun QuickEditKeysSection(
+    selectedKeys: List<String>,
+    onToggleKey: (String) -> Unit,
+    onResetDefaults: () -> Unit
+) {
+    val strings = LocalAppStrings.current
+    val isDefault = selectedKeys == QuickEditKeys.DEFAULT_IDS
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(strings.quickEditKeysTitle, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    text = strings.quickEditKeysSubtitle,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (!isDefault) {
+                TextButton(
+                    onClick = onResetDefaults,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Text(strings.quickEditKeysReset, fontSize = 12.sp)
+                }
+            }
+        }
+
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            QuickEditKeys.ALL.forEach { spec ->
+                val checked = spec.id in selectedKeys
+                QuickEditSelectableChip(
+                    label = QuickEditKeys.settingLabel(spec.id, strings),
+                    selected = checked,
+                    onClick = { onToggleKey(spec.id) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuickEditSelectableChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val bg by animateColorAsState(
+        targetValue = if (selected) {
+            MaterialTheme.colorScheme.primary
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)
+        },
+        animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+        label = "qeChipBg"
+    )
+    val fg by animateColorAsState(
+        targetValue = if (selected) {
+            MaterialTheme.colorScheme.onPrimary
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+        animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+        label = "qeChipFg"
+    )
+    Surface(
+        modifier = Modifier
+            .pressScale(interactionSource, pressedScale = 0.95f)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                onClick = onClick
+            ),
+        shape = RoundedCornerShape(10.dp),
+        color = bg
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            if (selected) {
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = null,
+                    tint = fg,
+                    modifier = Modifier.size(13.dp)
+                )
+            }
+            Text(
+                text = label,
+                fontSize = 12.sp,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                color = fg,
+                maxLines = 1
+            )
         }
     }
 }

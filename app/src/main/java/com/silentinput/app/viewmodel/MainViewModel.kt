@@ -18,6 +18,7 @@ import com.silentinput.app.model.MouseButton
 import com.silentinput.app.model.PairingQrPayload
 import com.silentinput.app.model.PairingQrParser
 import com.silentinput.app.model.PairingTokenValidator
+import com.silentinput.app.model.QuickEditKeys
 import com.silentinput.app.model.SavedLanHost
 import com.silentinput.app.model.SavedLanHostsStore
 import com.silentinput.app.model.SendTargetMode
@@ -74,6 +75,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_CLEAR_ON_SEND = "clear_on_send"
         private const val KEY_ENTER_ON_SEND = "enter_on_send"
         private const val KEY_CUSTOM_SNIPPETS_JSON = "custom_snippets_json"
+        private const val KEY_TEXT_QUICK_EDIT_KEYS_JSON = "text_quick_edit_keys_json"
         private const val KEY_LONG_TEXT_DRAFT = "long_text_draft"
 
         private val DEFAULT_SNIPPETS = listOf("ls -la", "git status", "ujust update", "clear", "python3 ")
@@ -186,6 +188,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _snippets = MutableStateFlow(loadSnippets())
     val snippets: StateFlow<List<String>> = _snippets.asStateFlow()
+
+    private val _quickEditKeys = MutableStateFlow(loadQuickEditKeys())
+    val quickEditKeys: StateFlow<List<String>> = _quickEditKeys.asStateFlow()
 
     private val _longTextInput = MutableStateFlow(prefs.getString(KEY_LONG_TEXT_DRAFT, "") ?: "")
     val longTextInput: StateFlow<String> = _longTextInput.asStateFlow()
@@ -842,6 +847,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val arr = JSONArray()
         list.forEach { arr.put(it) }
         prefs.edit().putString(KEY_CUSTOM_SNIPPETS_JSON, arr.toString()).apply()
+    }
+
+    fun toggleQuickEditKey(keyId: String) {
+        val updated = QuickEditKeys.toggleKey(_quickEditKeys.value, keyId)
+        _quickEditKeys.value = updated
+        saveQuickEditKeys(updated)
+    }
+
+    fun resetQuickEditKeysToDefault() {
+        _quickEditKeys.value = QuickEditKeys.DEFAULT_IDS
+        saveQuickEditKeys(QuickEditKeys.DEFAULT_IDS)
+    }
+
+    private fun loadQuickEditKeys(): List<String> {
+        val jsonStr = prefs.getString(KEY_TEXT_QUICK_EDIT_KEYS_JSON, null)
+            ?: return QuickEditKeys.DEFAULT_IDS
+        return try {
+            val arr = JSONArray(jsonStr)
+            val list = mutableListOf<String>()
+            for (i in 0 until arr.length()) {
+                list.add(arr.getString(i))
+            }
+            QuickEditKeys.normalizeSelection(list)
+        } catch (_: Exception) {
+            QuickEditKeys.DEFAULT_IDS
+        }
+    }
+
+    private fun saveQuickEditKeys(list: List<String>) {
+        val arr = JSONArray()
+        list.forEach { arr.put(it) }
+        prefs.edit().putString(KEY_TEXT_QUICK_EDIT_KEYS_JSON, arr.toString()).apply()
     }
 
     override fun onCleared() {

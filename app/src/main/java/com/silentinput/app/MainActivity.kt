@@ -190,6 +190,7 @@ fun MainAppScaffold(
     val showSnippetsInText by viewModel.showSnippetsInText.collectAsState()
     val imeSwitchKey by viewModel.imeSwitchKey.collectAsState()
     val snippets by viewModel.snippets.collectAsState()
+    val quickEditKeys by viewModel.quickEditKeys.collectAsState()
     val longTextInput by viewModel.longTextInput.collectAsState()
     val sendTargetMode by viewModel.sendTargetMode.collectAsState()
     val clearOnSend by viewModel.clearOnSend.collectAsState()
@@ -393,6 +394,7 @@ fun MainAppScaffold(
                         enterOnSend = enterOnSend,
                         onEnterOnSendChange = { viewModel.setEnterOnSend(it) },
                         snippets = snippets,
+                        quickEditKeys = quickEditKeys,
                         showSnippets = showSnippetsInText,
                         showInlineTrackpad = showInlineTrackpadInText,
                         trackpadSensitivity = trackpadSensitivity,

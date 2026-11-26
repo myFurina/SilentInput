@@ -24,23 +24,15 @@ pub fn expire_options(is_zh: bool) -> Vec<PickOption> {
     vec![
         PickOption {
             key: "never",
-            label: if is_zh { "永不过期" } else { "Never expires" },
+            label: if is_zh { "永不过期" } else { "Never" },
         },
         PickOption {
             key: "24h",
-            label: if is_zh {
-                "24 小时自动轮换"
-            } else {
-                "Rotate every 24h"
-            },
+            label: if is_zh { "24 小时" } else { "24 hours" },
         },
         PickOption {
             key: "7d",
-            label: if is_zh {
-                "7 天自动轮换"
-            } else {
-                "Rotate every 7d"
-            },
+            label: if is_zh { "7 天" } else { "7 days" },
         },
         PickOption {
             key: "1h",
@@ -53,34 +45,26 @@ pub fn acl_mode_options(is_zh: bool) -> Vec<PickOption> {
     vec![
         PickOption {
             key: "whitelist",
-            label: if is_zh {
-                "白名单 (仅允许列表 IP)"
-            } else {
-                "Whitelist (listed IPs only)"
-            },
+            label: if is_zh { "白名单" } else { "Whitelist" },
         },
         PickOption {
             key: "blacklist",
-            label: if is_zh {
-                "黑名单 (拦截列表 IP)"
-            } else {
-                "Blacklist (block listed IPs)"
-            },
+            label: if is_zh { "黑名单" } else { "Blacklist" },
         },
         PickOption {
             key: "all",
             label: if is_zh {
-                "允许所有网络 (0.0.0.0)"
+                "允许所有网络"
             } else {
-                "Allow all networks (0.0.0.0)"
+                "Allow all"
             },
         },
         PickOption {
             key: "localhost_only",
             label: if is_zh {
-                "仅本机 USB (127.0.0.1)"
+                "仅限本机 USB"
             } else {
-                "Localhost USB only (127.0.0.1)"
+                "Localhost USB"
             },
         },
     ]

@@ -1,5 +1,6 @@
 mod helpers;
 mod i18n;
+mod icons;
 mod style;
 
 use std::process::Command;
@@ -35,6 +36,7 @@ use crate::helpers::{
 use crate::i18n::{
     acl_mode_options, expire_options, find_option, language_options, theme_options, PickOption,
 };
+use crate::icons::{icon, status_dot, IconKind};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ProbeOptions {
@@ -64,6 +66,13 @@ struct QrPairingData {
     uri: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ActivePage {
+    #[default]
+    Home,
+    Settings,
+}
+
 #[derive(Debug, Clone)]
 enum ModalView {
     QrPairing(QrPairingData),
@@ -82,12 +91,17 @@ enum Message {
     ProbeFailed,
     WindowFocused,
     WindowUnfocused,
+    OpenHome,
+    OpenSettings,
+    ToggleAdvancedSettings,
     ToggleService(bool),
     ServiceActionFinished(bool, String),
     ToggleAutostart(bool),
     AutostartActionFinished(bool, String),
+    ToggleShowKey,
     CopyToken,
     RegenerateToken,
+    #[cfg_attr(not(test), allow(dead_code))]
     OpenQrPairing,
     ExpireModeSelected(PickOption),
     ToggleUsbNoAuth(bool),
@@ -124,6 +138,9 @@ struct ControlCenterState {
     system_dark: bool,
     window_focused: bool,
     mono_font: Font,
+    page: ActivePage,
+    advanced_expanded: bool,
+    show_key: bool,
     running: bool,
     pid: i32,
     autostart: bool,
@@ -190,6 +207,9 @@ impl ControlCenterState {
             system_dark: false,
             window_focused: true,
             mono_font,
+            page: ActivePage::Home,
+            advanced_expanded: false,
+            show_key: false,
             running: false,
             pid: 0,
             autostart: false,
@@ -339,6 +359,19 @@ impl ControlCenterState {
                 self.window_focused = false;
                 Task::none()
             }
+            Message::OpenHome => {
+                self.flush_acl_if_pending();
+                self.page = ActivePage::Home;
+                Task::none()
+            }
+            Message::OpenSettings => {
+                self.page = ActivePage::Settings;
+                Task::none()
+            }
+            Message::ToggleAdvancedSettings => {
+                self.advanced_expanded = !self.advanced_expanded;
+                Task::none()
+            }
             Message::ProbeCompleted(snap) => {
                 self.probe_in_flight = false;
                 if snap.gen_before == self.config_generation && !self.pending_acl_save {
@@ -447,6 +480,10 @@ impl ControlCenterState {
                 }
                 let toast = self.show_toast(t(self.is_zh, "配对密钥已复制", "Pairing key copied"));
                 Task::batch([iced::clipboard::write(tok), toast])
+            }
+            Message::ToggleShowKey => {
+                self.show_key = !self.show_key;
+                Task::none()
             }
             Message::RegenerateToken => {
                 self.config_generation += 1;
@@ -754,6 +791,7 @@ impl ControlCenterState {
         "SilentInput Control Center".to_string()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn header_title(&self) -> &'static str {
         t(
             self.is_zh,
@@ -773,12 +811,20 @@ impl ControlCenterState {
             Duration::from_secs(15)
         };
 
-        let esc_sub = if self.modal.is_some() && !self.uninstall_in_flight {
+        let esc_sub = if !self.uninstall_in_flight && self.modal.is_some() {
             keyboard::listen().filter_map(|event| match event {
                 keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
                 } => Some(Message::CloseModal),
+                _ => None,
+            })
+        } else if !self.uninstall_in_flight && self.page == ActivePage::Settings {
+            keyboard::listen().filter_map(|event| match event {
+                keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                    ..
+                } => Some(Message::OpenHome),
                 _ => None,
             })
         } else {
@@ -798,499 +844,508 @@ impl ControlCenterState {
         ])
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn status_pill(&self) -> Element<'_, Message> {
         let zh = self.is_zh;
         let is_dark = self.is_dark();
+        let dot_color = if self.running {
+            style::success_color(is_dark)
+        } else {
+            style::muted_color(is_dark)
+        };
+        let label = if self.running {
+            t(zh, "运行中", "Running")
+        } else {
+            t(zh, "已停止", "Stopped")
+        };
+
+        container(
+            row![status_dot(7.0, dot_color), text(label).size(12)]
+                .spacing(6)
+                .align_y(Alignment::Center),
+        )
+        .style(style::status_pill_style(self.running))
+        .padding([4, 10])
+        .into()
+    }
+
+    fn view_home(&self) -> Element<'_, Message> {
+        let zh = self.is_zh;
+        let is_dark = self.is_dark();
+        let primary = style::primary_color(is_dark);
+        let muted = style::muted_color(is_dark);
+
+        let header = row![
+            icon(IconKind::BrandMark, 22.0, primary),
+            text("SilentInput").size(19),
+            self.status_pill(),
+            toggler(self.running)
+                .on_toggle_maybe(if self.service_action_count == 0 {
+                    Some(Message::ToggleService)
+                } else {
+                    None
+                })
+                .style(style::toggler_style)
+                .size(22),
+            space::horizontal(),
+            circle_icon_button(IconKind::Logs, primary, Message::OpenLogs),
+            circle_icon_button(IconKind::Help, primary, Message::OpenHelp),
+            circle_icon_button(IconKind::Settings, primary, Message::OpenSettings),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        let qr_data = self.build_qr_data();
+        let mut qr_card_col = column![
+            build_qr_code_element(&qr_data.uri),
+            text(t(
+                zh,
+                "手机端扫码即可配对",
+                "Scan with mobile app to pair",
+            ))
+            .size(13)
+            .color(muted),
+            row![
+                button(
+                    row![
+                        icon(IconKind::Eye, 15.0, primary),
+                        text(if self.show_key {
+                            t(zh, "隐藏密钥", "Hide Key")
+                        } else {
+                            t(zh, "显示密钥", "Show Key")
+                        })
+                        .size(13),
+                    ]
+                    .spacing(7)
+                    .align_y(Alignment::Center),
+                )
+                .style(style::pill_button_style)
+                .padding([9, 18])
+                .on_press(Message::ToggleShowKey),
+                button(
+                    row![
+                        icon(IconKind::Refresh, 15.0, primary),
+                        text(t(zh, "更换密钥", "New Key")).size(13),
+                    ]
+                    .spacing(7)
+                    .align_y(Alignment::Center),
+                )
+                .style(style::pill_button_style)
+                .padding([9, 18])
+                .on_press(Message::RegenerateToken),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(16)
+        .align_x(Alignment::Center);
+
+        if self.config.access_control_mode == "localhost_only" {
+            qr_card_col = qr_card_col.push(
+                button(
+                    text(t(
+                        zh,
+                        "当前仅限本机 USB · 点此设置局域网",
+                        "Localhost USB only · Tap to allow LAN",
+                    ))
+                    .size(12),
+                )
+                .style(style::warning_pill_button_style)
+                .padding([6, 14])
+                .on_press(Message::OpenSettings),
+            );
+        }
+
+        let hero_card = container(
+            container(qr_card_col)
+                .width(Length::Fill)
+                .center_x(Length::Fill),
+        )
+        .style(style::hero_card_style)
+        .padding([24, 22])
+        .width(Length::Fill);
+
+        let mut home_col = column![header, hero_card].spacing(14);
+        if self.show_key {
+            let key_card = container(
+                row![
+                    text(self.config.auth_token.as_str())
+                        .font(self.mono_font)
+                        .size(12)
+                        .color(primary)
+                        .wrapping(text::Wrapping::Glyph)
+                        .width(Length::Fill),
+                    button(
+                        row![
+                            icon(IconKind::Copy, 14.0, primary),
+                            text(t(zh, "复制", "Copy")).size(12),
+                        ]
+                        .spacing(5)
+                        .align_y(Alignment::Center),
+                    )
+                    .style(style::pill_button_style)
+                    .padding([7, 14])
+                    .on_press(Message::CopyToken),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center),
+            )
+            .style(style::card_style)
+            .padding([12, 16])
+            .width(Length::Fill);
+            home_col = home_col.push(key_card);
+        }
+
+        container(scrollable(home_col.padding([18, 22])).height(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn view_settings(&self) -> Element<'_, Message> {
+        let zh = self.is_zh;
+        let is_dark = self.is_dark();
+        let primary = style::primary_color(is_dark);
         let muted = style::muted_color(is_dark);
         let success = style::success_color(is_dark);
-        let exp_opts = expire_options(zh);
+
         let acl_opts = acl_mode_options(zh);
+        let exp_opts = expire_options(zh);
         let lang_opts = language_options(zh);
         let theme_opts = theme_options(zh);
 
-        let running_label = if self.running {
-            if self.pid > 0 {
-                if zh {
-                    format!("正在运行 (PID: {})", self.pid)
-                } else {
-                    format!("Running (PID: {})", self.pid)
-                }
-            } else {
-                t(zh, "正在运行", "Running").to_string()
-            }
-        } else {
-            t(zh, "已停止", "Stopped").to_string()
-        };
-
-        // Group 1: Service Status
-        let service_card = section_card(
-            t(zh, "服务运行状态", "Service Status"),
-            is_dark,
-            column![
-                row![
-                    column![
-                        text(t(zh, "后台服务", "Background Service")).size(15),
-                        text(running_label).size(12).color(if self.running {
-                            success
-                        } else {
-                            muted
-                        }),
-                    ]
-                    .spacing(2),
-                    space::horizontal(),
-                    toggler(self.running)
-                        .on_toggle_maybe(if self.service_action_count == 0 {
-                            Some(Message::ToggleService)
-                        } else {
-                            None
-                        })
-                        .size(22),
-                ]
-                .align_y(Alignment::Center),
-                row![
-                    column![
-                        text(t(zh, "开机自动启动", "Start at Login")).size(15),
-                        text(if self.autostart {
-                            t(
-                                zh,
-                                "已启用 · 登录桌面时自动启动后台输入服务",
-                                "Enabled · Starts daemon on desktop login",
-                            )
-                        } else {
-                            t(
-                                zh,
-                                "已关闭 · 仅手动打开服务时运行",
-                                "Disabled · Manual start only",
-                            )
-                        })
-                        .size(12)
-                        .color(muted),
-                    ]
-                    .spacing(2)
-                    .width(Length::Fill),
-                    toggler(self.autostart)
-                        .on_toggle_maybe(if self.autostart_action_count == 0 {
-                            Some(Message::ToggleAutostart)
-                        } else {
-                            None
-                        })
-                        .size(22),
-                ]
-                .align_y(Alignment::Center),
-            ]
-            .spacing(12),
-        );
-
-        // Group 2: Security & Pairing
-        let exp_desc = get_token_status_text(&self.config, zh);
-        let selected_expire = find_option(&exp_opts, &self.config.token_expire_mode);
-
-        let usb_sub = if self.usb_devices.is_empty() {
-            t(
-                zh,
-                "通过 USB 数据线免密直连（当前未检测到 USB 设备）",
-                "Trust local USB adb reverse (no USB device detected)",
-            )
-            .to_string()
-        } else if zh {
-            format!(
-                "通过 USB 数据线免密直连 · 已连接: {}",
-                self.usb_devices.join(", ")
-            )
-        } else {
-            format!(
-                "Trust local USB adb reverse · Connected: {}",
-                self.usb_devices.join(", ")
-            )
-        };
-        let usb_status_color = if self.usb_devices.is_empty() {
-            muted
-        } else {
-            success
-        };
-
-        let security_card = section_card(
-            t(zh, "安全与配对", "Security & Pairing"),
-            is_dark,
-            column![
-                column![
-                    row![
-                        row![
-                            text(t(zh, "配对密钥", "Pairing Key")).size(15),
-                            text(format!("  ·  {exp_desc}")).size(12).color(muted),
-                        ]
-                        .align_y(Alignment::Center)
-                        .width(Length::Fill),
-                        row![
-                            button(text(t(zh, "扫码配对", "QR Pair")).size(13))
-                                .style(style::primary_button_style)
-                                .padding([6, 12])
-                                .on_press(Message::OpenQrPairing),
-                            button(text(t(zh, "复制", "Copy")).size(13))
-                                .style(style::secondary_button_style)
-                                .padding([6, 12])
-                                .on_press(Message::CopyToken),
-                            button(text(t(zh, "重新生成", "Regenerate")).size(13))
-                                .style(style::secondary_button_style)
-                                .padding([6, 12])
-                                .on_press(Message::RegenerateToken),
-                        ]
-                        .spacing(8),
-                    ]
-                    .align_y(Alignment::Center),
-                    text(self.config.auth_token.as_str())
-                        .font(self.mono_font)
-                        .size(11)
-                        .color(muted),
-                ]
-                .spacing(4),
-                row![
-                    text(t(zh, "密钥有效期", "Key Expiration"))
-                        .size(15)
-                        .width(Length::Fill),
-                    pick_list(exp_opts, selected_expire, Message::ExpireModeSelected)
-                        .text_size(13)
-                        .padding([6, 10]),
-                ]
-                .align_y(Alignment::Center),
-                row![
-                    column![
-                        text(t(zh, "USB 有线免密直连", "USB Trusted Direct Connect")).size(15),
-                        text(usb_sub)
-                            .size(12)
-                            .color(usb_status_color),
-                    ]
-                    .spacing(2)
-                    .width(Length::Fill),
-                    toggler(self.config.allow_usb_unauthenticated)
-                        .on_toggle(Message::ToggleUsbNoAuth)
-                        .size(22),
-                ]
-                .align_y(Alignment::Center),
-                row![
-                    column![
-                        text(t(zh, "TLS 传输加密 (WSS)", "TLS Encryption (WSS)")).size(15),
-                        text(t(
-                            zh,
-                            "启用 WSS 加密连接（需与手机端设置一致）",
-                            "Use encrypted WSS connection (must match mobile app)",
-                        ))
-                        .size(12)
-                        .color(muted),
-                    ]
-                    .spacing(2)
-                    .width(Length::Fill),
-                    toggler(self.config.enable_tls)
-                        .on_toggle_maybe(if self.service_action_count == 0 {
-                            Some(Message::ToggleTls)
-                        } else {
-                            None
-                        })
-                        .size(22),
-                ]
-                .align_y(Alignment::Center),
-            ]
-            .spacing(12),
-        );
-
-        // Group 3: Network & IPs
-        let mut net_col = column![].spacing(8);
-
-        if self.config.access_control_mode == "localhost_only" {
-            net_col = net_col.push(
-                container(
-                    text(t(
-                        zh,
-                        "💡 当前为「仅限本机」模式（仅接收 USB 转发，局域网不可连）。如需 Wi-Fi 连接，请在下方访问控制切换为「白名单」。",
-                        "💡 Access control is 'Localhost Only' (USB active, LAN disabled). Switch to 'Whitelist' below for Wi-Fi.",
-                    ))
-                    .size(12)
-                    .color(muted),
-                )
-                .style(style::subtle_box_style)
-                .padding([8, 10]),
-            );
-        }
-
-        if self.host_ips.is_empty() {
-            net_col = net_col.push(
-                text(t(zh, "未检测到有效局域网 IP", "No LAN IP detected"))
-                    .size(13)
-                    .color(muted),
-            );
-        } else {
-            for ip in &self.host_ips {
-                let ip_row = container(
-                    row![
-                        text(ip.clone()).font(self.mono_font).size(14),
-                        space::horizontal(),
-                        button(text(t(zh, "复制 IP", "Copy IP")).size(12))
-                            .style(style::secondary_button_style)
-                            .padding([5, 10])
-                            .on_press(Message::CopyIp(ip.clone())),
-                    ]
-                    .align_y(Alignment::Center),
-                )
-                .style(style::subtle_box_style)
-                .padding([8, 12]);
-                net_col = net_col.push(ip_row);
-            }
-        }
-
-        let network_card = section_card(
-            t(
-                zh,
-                "电脑局域网 IP (手机 Wi-Fi 局域网输入)",
-                "PC LAN IP Addresses (Wi-Fi Input)",
-            ),
-            is_dark,
-            net_col,
-        );
-
-        // Group 4: Access Control
-        let selected_acl = find_option(&acl_opts, &self.config.access_control_mode);
-        let mut acl_col = column![row![
-            text(t(zh, "控制模式", "Access Mode"))
-                .size(15)
-                .width(Length::Fill),
-            pick_list(acl_opts, selected_acl, Message::AclModeSelected)
-                .text_size(13)
-                .padding([6, 10]),
+        let header = row![
+            circle_icon_button(IconKind::Back, primary, Message::OpenHome),
+            text(t(zh, "设置", "Settings")).size(19),
+            space::horizontal(),
+            self.status_pill(),
         ]
-        .align_y(Alignment::Center)]
-        .spacing(10);
+        .spacing(10)
+        .align_y(Alignment::Center);
+
+        // Card 1: Connection & Access
+        let selected_acl = find_option(&acl_opts, &self.config.access_control_mode);
+        let mut access_col = column![setting_row(
+            t(zh, "访问模式", "Access Mode"),
+            pick_list(acl_opts, selected_acl, Message::AclModeSelected)
+                .style(style::pick_list_style)
+                .menu_style(style::pick_list_menu_style)
+                .text_size(13)
+                .padding([7, 12]),
+        )]
+        .spacing(12);
 
         match self.config.access_control_mode.as_str() {
             "whitelist" => {
-                let invalid_whitelist = find_invalid_ip_patterns(&parse_ip_list(&self.whitelist_input));
+                let invalid = find_invalid_ip_patterns(&parse_ip_list(&self.whitelist_input));
                 let mut wl_col = column![
                     text(t(
                         zh,
-                        "IP 白名单 (逗号分隔，支持 * 通配符如 192.168.* 或 CIDR 如 172.16.0.0/12)",
-                        "IP Whitelist (comma-separated, * wildcard or CIDR e.g. 172.16.0.0/12)",
+                        "IP 白名单 (支持 * 通配符或 CIDR)",
+                        "IP Whitelist (* wildcard or CIDR)",
                     ))
                     .size(12)
                     .color(muted),
                     text_input("127.0.0.1, 192.168.*, 172.16.0.0/12", &self.whitelist_input)
                         .on_input(Message::WhitelistChanged)
                         .style(style::input_style)
-                        .padding([8, 10])
+                        .font(self.mono_font)
+                        .padding([9, 12])
                         .size(13),
                 ]
-                .spacing(4);
+                .spacing(6);
 
-                if !invalid_whitelist.is_empty() {
-                    let err_items = invalid_whitelist
+                if !invalid.is_empty() {
+                    let err_items = invalid
                         .iter()
                         .map(|(p, _)| format!("\"{p}\""))
                         .collect::<Vec<_>>()
                         .join(", ");
                     wl_col = wl_col.push(
                         text(if zh {
-                            format!("⚠️ 发现无法识别的网段格式: {err_items} (该规则将无法匹配任何设备，请检查修正)")
+                            format!("无法识别网段: {err_items}")
                         } else {
-                            format!("⚠️ Unrecognized subnet format: {err_items} (will not match devices)")
+                            format!("Invalid subnet: {err_items}")
                         })
                         .size(12)
                         .color(style::warning_color(is_dark)),
                     );
                 }
-
-                acl_col = acl_col.push(wl_col);
+                access_col = access_col.push(wl_col);
             }
             "blacklist" => {
-                let invalid_blacklist = find_invalid_ip_patterns(&parse_ip_list(&self.blacklist_input));
+                let invalid = find_invalid_ip_patterns(&parse_ip_list(&self.blacklist_input));
                 let mut bl_col = column![
-                    text(t(
-                        zh,
-                        "IP 黑名单 (逗号分隔，命中后将拒绝连接)",
-                        "IP Blacklist (comma-separated, matches will be blocked)",
-                    ))
-                    .size(12)
-                    .color(muted),
+                    text(t(zh, "IP 黑名单", "IP Blacklist"))
+                        .size(12)
+                        .color(muted),
                     text_input("192.168.1.50", &self.blacklist_input)
                         .on_input(Message::BlacklistChanged)
                         .style(style::input_style)
-                        .padding([8, 10])
+                        .font(self.mono_font)
+                        .padding([9, 12])
                         .size(13),
                 ]
-                .spacing(4);
+                .spacing(6);
 
-                if !invalid_blacklist.is_empty() {
-                    let err_items = invalid_blacklist
+                if !invalid.is_empty() {
+                    let err_items = invalid
                         .iter()
                         .map(|(p, _)| format!("\"{p}\""))
                         .collect::<Vec<_>>()
                         .join(", ");
                     bl_col = bl_col.push(
                         text(if zh {
-                            format!("⚠️ 发现无法识别的黑名单格式: {err_items} (该规则将无法生效)")
+                            format!("无法识别网段: {err_items}")
                         } else {
-                            format!("⚠️ Unrecognized blacklist format: {err_items} (will not take effect)")
+                            format!("Invalid subnet: {err_items}")
                         })
                         .size(12)
                         .color(style::warning_color(is_dark)),
                     );
                 }
-
-                acl_col = acl_col.push(bl_col);
+                access_col = access_col.push(bl_col);
             }
             _ => {}
         }
 
-        let acl_card = section_card(
-            t(zh, "访问控制 (白黑名单互斥)", "Access Control"),
-            is_dark,
-            acl_col,
-        );
+        access_col = access_col.push(setting_row(
+            t(zh, "开机自动启动", "Start at Login"),
+            toggler(self.autostart)
+                .on_toggle_maybe(if self.autostart_action_count == 0 {
+                    Some(Message::ToggleAutostart)
+                } else {
+                    None
+                })
+                .style(style::toggler_style)
+                .size(22),
+        ));
 
-        // Group 5: Actions & Maintenance
+        let access_card = section_card(t(zh, "连接与权限", "Connection & Access"), is_dark, access_col);
+
+        // Card 2: Language & Theme
         let selected_lang = find_option(&lang_opts, &self.config.gui_language);
         let selected_theme = find_option(&theme_opts, &self.config.gui_theme);
-        let maintenance_card = section_card(
-            t(zh, "操作与维护", "Actions & Maintenance"),
+        let appearance_card = section_card(
+            t(zh, "界面设置", "Interface"),
             is_dark,
             column![
-                row![
-                    text(t(zh, "界面语言", "Interface Language"))
-                        .size(15)
-                        .width(Length::Fill),
+                setting_row(
+                    t(zh, "界面语言", "Language"),
                     pick_list(lang_opts, selected_lang, Message::LanguageSelected)
+                        .style(style::pick_list_style)
+                        .menu_style(style::pick_list_menu_style)
                         .text_size(13)
-                        .padding([6, 10]),
-                ]
-                .align_y(Alignment::Center),
-                row![
-                    text(t(zh, "界面外观", "Appearance"))
-                        .size(15)
-                        .width(Length::Fill),
+                        .padding([7, 12]),
+                ),
+                setting_row(
+                    t(zh, "界面外观", "Theme"),
                     pick_list(theme_opts, selected_theme, Message::ThemeSelected)
+                        .style(style::pick_list_style)
+                        .menu_style(style::pick_list_menu_style)
                         .text_size(13)
-                        .padding([6, 10]),
-                ]
-                .align_y(Alignment::Center),
-                row![
-                    text(t(zh, "重启服务", "Restart Service"))
-                        .size(15)
-                        .width(Length::Fill),
-                    button(text(t(zh, "重启", "Restart")).size(13))
-                        .style(style::secondary_button_style)
-                        .padding([6, 14])
-                        .on_press_maybe(if self.service_action_count == 0 {
-                            Some(Message::RestartService)
-                        } else {
-                            None
-                        }),
-                ]
-                .align_y(Alignment::Center),
-                row![
-                    text(t(zh, "运行日志", "Service Logs"))
-                        .size(15)
-                        .width(Length::Fill),
-                    button(text(t(zh, "查看日志", "View Logs")).size(13))
-                        .style(style::secondary_button_style)
-                        .padding([6, 14])
-                        .on_press(Message::OpenLogs),
-                ]
-                .align_y(Alignment::Center),
-                row![
-                    column![
-                        text(t(zh, "恢复出厂设置", "Reset to Factory Defaults")).size(15),
-                        text(t(
-                            zh,
-                            "重置访问控制（仅限本机）、白名单网段与密钥有效期（1小时），并重启服务",
-                            "Reset mode (localhost-only), whitelist, 1h key expiration, and restart",
-                        ))
-                        .size(12)
-                        .color(muted),
-                    ]
-                    .spacing(2)
-                    .width(Length::Fill),
-                    button(text(t(zh, "恢复默认", "Reset Defaults")).size(13))
-                        .style(style::secondary_button_style)
-                        .padding([6, 14])
-                        .on_press_maybe(if self.service_action_count == 0 {
-                            Some(Message::OpenResetConfig)
-                        } else {
-                            None
-                        }),
-                ]
-                .align_y(Alignment::Center),
-                row![
-                    column![
-                        text(t(zh, "卸载 SilentInput", "Uninstall SilentInput")).size(15),
-                        text(t(
-                            zh,
-                            "停止服务并从系统中移除快捷方式",
-                            "Stop daemon and remove desktop integration",
-                        ))
-                        .size(12)
-                        .color(muted),
-                    ]
-                    .spacing(2)
-                    .width(Length::Fill),
-                    button(text(t(zh, "卸载", "Uninstall")).size(13))
-                        .style(style::danger_button_style)
-                        .padding([6, 14])
-                        .on_press(Message::OpenUninstall),
-                ]
-                .align_y(Alignment::Center),
+                        .padding([7, 12]),
+                ),
             ]
             .spacing(12),
         );
 
-        let header = row![
-            text(self.header_title())
-            .size(20),
-            space::horizontal(),
-            button(text(t(zh, "使用指引", "Help Guide")).size(12))
-                .style(style::secondary_button_style)
-                .padding([4, 10])
-                .on_press(Message::OpenHelp),
-            container(
-                text(if self.running {
-                    t(zh, "服务运行中", "Running")
-                } else {
-                    t(zh, "服务已停止", "Stopped")
-                })
-                .size(12)
-                .color(if self.running {
-                    success
-                } else {
-                    muted
-                }),
-            )
-            .style(style::subtle_box_style)
-            .padding([4, 10]),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
+        // Card 3: Collapsible "更多设置"
+        let chevron = icon(
+            if self.advanced_expanded {
+                IconKind::ChevronUp
+            } else {
+                IconKind::ChevronDown
+            },
+            16.0,
+            muted,
+        );
 
-        let content_list = scrollable(
-            column![
-                header,
-                service_card,
-                security_card,
-                network_card,
-                acl_card,
-                maintenance_card,
+        let mut more_header_left = column![text(t(zh, "更多设置", "More Settings")).size(15)].spacing(2);
+        if !self.advanced_expanded {
+            more_header_left = more_header_left.push(
+                text(t(
+                    zh,
+                    "密钥轮换 · USB · TLS · 本机 IP · 维护",
+                    "Key rotation · USB · TLS · LAN IPs · System",
+                ))
+                .size(12)
+                .color(muted),
+            );
+        }
+
+        let more_toggle = button(
+            row![more_header_left, space::horizontal(), chevron]
+                .align_y(Alignment::Center)
+                .width(Length::Fill),
+        )
+        .style(style::ghost_row_button_style)
+        .padding([6, 4])
+        .width(Length::Fill)
+        .on_press(Message::ToggleAdvancedSettings);
+
+        let mut more_col = column![more_toggle].spacing(12);
+
+        if self.advanced_expanded {
+            let selected_expire = find_option(&exp_opts, &self.config.token_expire_mode);
+            let exp_desc = get_token_status_text(&self.config, zh);
+            let usb_sub = if self.usb_devices.is_empty() {
+                t(zh, "当前未检测到 USB 设备", "No USB device detected").to_string()
+            } else if zh {
+                format!("已连接: {}", self.usb_devices.join(", "))
+            } else {
+                format!("Connected: {}", self.usb_devices.join(", "))
+            };
+            let usb_color = if self.usb_devices.is_empty() {
+                muted
+            } else {
+                success
+            };
+
+            let mut ip_section = column![
+                text(t(zh, "本机 IP (点击复制)", "Host IPs (click to copy)"))
+                    .size(12)
+                    .color(muted),
             ]
-            .spacing(14)
-            .padding([16, 18]),
+            .spacing(6);
+
+            if self.host_ips.is_empty() {
+                ip_section = ip_section.push(
+                    text(t(zh, "未检测到局域网 IP", "No LAN IP detected"))
+                        .size(12)
+                        .color(muted),
+                );
+            } else {
+                let mut rows = column![].spacing(6);
+                for pair in self.host_ips.chunks(2) {
+                    let mut r = row![].spacing(8);
+                    for ip in pair {
+                        r = r.push(
+                            button(text(ip.clone()).font(self.mono_font).size(12))
+                                .style(style::pill_button_style)
+                                .padding([6, 12])
+                                .on_press(Message::CopyIp(ip.clone())),
+                        );
+                    }
+                    rows = rows.push(r);
+                }
+                ip_section = ip_section.push(rows);
+            }
+
+            let actions_row = row![
+                button(text(t(zh, "重启服务", "Restart")).size(12))
+                    .style(style::pill_button_style)
+                    .padding([7, 13])
+                    .on_press_maybe(if self.service_action_count == 0 {
+                        Some(Message::RestartService)
+                    } else {
+                        None
+                    }),
+                button(text(t(zh, "恢复默认", "Reset")).size(12))
+                    .style(style::pill_button_style)
+                    .padding([7, 13])
+                    .on_press_maybe(if self.service_action_count == 0 {
+                        Some(Message::OpenResetConfig)
+                    } else {
+                        None
+                    }),
+                space::horizontal(),
+                button(text(t(zh, "卸载", "Uninstall")).size(12))
+                    .style(style::danger_button_style)
+                    .padding([7, 14])
+                    .on_press(Message::OpenUninstall),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+
+            more_col = more_col.push(
+                column![
+                    column![
+                        setting_row(
+                            t(zh, "密钥有效期", "Key Expiration"),
+                            pick_list(exp_opts, selected_expire, Message::ExpireModeSelected)
+                                .style(style::pick_list_style)
+                                .menu_style(style::pick_list_menu_style)
+                                .text_size(13)
+                                .padding([7, 12]),
+                        ),
+                        text(exp_desc).size(12).color(muted),
+                    ]
+                    .spacing(3),
+                    row![
+                        column![
+                            text(t(zh, "USB 免密直连", "USB Direct Connect")).size(14),
+                            text(usb_sub).size(12).color(usb_color),
+                        ]
+                        .spacing(2)
+                        .width(Length::Fill),
+                        toggler(self.config.allow_usb_unauthenticated)
+                            .on_toggle(Message::ToggleUsbNoAuth)
+                            .style(style::toggler_style)
+                            .size(22),
+                    ]
+                    .align_y(Alignment::Center),
+                    setting_row(
+                        t(zh, "TLS 传输加密 (WSS)", "TLS Encryption (WSS)"),
+                        toggler(self.config.enable_tls)
+                            .on_toggle_maybe(if self.service_action_count == 0 {
+                                Some(Message::ToggleTls)
+                            } else {
+                                None
+                            })
+                            .style(style::toggler_style)
+                            .size(22),
+                    ),
+                    ip_section,
+                    actions_row,
+                ]
+                .spacing(14)
+                .padding([4, 4]),
+            );
+        }
+
+        let more_card = container(more_col)
+            .style(style::card_style)
+            .padding([12, 14])
+            .width(Length::Fill);
+
+        let body = scrollable(
+            column![access_card, appearance_card, more_card]
+                .spacing(14)
+                .padding([4, 2]),
         )
         .height(Length::Fill);
 
-        let mut base_col = column![content_list].height(Length::Fill);
+        container(
+            column![header, body]
+                .spacing(14)
+                .padding([20, 22]),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    }
+
+    fn view(&self) -> Element<'_, Message> {
+        let zh = self.is_zh;
+        let is_dark = self.is_dark();
+        let muted = style::muted_color(is_dark);
+
+        let page_view = match self.page {
+            ActivePage::Home => self.view_home(),
+            ActivePage::Settings => self.view_settings(),
+        };
+
+        let mut base_col = column![container(page_view).height(Length::Fill)].height(Length::Fill);
         if let Some(toast_msg) = &self.toast {
             base_col = base_col.push(
                 container(
                     container(text(toast_msg.clone()).size(13))
                         .style(style::toast_style)
-                        .padding([8, 14]),
+                        .padding([8, 16]),
                 )
                 .width(Length::Fill)
                 .center_x(Length::Fill)
-                .padding([6, 12]),
+                .padding([4, 12]),
             );
         }
 
@@ -1694,6 +1749,30 @@ fn build_qr_code_element<'a>(uri: &str) -> Element<'a, Message> {
         .into()
 }
 
+fn circle_icon_button<'a>(
+    kind: IconKind,
+    color: iced::Color,
+    msg: Message,
+) -> Element<'a, Message> {
+    button(icon(kind, 16.0, color))
+        .style(style::pill_button_style)
+        .padding(9)
+        .on_press(msg)
+        .into()
+}
+
+fn setting_row<'a>(
+    label: &'a str,
+    control: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    row![
+        text(label).size(14).width(Length::Fill),
+        control.into(),
+    ]
+    .align_y(Alignment::Center)
+    .into()
+}
+
 fn section_card<'a>(
     title: &'a str,
     dark: bool,
@@ -1701,13 +1780,13 @@ fn section_card<'a>(
 ) -> Element<'a, Message> {
     container(
         column![
-            text(title).size(13).color(style::muted_color(dark)),
+            text(title).size(12).color(style::muted_color(dark)),
             body.into(),
         ]
-        .spacing(10),
+        .spacing(12),
     )
     .style(style::card_style)
-    .padding(14)
+    .padding(18)
     .width(Length::Fill)
     .into()
 }
@@ -1728,8 +1807,8 @@ pub fn main() -> iced::Result {
     .theme(ControlCenterState::theme)
     .default_font(cjk_font)
     .window(window::Settings {
-        size: Size::new(540.0, 720.0),
-        min_size: Some(Size::new(420.0, 560.0)),
+        size: Size::new(480.0, 560.0),
+        min_size: Some(Size::new(400.0, 480.0)),
         exit_on_close_request: false,
         platform_specific: window::settings::PlatformSpecific {
             application_id: "com.silentinput.controlcenter".to_string(),
@@ -2093,6 +2172,40 @@ mod tests {
         }
         let _ = state.update(Message::CloseModal);
         assert!(state.modal.is_none());
+
+        let _ = fs::remove_dir_all(&paths.config_dir);
+    }
+
+    #[test]
+    fn settings_navigation_advanced_toggle_and_acl_flush_on_back() {
+        let paths = tmp_paths("nav_settings");
+        save_config_at(&paths, &SilentInputConfig::default()).unwrap();
+
+        let (mut state, _) = ControlCenterState::new_with_paths(paths.clone());
+        assert_eq!(state.page, super::ActivePage::Home);
+        assert!(!state.advanced_expanded);
+        assert!(!state.show_key);
+
+        let _ = state.update(Message::ToggleShowKey);
+        assert!(state.show_key);
+        let _ = state.update(Message::ToggleShowKey);
+        assert!(!state.show_key);
+
+        let _ = state.update(Message::OpenSettings);
+        assert_eq!(state.page, super::ActivePage::Settings);
+
+        let _ = state.update(Message::ToggleAdvancedSettings);
+        assert!(state.advanced_expanded);
+        let _ = state.update(Message::ToggleAdvancedSettings);
+        assert!(!state.advanced_expanded);
+
+        // Editing ACL and returning Home flushes pending ACL save immediately
+        let _ = state.update(Message::WhitelistChanged("192.168.50.*".to_string()));
+        assert!(state.pending_acl_save);
+        let _ = state.update(Message::OpenHome);
+        assert_eq!(state.page, super::ActivePage::Home);
+        assert!(!state.pending_acl_save);
+        assert_eq!(load_config_at(&paths).whitelist, vec!["192.168.50.*"]);
 
         let _ = fs::remove_dir_all(&paths.config_dir);
     }

@@ -21,17 +21,21 @@ import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardReturn
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -40,6 +44,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
@@ -54,6 +59,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.silentinput.app.model.ImeSwitchShortcut
+import com.silentinput.app.model.QuickEditKeys
 import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.ui.theme.pressScale
 
@@ -72,6 +78,7 @@ fun TextSenderScreen(
     enterOnSend: Boolean,
     onEnterOnSendChange: (Boolean) -> Unit,
     snippets: List<String>,
+    quickEditKeys: List<String> = QuickEditKeys.DEFAULT_IDS,
     showSnippets: Boolean = true,
     showInlineTrackpad: Boolean = true,
     trackpadSensitivity: Float = 0.6f,
@@ -315,8 +322,14 @@ fun TextSenderScreen(
                     enter = fadeIn(tween(180)) + expandVertically(),
                     exit = fadeOut(tween(140)) + shrinkVertically()
                 ) {
+                    val snippetsListState = rememberLazyListState()
+                    val snippetsFling = rememberSnapFlingBehavior(lazyListState = snippetsListState)
                     LazyRow(
-                        modifier = Modifier.fillMaxWidth(),
+                        state = snippetsListState,
+                        flingBehavior = snippetsFling,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clipToBounds(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -361,35 +374,49 @@ fun TextSenderScreen(
                     }
                 }
 
-                // Card 2: Unified Edit & Cursor Strip (Includes Undo + Return Icon + IME Pill)
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.surface
+                // Snap-Scrollable Quick Edit Keys Bar (No Card/Title Clutter + Trailing "+" Jump to Settings)
+                val resolvedEditSpecs = remember(quickEditKeys) {
+                    quickEditKeys.mapNotNull { QuickEditKeys.findSpec(it) }
+                }
+                val editListState = rememberLazyListState()
+                val editFling = rememberSnapFlingBehavior(lazyListState = editListState)
+                LazyRow(
+                    state = editListState,
+                    flingBehavior = editFling,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clipToBounds(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = strings.txtCursorEditTitle,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            if (imeSwitchKey.isNotBlank()) {
+                    items(
+                        items = resolvedEditSpecs,
+                        key = { it.id }
+                    ) { spec ->
+                        val label = QuickEditKeys.chipLabel(spec.id, strings, imeSwitchKey)
+                        val isBackspace = spec.id == "backspace"
+                        val chipBg = if (isBackspace) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surface
+                        }
+                        val chipFg = if (isBackspace) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        }
+
+                        when {
+                            spec.id == QuickEditKeys.IME_SWITCH_ID -> {
                                 var showImeMenu by remember { mutableStateOf(false) }
+                                val activeImeShortcut = imeSwitchKey.ifBlank { ImeSwitchShortcut.DEFAULT }
                                 Box {
                                     Surface(
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(10.dp))
+                                            .height(40.dp)
+                                            .clip(RoundedCornerShape(13.dp))
                                             .combinedClickable(
-                                                onClick = { sendKey(imeSwitchKey) },
+                                                onClick = { sendKey(activeImeShortcut) },
                                                 onLongClick = {
                                                     if (isHapticEnabled) {
                                                         view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
@@ -397,24 +424,28 @@ fun TextSenderScreen(
                                                     showImeMenu = true
                                                 }
                                             ),
-                                        shape = RoundedCornerShape(10.dp),
-                                        color = MaterialTheme.colorScheme.surfaceVariant
+                                        shape = RoundedCornerShape(13.dp),
+                                        color = MaterialTheme.colorScheme.surface
                                     ) {
-                                        Text(
-                                            text = strings.imeSwitchQuickChip(ImeSwitchShortcut.formatLabel(imeSwitchKey)),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurface,
-                                            fontWeight = FontWeight.Medium,
-                                            maxLines = 1,
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                                        )
+                                        Box(
+                                            modifier = Modifier.padding(horizontal = 14.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = label,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1
+                                            )
+                                        }
                                     }
                                     DropdownMenu(
                                         expanded = showImeMenu,
                                         onDismissRequest = { showImeMenu = false }
                                     ) {
                                         ImeSwitchShortcut.PRESETS.forEach { preset ->
-                                            val isSelected = ImeSwitchShortcut.normalize(imeSwitchKey) == preset
+                                            val isSelected = ImeSwitchShortcut.normalize(activeImeShortcut) == preset
                                             DropdownMenuItem(
                                                 text = {
                                                     Text(
@@ -429,13 +460,6 @@ fun TextSenderScreen(
                                             )
                                         }
                                         DropdownMenuItem(
-                                            text = { Text(strings.imeSwitchPresetOff) },
-                                            onClick = {
-                                                onImeSwitchKeyChange("")
-                                                showImeMenu = false
-                                            }
-                                        )
-                                        DropdownMenuItem(
                                             text = { Text(strings.imeSwitchQuickMenuSettings) },
                                             onClick = {
                                                 showImeMenu = false
@@ -445,57 +469,142 @@ fun TextSenderScreen(
                                     }
                                 }
                             }
+                            spec.repeatable -> {
+                                RepeatableEditKey(
+                                    label = label,
+                                    modifier = Modifier.widthIn(min = 68.dp),
+                                    horizontalPadding = 14.dp,
+                                    height = 40.dp,
+                                    cornerRadius = 13.dp,
+                                    fontSize = if (spec.id in listOf("left", "right", "up", "down")) 15.sp else 12.sp,
+                                    containerColor = chipBg,
+                                    contentColor = chipFg,
+                                    onRepeat = { sendKey(spec.id) }
+                                )
+                            }
+                            else -> {
+                                TonalActionEditKey(
+                                    label = label,
+                                    modifier = Modifier.widthIn(min = 68.dp),
+                                    horizontalPadding = 14.dp,
+                                    height = 40.dp,
+                                    cornerRadius = 13.dp,
+                                    containerColor = chipBg,
+                                    contentColor = chipFg,
+                                    onClick = { sendKey(spec.id) }
+                                )
+                            }
                         }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    }
+
+                    item(key = "add_edit_key_chip") {
+                        val plusInteraction = remember { MutableInteractionSource() }
+                        Surface(
+                            modifier = Modifier
+                                .height(40.dp)
+                                .widthIn(min = 44.dp)
+                                .pressScale(plusInteraction, pressedScale = 0.94f)
+                                .clip(RoundedCornerShape(13.dp))
+                                .clickable(
+                                    interactionSource = plusInteraction,
+                                    indication = LocalIndication.current,
+                                    onClick = onOpenSettings
+                                ),
+                            shape = RoundedCornerShape(13.dp),
+                            color = MaterialTheme.colorScheme.surface
                         ) {
-                            RepeatableEditKey(
-                                label = "←",
-                                modifier = Modifier.weight(1f),
+                            Box(
+                                modifier = Modifier.padding(horizontal = 14.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = strings.txtAddEditKeyChip,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Dedicated Split Row: Left = Newline (Shift+Enter) | Right = Enter
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val newlineInteraction = remember { MutableInteractionSource() }
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                            .pressScale(newlineInteraction, pressedScale = 0.96f)
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable(
+                                interactionSource = newlineInteraction,
+                                indication = LocalIndication.current,
+                                onClick = { sendKey("shift+enter") }
+                            ),
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surface
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = strings.txtNewlineBtn,
                                 fontSize = 14.sp,
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                                onRepeat = { sendKey("left") }
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1
                             )
-                            RepeatableEditKey(
-                                label = "→",
-                                modifier = Modifier.weight(1f),
-                                fontSize = 14.sp,
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                                onRepeat = { sendKey("right") }
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Shift+Enter",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1
                             )
-                            RepeatableEditKey(
-                                label = strings.txtCursorBackspace,
-                                modifier = Modifier.weight(1.15f),
-                                fontSize = 12.sp,
-                                containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f),
-                                contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                                onRepeat = { sendKey("backspace") }
-                            )
-                            RepeatableEditKey(
-                                label = "Del",
-                                modifier = Modifier.weight(1f),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                                onRepeat = { sendKey("delete") }
-                            )
-                            TonalActionEditKey(
-                                label = strings.txtUndoBtn,
-                                modifier = Modifier.weight(1.05f),
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                                onClick = { sendKey("ctrl+z") }
-                            )
-                            TonalActionEditKey(
-                                label = strings.txtCursorEnter,
-                                modifier = Modifier.weight(1.05f),
-                                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        }
+                    }
+
+                    val enterInteraction = remember { MutableInteractionSource() }
+                    Surface(
+                        modifier = Modifier
+                            .weight(1.22f)
+                            .height(46.dp)
+                            .pressScale(enterInteraction, pressedScale = 0.96f)
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable(
+                                interactionSource = enterInteraction,
+                                indication = LocalIndication.current,
                                 onClick = { sendKey("enter") }
+                            ),
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardReturn,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = strings.txtEnterBtn,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                maxLines = 1
                             )
                         }
                     }
@@ -662,15 +771,18 @@ private fun TonalOptionTogglePill(
 private fun TonalActionEditKey(
     label: String,
     modifier: Modifier = Modifier,
+    horizontalPadding: androidx.compose.ui.unit.Dp = 0.dp,
+    height: androidx.compose.ui.unit.Dp = 38.dp,
+    cornerRadius: androidx.compose.ui.unit.Dp = 10.dp,
     containerColor: Color,
     contentColor: Color,
     onClick: () -> Unit
 ) {
-    val shape = RoundedCornerShape(10.dp)
+    val shape = RoundedCornerShape(cornerRadius)
     val interactionSource = remember { MutableInteractionSource() }
     Surface(
         modifier = modifier
-            .height(38.dp)
+            .height(height)
             .pressScale(interactionSource, pressedScale = 0.94f)
             .clip(shape)
             .clickable(
@@ -681,7 +793,12 @@ private fun TonalActionEditKey(
         shape = shape,
         color = containerColor
     ) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .height(height)
+                .padding(horizontal = horizontalPadding),
+            contentAlignment = Alignment.Center
+        ) {
             Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = contentColor, maxLines = 1)
         }
     }
@@ -691,17 +808,20 @@ private fun TonalActionEditKey(
 private fun RepeatableEditKey(
     label: String,
     modifier: Modifier = Modifier,
+    horizontalPadding: androidx.compose.ui.unit.Dp = 0.dp,
+    height: androidx.compose.ui.unit.Dp = 38.dp,
+    cornerRadius: androidx.compose.ui.unit.Dp = 10.dp,
     fontSize: androidx.compose.ui.unit.TextUnit = 12.sp,
     fontWeight: FontWeight = FontWeight.SemiBold,
     containerColor: Color,
     contentColor: Color,
     onRepeat: () -> Unit
 ) {
-    val shape = RoundedCornerShape(10.dp)
+    val shape = RoundedCornerShape(cornerRadius)
     val interactionSource = remember { MutableInteractionSource() }
     Surface(
         modifier = modifier
-            .height(38.dp)
+            .height(height)
             .pressScale(interactionSource, pressedScale = 0.94f)
             .clip(shape)
             .semantics(mergeDescendants = true) {
@@ -717,8 +837,13 @@ private fun RepeatableEditKey(
         shape = shape,
         color = containerColor
     ) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(label, fontSize = fontSize, fontWeight = fontWeight, color = contentColor)
+        Box(
+            modifier = Modifier
+                .height(height)
+                .padding(horizontal = horizontalPadding),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(label, fontSize = fontSize, fontWeight = fontWeight, color = contentColor, maxLines = 1)
         }
     }
 }
