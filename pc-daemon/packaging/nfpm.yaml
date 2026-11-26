@@ -53,12 +53,15 @@ overrides:
     recommends:
       - adb
       - bluez
+      - xclip
   rpm:
     depends:
       - wl-clipboard
     recommends:
       - android-tools
       - bluez
+      - xclip
   archlinux:
     depends:
       - wl-clipboard
+      - xclip

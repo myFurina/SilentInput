@@ -31,7 +31,8 @@ mod tests {
         save_config_at, SilentInputConfig,
     };
     use crate::keymap::{
-        all_registered_keys, build_key_map, build_wtype_args, has_graphical_session_in,
+        all_registered_keys, build_key_map, build_wtype_args, build_xdotool_args,
+        clipboard_candidates_for_session, detect_x11_display_in, has_graphical_session_in,
         lookup_char, normalize_line_endings, resolve_key_combination,
     };
     use crate::logs::{
@@ -285,6 +286,17 @@ mod tests {
         assert!(build_wtype_args("bad;cmd").is_none());
         assert!(build_wtype_args("unknownlongkey").is_none());
 
+        assert_eq!(
+            build_xdotool_args("ctrl+prtsc"),
+            Some(vec!["key".into(), "ctrl+Print".into()])
+        );
+        assert_eq!(
+            build_xdotool_args("super+c"),
+            Some(vec!["key".into(), "Super_L+c".into()])
+        );
+        assert!(build_xdotool_args("--help").is_none());
+        assert!(build_xdotool_args("ctrl+-M").is_none());
+
         // CRLF normalization
         assert_eq!(normalize_line_endings("a\r\nb\rc\n"), "a\nb\nc\n");
     }
@@ -300,6 +312,22 @@ mod tests {
         // Lock file alone does not indicate graphical session
         fs::write(rt_dir.join("wayland-0.lock"), b"").unwrap();
         assert!(!has_graphical_session_in(&rt_dir, None, Some(":99"), &x11_dir));
+
+        // Live X11 socket triggers graphical detection & resolves DISPLAY even when unset
+        let _x_sock = UnixListener::bind(x11_dir.join("X0")).unwrap();
+        assert!(has_graphical_session_in(&rt_dir, None, Some(":0"), &x11_dir));
+        assert!(has_graphical_session_in(&rt_dir, None, None, &x11_dir));
+        assert_eq!(detect_x11_display_in(None, &x11_dir), Some(":0".into()));
+        assert_eq!(detect_x11_display_in(Some(":0.0"), &x11_dir), Some(":0.0".into()));
+
+        // Clipboard candidate prioritization
+        let x11_only = clipboard_candidates_for_session(false, true);
+        assert_eq!(x11_only.iter().map(|(b, _)| *b).collect::<Vec<_>>(), vec!["xclip", "xsel"]);
+        let wayland_and_x = clipboard_candidates_for_session(true, true);
+        assert_eq!(
+            wayland_and_x.iter().map(|(b, _)| *b).collect::<Vec<_>>(),
+            vec!["wl-copy", "xclip", "xsel"]
+        );
 
         // Live Unix socket triggers graphical detection
         let _sock = UnixListener::bind(rt_dir.join("wayland-0")).unwrap();

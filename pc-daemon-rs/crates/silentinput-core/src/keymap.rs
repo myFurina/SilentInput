@@ -309,6 +309,24 @@ fn wtype_key_name(key: &str) -> Option<String> {
     Some(mapped.to_string())
 }
 
+fn resolve_keysym_name(target_key: &str) -> Option<String> {
+    let key_map = build_key_map();
+    let is_single_alnum = target_key.len() == 1
+        && target_key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric());
+
+    if let Some(mapped) = wtype_key_name(target_key) {
+        Some(mapped)
+    } else if !target_key.starts_with('-')
+        && (key_map.contains_key(target_key) || is_single_alnum)
+    {
+        Some(target_key.to_string())
+    } else {
+        None
+    }
+}
+
 /// Build validated `wtype` arguments, rejecting invalid/flag-like tokens (`--help`, `bad;cmd`, `ctrl+-M`).
 pub fn build_wtype_args(combo_str: &str) -> Option<Vec<String>> {
     let lower = combo_str.to_ascii_lowercase();
@@ -328,26 +346,40 @@ pub fn build_wtype_args(combo_str: &str) -> Option<Vec<String>> {
         args.push(mod_name.to_string());
     }
 
-    let target_key = parts[parts.len() - 1];
-    let key_map = build_key_map();
-    let is_single_alnum = target_key.len() == 1
-        && target_key
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric());
-
-    let resolved_wtype_key = if let Some(mapped) = wtype_key_name(target_key) {
-        mapped
-    } else if !target_key.starts_with('-')
-        && (key_map.contains_key(target_key) || is_single_alnum)
-    {
-        target_key.to_string()
-    } else {
-        return None;
-    };
-
+    let resolved_key = resolve_keysym_name(parts[parts.len() - 1])?;
     args.push("-k".to_string());
-    args.push(resolved_wtype_key);
+    args.push(resolved_key);
     Some(args)
+}
+
+fn xdotool_modifier_name(part: &str) -> Option<&'static str> {
+    match part {
+        "ctrl" => Some("ctrl"),
+        "alt" => Some("alt"),
+        "shift" => Some("shift"),
+        "super" | "win" => Some("Super_L"),
+        _ => None,
+    }
+}
+
+/// Build validated `xdotool` arguments for X11 fallback key injection.
+pub fn build_xdotool_args(combo_str: &str) -> Option<Vec<String>> {
+    let lower = combo_str.to_ascii_lowercase();
+    let parts: Vec<&str> = lower
+        .split('+')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut seq = Vec::with_capacity(parts.len());
+    for mod_part in &parts[..parts.len() - 1] {
+        seq.push(xdotool_modifier_name(mod_part)?.to_string());
+    }
+    seq.push(resolve_keysym_name(parts[parts.len() - 1])?);
+    Some(vec!["key".to_string(), seq.join("+")])
 }
 
 pub fn normalize_line_endings(text: &str) -> String {
@@ -395,12 +427,7 @@ fn find_newest_wayland_socket(runtime_dir: &Path) -> Option<String> {
     best.map(|(_, name)| name)
 }
 
-pub fn has_graphical_session_in(
-    runtime_dir: &Path,
-    wayland_display: Option<&str>,
-    x_display: Option<&str>,
-    x11_unix_dir: &Path,
-) -> bool {
+pub fn detect_has_wayland_in(runtime_dir: &Path, wayland_display: Option<&str>) -> bool {
     if let Some(wd) = wayland_display.map(str::trim).filter(|s| !s.is_empty()) {
         let sock_path: PathBuf = if wd.contains('/') {
             PathBuf::from(wd)
@@ -424,7 +451,10 @@ pub fn has_graphical_session_in(
             }
         }
     }
+    false
+}
 
+pub fn detect_x11_display_in(x_display: Option<&str>, x11_unix_dir: &Path) -> Option<String> {
     if let Some(disp) = x_display.map(str::trim).filter(|s| !s.is_empty()) {
         if let Some(rest) = disp.strip_prefix(':') {
             let disp_num = rest.split('.').next().unwrap_or("");
@@ -432,16 +462,99 @@ pub fn has_graphical_session_in(
                 let x_sock = x11_unix_dir.join(format!("X{disp_num}"));
                 if let Ok(meta) = std::fs::metadata(&x_sock) {
                     if meta.file_type().is_socket() {
-                        return true;
+                        return Some(disp.to_string());
                     }
                 }
             }
-        } else {
-            return true;
+            return None;
         }
+        return Some(disp.to_string());
     }
 
-    false
+    let entries = std::fs::read_dir(x11_unix_dir).ok()?;
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(num) = name.strip_prefix('X') else {
+            continue;
+        };
+        if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            if meta.file_type().is_socket() {
+                let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                if best.as_ref().is_none_or(|(b_time, _)| mtime > *b_time) {
+                    best = Some((mtime, format!(":{num}")));
+                }
+            }
+        }
+    }
+    best.map(|(_, d)| d)
+}
+
+pub fn detect_x11_env() -> Vec<(String, String)> {
+    let x_display = env::var("DISPLAY").ok();
+    let Some(display) = detect_x11_display_in(x_display.as_deref(), Path::new("/tmp/.X11-unix"))
+    else {
+        return Vec::new();
+    };
+    let mut vars = vec![("DISPLAY".to_string(), display)];
+    if let Some(auth) = env::var("XAUTHORITY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && Path::new(s).exists())
+    {
+        vars.push(("XAUTHORITY".to_string(), auth));
+    } else if let Some(home) = env::var_os("HOME") {
+        let candidate = PathBuf::from(home).join(".Xauthority");
+        if candidate.exists() {
+            vars.push((
+                "XAUTHORITY".to_string(),
+                candidate.to_string_lossy().to_string(),
+            ));
+        }
+    }
+    vars
+}
+
+pub fn clipboard_candidates_for_session(
+    has_wayland: bool,
+    has_x11: bool,
+) -> Vec<(&'static str, Vec<&'static str>)> {
+    let mut out: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+    if has_wayland || !has_x11 {
+        out.push(("wl-copy", Vec::new()));
+    }
+    if has_x11 || !has_wayland {
+        out.push(("xclip", vec!["-in", "-selection", "clipboard"]));
+        out.push(("xsel", vec!["--clipboard", "--input"]));
+    }
+    out
+}
+
+pub fn detect_session_capabilities() -> (bool, bool) {
+    let uid = unsafe { libc::geteuid() };
+    let runtime_dir = env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("/run/user/{uid}"));
+    let wayland_display = env::var("WAYLAND_DISPLAY").ok();
+    let x_display = env::var("DISPLAY").ok();
+
+    let has_wayland = detect_has_wayland_in(Path::new(&runtime_dir), wayland_display.as_deref());
+    let has_x11 = detect_x11_display_in(x_display.as_deref(), Path::new("/tmp/.X11-unix")).is_some();
+    (has_wayland, has_x11)
+}
+
+pub fn has_graphical_session_in(
+    runtime_dir: &Path,
+    wayland_display: Option<&str>,
+    x_display: Option<&str>,
+    x11_unix_dir: &Path,
+) -> bool {
+    detect_has_wayland_in(runtime_dir, wayland_display)
+        || detect_x11_display_in(x_display, x11_unix_dir).is_some()
 }
 
 pub fn has_graphical_session() -> bool {

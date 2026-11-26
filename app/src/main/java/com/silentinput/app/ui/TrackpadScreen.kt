@@ -14,6 +14,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -142,6 +144,7 @@ fun TrackpadScreen(
             },
             onMouseScroll = onMouseScroll,
             isLeftHeld = isLeftHeld,
+            minimalStyle = true,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
@@ -241,6 +244,7 @@ fun TrackpadSurface(
     onMouseScroll: (wheel: Float) -> Unit,
     modifier: Modifier = Modifier,
     isLeftHeld: Boolean = false,
+    minimalStyle: Boolean = false,
     hintText: String? = null
 ) {
     val view = LocalView.current
@@ -420,18 +424,49 @@ fun TrackpadSurface(
                     else -> true
                 }
             },
-        shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(borderWidth, borderColor),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        shape = RoundedCornerShape(if (minimalStyle) 18.dp else 16.dp),
+        border = if (!minimalStyle || isLeftHeld) BorderStroke(borderWidth, borderColor) else null,
+        colors = CardDefaults.cardColors(
+            containerColor = if (minimalStyle) {
+                MaterialTheme.colorScheme.surface
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            }
+        )
     ) {
+        val dotColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.14f)
         Box(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .then(
+                    if (minimalStyle) {
+                        Modifier.drawBehind {
+                            val step = 16.dp.toPx()
+                            val radius = 1.dp.toPx()
+                            var y = step
+                            while (y < size.height - step * 0.5f) {
+                                var x = step
+                                while (x < size.width - step * 0.5f) {
+                                    drawCircle(
+                                        color = dotColor,
+                                        radius = radius,
+                                        center = Offset(x, y)
+                                    )
+                                    x += step
+                                }
+                                y += step
+                            }
+                        }
+                    } else {
+                        Modifier
+                    }
+                ),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 text = resolvedHintText,
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (minimalStyle) 0.55f else 0.6f),
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 lineHeight = 22.sp
             )

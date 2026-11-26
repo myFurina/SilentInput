@@ -151,39 +151,58 @@ else
     exit 1
 fi
 
-# 2. Check optional CLI tools (wl-clipboard / adb)
+# 2. Check optional CLI tools (wl-clipboard / xclip / adb)
 MISSING_WLCOPY=0
+MISSING_XCLIP=0
 MISSING_ADB=0
 command -v wl-copy >/dev/null 2>&1 || MISSING_WLCOPY=1
+(command -v xclip >/dev/null 2>&1 || command -v xsel >/dev/null 2>&1) || MISSING_XCLIP=1
 command -v adb >/dev/null 2>&1 || MISSING_ADB=1
 
-if [ "$MISSING_WLCOPY" -eq 1 ] || [ "$MISSING_ADB" -eq 1 ]; then
+if [ "$MISSING_WLCOPY" -eq 1 ] || [ "$MISSING_XCLIP" -eq 1 ] || [ "$MISSING_ADB" -eq 1 ]; then
     echo "🔍 检测到部分可选/辅助工具尚未安装："
-    [ "$MISSING_WLCOPY" -eq 1 ] && echo "   - wl-clipboard (Wayland 剪贴板中文注入)"
+    [ "$MISSING_WLCOPY" -eq 1 ] && echo "   - wl-clipboard (Wayland 剪贴板中文/长文本注入)"
+    [ "$MISSING_XCLIP" -eq 1 ] && echo "   - xclip (X11 剪贴板中文/长文本注入)"
     [ "$MISSING_ADB" -eq 1 ] && echo "   - adb / android-tools (USB 有线直连模式)"
 
     if [ -e /run/ostree-booted ] && command -v brew >/dev/null 2>&1; then
         BREW_PKGS=""
         [ "$MISSING_WLCOPY" -eq 1 ] && BREW_PKGS="$BREW_PKGS wl-clipboard"
         [ "$MISSING_ADB" -eq 1 ] && BREW_PKGS="$BREW_PKGS android-platform-tools"
-        if confirm_or_auto "是否使用 brew 安装辅助工具 ($BREW_PKGS )？"; then
+        if [ -n "$BREW_PKGS" ] && confirm_or_auto "是否使用 brew 安装辅助工具 ($BREW_PKGS )？"; then
             brew install $BREW_PKGS || true
         fi
     elif command -v apt-get >/dev/null 2>&1; then
-        if confirm_or_auto "是否通过 apt 安装 wl-clipboard 与 adb？"; then
-            sudo apt-get update && sudo apt-get install -y wl-clipboard adb
+        APT_PKGS=""
+        [ "$MISSING_WLCOPY" -eq 1 ] && APT_PKGS="$APT_PKGS wl-clipboard"
+        [ "$MISSING_XCLIP" -eq 1 ] && APT_PKGS="$APT_PKGS xclip"
+        [ "$MISSING_ADB" -eq 1 ] && APT_PKGS="$APT_PKGS adb"
+        if [ -n "$APT_PKGS" ] && confirm_or_auto "是否通过 apt 安装辅助工具 ($APT_PKGS )？"; then
+            sudo apt-get update && sudo apt-get install -y $APT_PKGS
         fi
     elif command -v dnf >/dev/null 2>&1; then
-        if confirm_or_auto "是否通过 dnf 安装 wl-clipboard 与 android-tools？"; then
-            sudo dnf install -y wl-clipboard android-tools
+        DNF_PKGS=""
+        [ "$MISSING_WLCOPY" -eq 1 ] && DNF_PKGS="$DNF_PKGS wl-clipboard"
+        [ "$MISSING_XCLIP" -eq 1 ] && DNF_PKGS="$DNF_PKGS xclip"
+        [ "$MISSING_ADB" -eq 1 ] && DNF_PKGS="$DNF_PKGS android-tools"
+        if [ -n "$DNF_PKGS" ] && confirm_or_auto "是否通过 dnf 安装辅助工具 ($DNF_PKGS )？"; then
+            sudo dnf install -y $DNF_PKGS
         fi
     elif command -v pacman >/dev/null 2>&1; then
-        if confirm_or_auto "是否通过 pacman 安装 wl-clipboard 与 android-tools？"; then
-            sudo pacman -S --needed --noconfirm wl-clipboard android-tools
+        PAC_PKGS=""
+        [ "$MISSING_WLCOPY" -eq 1 ] && PAC_PKGS="$PAC_PKGS wl-clipboard"
+        [ "$MISSING_XCLIP" -eq 1 ] && PAC_PKGS="$PAC_PKGS xclip"
+        [ "$MISSING_ADB" -eq 1 ] && PAC_PKGS="$PAC_PKGS android-tools"
+        if [ -n "$PAC_PKGS" ] && confirm_or_auto "是否通过 pacman 安装辅助工具 ($PAC_PKGS )？"; then
+            sudo pacman -S --needed --noconfirm $PAC_PKGS
         fi
     elif command -v zypper >/dev/null 2>&1; then
-        if confirm_or_auto "是否通过 zypper 安装 wl-clipboard 与 android-tools？"; then
-            sudo zypper install -y wl-clipboard android-tools
+        ZYP_PKGS=""
+        [ "$MISSING_WLCOPY" -eq 1 ] && ZYP_PKGS="$ZYP_PKGS wl-clipboard"
+        [ "$MISSING_XCLIP" -eq 1 ] && ZYP_PKGS="$ZYP_PKGS xclip"
+        [ "$MISSING_ADB" -eq 1 ] && ZYP_PKGS="$ZYP_PKGS android-tools"
+        if [ -n "$ZYP_PKGS" ] && confirm_or_auto "是否通过 zypper 安装辅助工具 ($ZYP_PKGS )？"; then
+            sudo zypper install -y $ZYP_PKGS
         fi
     fi
 fi

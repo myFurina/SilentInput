@@ -66,6 +66,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_DARK_MODE = "dark_mode"
         private const val KEY_APP_LANGUAGE = "app_language"
         private const val KEY_TEXT_INLINE_TRACKPAD = "text_inline_trackpad"
+        private const val KEY_TEXT_SHOW_SNIPPETS = "text_show_snippets"
         private const val KEY_NATURAL_SCROLLING = "natural_scrolling"
         private const val KEY_IME_SWITCH_SHORTCUT = "ime_switch_shortcut"
         private const val KEY_TRACKPAD_SENSITIVITY = "trackpad_sensitivity"
@@ -152,6 +153,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _showInlineTrackpadInText = MutableStateFlow(prefs.getBoolean(KEY_TEXT_INLINE_TRACKPAD, true))
     val showInlineTrackpadInText: StateFlow<Boolean> = _showInlineTrackpadInText.asStateFlow()
+
+    private val _showSnippetsInText = MutableStateFlow(prefs.getBoolean(KEY_TEXT_SHOW_SNIPPETS, true))
+    val showSnippetsInText: StateFlow<Boolean> = _showSnippetsInText.asStateFlow()
 
     private val _isNaturalScrolling = MutableStateFlow(prefs.getBoolean(KEY_NATURAL_SCROLLING, true))
     val isNaturalScrolling: StateFlow<Boolean> = _isNaturalScrolling.asStateFlow()
@@ -775,6 +779,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setShowInlineTrackpadInText(enabled: Boolean) {
         _showInlineTrackpadInText.value = enabled
         prefs.edit().putBoolean(KEY_TEXT_INLINE_TRACKPAD, enabled).apply()
+    }
+
+    fun setShowSnippetsInText(enabled: Boolean) {
+        _showSnippetsInText.value = enabled
+        prefs.edit().putBoolean(KEY_TEXT_SHOW_SNIPPETS, enabled).apply()
     }
 
     fun setNaturalScrolling(enabled: Boolean) {

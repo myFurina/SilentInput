@@ -4,9 +4,8 @@ import android.graphics.Rect
 import android.os.SystemClock
 import android.view.HapticFeedbackConstants
 import android.view.ViewTreeObserver
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -17,11 +16,9 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -54,11 +51,13 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import com.silentinput.app.model.ImeSwitchShortcut
 import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.ui.theme.pressScale
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TextSenderScreen(
     isConnected: Boolean,
@@ -73,6 +72,7 @@ fun TextSenderScreen(
     enterOnSend: Boolean,
     onEnterOnSendChange: (Boolean) -> Unit,
     snippets: List<String>,
+    showSnippets: Boolean = true,
     showInlineTrackpad: Boolean = true,
     trackpadSensitivity: Float = 0.6f,
     naturalScrolling: Boolean = true,
@@ -115,9 +115,9 @@ fun TextSenderScreen(
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val containerHeight = maxHeight
-        val showTrackpadArea = showInlineTrackpad && !isImeVisible && containerHeight >= 540.dp
+        val showTrackpadArea = showInlineTrackpad && !isImeVisible && containerHeight >= 520.dp
         val targetMaxHeight = if (showTrackpadArea) {
-            (containerHeight - 160.dp).coerceAtLeast(180.dp)
+            (containerHeight - 150.dp).coerceAtLeast(180.dp)
         } else {
             containerHeight
         }
@@ -130,7 +130,7 @@ fun TextSenderScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(12.dp),
+                .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Column(
@@ -140,13 +140,6 @@ fun TextSenderScreen(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(
-                    text = strings.txtTitle,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
-                )
-
                 val isDirectMode = targetMode == "keys"
                 val nonAsciiCount = remember(inputText, isDirectMode) {
                     if (!isDirectMode) {
@@ -164,163 +157,163 @@ fun TextSenderScreen(
                 val isTextTooLong = inputText.length > 300_000
                 val sendEnabled = inputText.isNotBlank() && isConnected && !hasDirectHeadlessError && !isTextTooLong
 
-                OutlinedTextField(
-                    value = inputText,
-                    onValueChange = onInputTextChange,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 90.dp, max = 150.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    placeholder = { Text(strings.txtPlaceholder) },
-                    isError = hasDirectHeadlessError || isTextTooLong,
-                    supportingText = if (isTextTooLong || isDirectMode) {
-                        {
-                            val msg = when {
-                                isTextTooLong -> strings.txtTextTooLongError(300_000)
-                                hasDirectHeadlessError -> strings.txtDirectHeadlessUnsupportedError
-                                !supportsUnicodeDirectTyping -> strings.txtDirectHeadlessHint
-                                hasDirectLargeUnicodeWarning -> strings.txtDirectLargeUnicodeWarning(nonAsciiCount)
-                                else -> strings.txtDirectDesktopHint
-                            }
-                            Text(
-                                text = msg,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (hasDirectHeadlessError || isTextTooLong) {
-                                    MaterialTheme.colorScheme.error
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
+                // Card 1: Unified M3 Expressive Composer Surface (Input + 1-Tap Mode + Options + Primary CTA)
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surface
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        TextField(
+                            value = inputText,
+                            onValueChange = onInputTextChange,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 84.dp, max = 148.dp),
+                            placeholder = {
+                                Text(
+                                    text = strings.txtPlaceholder,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            },
+                            isError = hasDirectHeadlessError || isTextTooLong,
+                            supportingText = if (isTextTooLong || isDirectMode) {
+                                {
+                                    val msg = when {
+                                        isTextTooLong -> strings.txtTextTooLongError(300_000)
+                                        hasDirectHeadlessError -> strings.txtDirectHeadlessUnsupportedError
+                                        !supportsUnicodeDirectTyping -> strings.txtDirectHeadlessHint
+                                        hasDirectLargeUnicodeWarning -> strings.txtDirectLargeUnicodeWarning(nonAsciiCount)
+                                        else -> strings.txtDirectDesktopHint
+                                    }
+                                    Text(
+                                        text = msg,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (hasDirectHeadlessError || isTextTooLong) {
+                                            MaterialTheme.colorScheme.error
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        }
+                                    )
                                 }
+                            } else {
+                                null
+                            },
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = if (isDirectMode) KeyboardType.Ascii else KeyboardType.Text
+                            ),
+                            trailingIcon = {
+                                AnimatedVisibility(
+                                    visible = inputText.isNotEmpty(),
+                                    enter = fadeIn(tween(150)) + scaleIn(initialScale = 0.7f, animationSpec = tween(150)),
+                                    exit = fadeOut(tween(110)) + scaleOut(targetScale = 0.7f, animationSpec = tween(110))
+                                ) {
+                                    IconButton(onClick = { onInputTextChange("") }) {
+                                        Icon(
+                                            Icons.Default.Close,
+                                            contentDescription = strings.txtClearInputDesc,
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            },
+                            colors = TextFieldDefaults.colors(
+                                focusedContainerColor = Color.Transparent,
+                                unfocusedContainerColor = Color.Transparent,
+                                disabledContainerColor = Color.Transparent,
+                                errorContainerColor = Color.Transparent,
+                                focusedIndicatorColor = Color.Transparent,
+                                unfocusedIndicatorColor = Color.Transparent,
+                                disabledIndicatorColor = Color.Transparent,
+                                errorIndicatorColor = Color.Transparent
                             )
-                        }
-                    } else {
-                        null
-                    },
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = if (isDirectMode) KeyboardType.Ascii else KeyboardType.Text
-                    ),
-                    trailingIcon = {
-                        AnimatedVisibility(
-                            visible = inputText.isNotEmpty(),
-                            enter = fadeIn(tween(150)) + scaleIn(initialScale = 0.7f, animationSpec = tween(150)),
-                            exit = fadeOut(tween(110)) + scaleOut(targetScale = 0.7f, animationSpec = tween(110))
+                        )
+
+                        // Inline Control Row: 1-Tap Connected Pill Group + Soft Tonal Toggle Pills
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            IconButton(onClick = { onInputTextChange("") }) {
-                                Icon(
-                                    Icons.Default.Close,
-                                    contentDescription = strings.txtClearInputDesc,
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(18.dp)
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.horizontalScroll(rememberScrollState())
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(3.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    ConnectedModeSegment(
+                                        label = strings.txtTargetTerminal,
+                                        selected = targetMode == "terminal",
+                                        onClick = { onTargetModeChange("terminal") }
+                                    )
+                                    ConnectedModeSegment(
+                                        label = strings.txtTargetApp,
+                                        selected = targetMode == "gui",
+                                        onClick = { onTargetModeChange("gui") }
+                                    )
+                                    ConnectedModeSegment(
+                                        label = strings.txtTargetDirect,
+                                        selected = targetMode == "keys",
+                                        onClick = { onTargetModeChange("keys") }
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.width(6.dp))
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                TonalOptionTogglePill(
+                                    label = strings.txtOptionEnter,
+                                    checked = enterOnSend,
+                                    onToggle = { onEnterOnSendChange(!enterOnSend) }
+                                )
+                                TonalOptionTogglePill(
+                                    label = strings.txtOptionClear,
+                                    checked = clearOnSend,
+                                    onToggle = { onClearOnSendChange(!clearOnSend) }
                                 )
                             }
                         }
-                    },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)
-                    )
-                )
 
-                // Target Mode Selector & Options Row
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .weight(1f)
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                    ) {
-                        TargetModeChip(
-                            label = strings.txtTargetTerminal,
-                            selected = targetMode == "terminal",
-                            onClick = { onTargetModeChange("terminal") }
-                        )
-                        TargetModeChip(
-                            label = strings.txtTargetApp,
-                            selected = targetMode == "gui",
-                            onClick = { onTargetModeChange("gui") }
-                        )
-                        TargetModeChip(
-                            label = strings.txtTargetDirect,
-                            selected = targetMode == "keys",
-                            onClick = { onTargetModeChange("keys") }
-                        )
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Row(
+                        // Hero Full-Width Primary Action
+                        val sendInteraction = remember { MutableInteractionSource() }
+                        Button(
+                            onClick = { sendText(inputText) },
+                            enabled = sendEnabled,
+                            interactionSource = sendInteraction,
                             modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable { onEnterOnSendChange(!enterOnSend) }
-                                .padding(end = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .fillMaxWidth()
+                                .height(46.dp)
+                                .pressScale(sendInteraction, pressedScale = 0.97f, enabled = sendEnabled),
+                            shape = RoundedCornerShape(14.dp)
                         ) {
-                            Checkbox(
-                                checked = enterOnSend,
-                                onCheckedChange = onEnterOnSendChange
+                            Icon(
+                                Icons.AutoMirrored.Filled.Send,
+                                contentDescription = null,
+                                modifier = Modifier.size(17.dp)
                             )
-                            Text(strings.txtOptionEnter, style = MaterialTheme.typography.bodySmall)
-                        }
-                        Spacer(modifier = Modifier.width(2.dp))
-                        Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable { onClearOnSendChange(!clearOnSend) }
-                                .padding(end = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Checkbox(
-                                checked = clearOnSend,
-                                onCheckedChange = onClearOnSendChange
-                            )
-                            Text(strings.txtOptionClear, style = MaterialTheme.typography.bodySmall)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(strings.txtSendToPc, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
 
-                // Primary Action: Prominent Dedicated Send Button & Undo
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    val sendInteraction = remember { MutableInteractionSource() }
-                    Button(
-                        onClick = { sendText(inputText) },
-                        enabled = sendEnabled,
-                        interactionSource = sendInteraction,
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .pressScale(sendInteraction, pressedScale = 0.96f, enabled = sendEnabled),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(strings.txtSendToPc, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                    }
-                    val undoInteraction = remember { MutableInteractionSource() }
-                    OutlinedButton(
-                        onClick = {
-                            sendKey("ctrl+z")
-                        },
-                        interactionSource = undoInteraction,
-                        modifier = Modifier
-                            .height(48.dp)
-                            .pressScale(undoInteraction, pressedScale = 0.95f),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(horizontal = 14.dp)
-                    ) {
-                        Text(strings.txtUndoBtn, fontSize = 12.sp)
-                    }
-                }
-
-                // Quick Snippets (Horizontal scrolling row)
+                // Quick Snippets Strip (Borderless Soft Tonal Capsules, Toggleable in More Settings)
                 AnimatedVisibility(
-                    visible = snippets.isNotEmpty(),
-                    enter = SilentMotion.expandSectionTransition(),
-                    exit = SilentMotion.collapseSectionTransition()
+                    visible = showSnippets,
+                    enter = fadeIn(tween(180)) + expandVertically(),
+                    exit = fadeOut(tween(140)) + shrinkVertically()
                 ) {
                     LazyRow(
                         modifier = Modifier.fillMaxWidth(),
@@ -331,35 +324,52 @@ fun TextSenderScreen(
                             items = snippets,
                             key = { index, snippet -> "${index}_$snippet" }
                         ) { _, snippet ->
-                            SuggestionChip(
-                                onClick = { onInputTextChange(inputText + snippet) },
-                                label = {
-                                    Text(
-                                        text = snippet,
-                                        fontSize = 12.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            )
+                            Surface(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { onInputTextChange(inputText + snippet) },
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)
+                            ) {
+                                Text(
+                                    text = snippet,
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+                                )
+                            }
                         }
                         item(key = "add_snippet_chip") {
-                            AssistChip(
-                                onClick = onOpenSettings,
-                                label = { Text(strings.txtAddSnippetChip, fontSize = 11.sp) }
-                            )
+                            Surface(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable(onClick = onOpenSettings),
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surface
+                            ) {
+                                Text(
+                                    text = strings.txtAddSnippetChip,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+                                )
+                            }
                         }
                     }
                 }
 
-                // Remote PC Cursor & Correction Toolbar
-                Card(
+                // Card 2: Unified Edit & Cursor Strip (Includes Undo + Return Icon + IME Pill)
+                Surface(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surface
                 ) {
                     Column(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -369,20 +379,15 @@ fun TextSenderScreen(
                             Text(
                                 text = strings.txtCursorEditTitle,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.Bold
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = FontWeight.SemiBold
                             )
                             if (imeSwitchKey.isNotBlank()) {
                                 var showImeMenu by remember { mutableStateOf(false) }
                                 Box {
-                                    Box(
+                                    Surface(
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(MaterialTheme.colorScheme.surface)
-                                            .border(
-                                                BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                                                RoundedCornerShape(8.dp)
-                                            )
+                                            .clip(RoundedCornerShape(10.dp))
                                             .combinedClickable(
                                                 onClick = { sendKey(imeSwitchKey) },
                                                 onLongClick = {
@@ -391,16 +396,17 @@ fun TextSenderScreen(
                                                     }
                                                     showImeMenu = true
                                                 }
-                                            )
-                                            .padding(horizontal = 8.dp, vertical = 3.dp),
-                                        contentAlignment = Alignment.Center
+                                            ),
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant
                                     ) {
                                         Text(
                                             text = strings.imeSwitchQuickChip(ImeSwitchShortcut.formatLabel(imeSwitchKey)),
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurface,
                                             fontWeight = FontWeight.Medium,
-                                            maxLines = 1
+                                            maxLines = 1,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                                         )
                                     }
                                     DropdownMenu(
@@ -448,61 +454,55 @@ fun TextSenderScreen(
                                 label = "←",
                                 modifier = Modifier.weight(1f),
                                 fontSize = 14.sp,
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = MaterialTheme.colorScheme.onSurface,
                                 onRepeat = { sendKey("left") }
                             )
                             RepeatableEditKey(
                                 label = "→",
                                 modifier = Modifier.weight(1f),
                                 fontSize = 14.sp,
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = MaterialTheme.colorScheme.onSurface,
                                 onRepeat = { sendKey("right") }
                             )
                             RepeatableEditKey(
                                 label = strings.txtCursorBackspace,
-                                modifier = Modifier.weight(1.3f),
+                                modifier = Modifier.weight(1.15f),
                                 fontSize = 12.sp,
-                                containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f),
+                                containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f),
                                 contentColor = MaterialTheme.colorScheme.onErrorContainer,
                                 onRepeat = { sendKey("backspace") }
                             )
                             RepeatableEditKey(
                                 label = "Del",
-                                modifier = Modifier.weight(1.1f),
+                                modifier = Modifier.weight(1f),
                                 fontSize = 12.sp,
-                                fontWeight = FontWeight.Normal,
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                fontWeight = FontWeight.Medium,
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = MaterialTheme.colorScheme.onSurface,
                                 onRepeat = { sendKey("delete") }
                             )
-                            val cursorEnterInteraction = remember { MutableInteractionSource() }
-                            FilledTonalButton(
-                                onClick = { sendKey("enter") },
-                                interactionSource = cursorEnterInteraction,
-                                modifier = Modifier
-                                    .weight(1.2f)
-                                    .height(38.dp)
-                                    .pressScale(cursorEnterInteraction, pressedScale = 0.94f),
-                                shape = RoundedCornerShape(8.dp),
-                                colors = ButtonDefaults.filledTonalButtonColors(
-                                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                                ),
-                                contentPadding = PaddingValues(0.dp)
-                            ) {
-                                Text(
-                                    strings.txtCursorEnter,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
-                            }
+                            TonalActionEditKey(
+                                label = strings.txtUndoBtn,
+                                modifier = Modifier.weight(1.05f),
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = MaterialTheme.colorScheme.onSurface,
+                                onClick = { sendKey("ctrl+z") }
+                            )
+                            TonalActionEditKey(
+                                label = strings.txtCursorEnter,
+                                modifier = Modifier.weight(1.05f),
+                                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                onClick = { sendKey("enter") }
+                            )
                         }
                     }
                 }
             }
 
+            // Card 3: Dot-Matrix Minimal Inline Trackpad (No collapse button)
             AnimatedVisibility(
                 visible = showTrackpadArea,
                 modifier = Modifier
@@ -525,6 +525,7 @@ fun TextSenderScreen(
                     onMouseClick = onMouseClick,
                     onMouseScroll = onMouseScroll,
                     modifier = Modifier.fillMaxSize(),
+                    minimalStyle = true,
                     hintText = strings.txtInlineTrackpadHint
                 )
             }
@@ -565,16 +566,138 @@ private fun rememberIsImeVisible(): Boolean {
 }
 
 @Composable
+private fun ConnectedModeSegment(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val bg by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+        animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+        label = "modeSegBg"
+    )
+    val fg by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+        label = "modeSegFg"
+    )
+    Surface(
+        modifier = Modifier
+            .clip(RoundedCornerShape(11.dp))
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                onClick = onClick
+            ),
+        shape = RoundedCornerShape(11.dp),
+        color = bg
+    ) {
+        Text(
+            text = label,
+            fontSize = 12.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = fg,
+            maxLines = 1,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+        )
+    }
+}
+
+@Composable
+private fun TonalOptionTogglePill(
+    label: String,
+    checked: Boolean,
+    onToggle: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val bg by animateColorAsState(
+        targetValue = if (checked) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+        animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+        label = "optPillBg"
+    )
+    val fg by animateColorAsState(
+        targetValue = if (checked) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = tween(SilentMotion.DURATION_STATE_MS),
+        label = "optPillFg"
+    )
+    Surface(
+        modifier = Modifier
+            .clip(RoundedCornerShape(11.dp))
+            .pressScale(interactionSource, pressedScale = 0.95f)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                onClick = onToggle
+            )
+            .animateContentSize(animationSpec = tween(150)),
+        shape = RoundedCornerShape(11.dp),
+        color = bg
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            if (checked) {
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = null,
+                    tint = fg,
+                    modifier = Modifier.size(12.dp)
+                )
+            }
+            Text(
+                text = label,
+                fontSize = 11.sp,
+                fontWeight = if (checked) FontWeight.Medium else FontWeight.Normal,
+                color = fg,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+@Composable
+private fun TonalActionEditKey(
+    label: String,
+    modifier: Modifier = Modifier,
+    containerColor: Color,
+    contentColor: Color,
+    onClick: () -> Unit
+) {
+    val shape = RoundedCornerShape(10.dp)
+    val interactionSource = remember { MutableInteractionSource() }
+    Surface(
+        modifier = modifier
+            .height(38.dp)
+            .pressScale(interactionSource, pressedScale = 0.94f)
+            .clip(shape)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                onClick = onClick
+            ),
+        shape = shape,
+        color = containerColor
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = contentColor, maxLines = 1)
+        }
+    }
+}
+
+@Composable
 private fun RepeatableEditKey(
     label: String,
     modifier: Modifier = Modifier,
     fontSize: androidx.compose.ui.unit.TextUnit = 12.sp,
-    fontWeight: FontWeight = FontWeight.Bold,
+    fontWeight: FontWeight = FontWeight.SemiBold,
     containerColor: Color,
     contentColor: Color,
     onRepeat: () -> Unit
 ) {
-    val shape = RoundedCornerShape(8.dp)
+    val shape = RoundedCornerShape(10.dp)
     val interactionSource = remember { MutableInteractionSource() }
     Surface(
         modifier = modifier
@@ -598,45 +721,4 @@ private fun RepeatableEditKey(
             Text(label, fontSize = fontSize, fontWeight = fontWeight, color = contentColor)
         }
     }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun TargetModeChip(
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    FilterChip(
-        selected = selected,
-        onClick = onClick,
-        interactionSource = interactionSource,
-        modifier = Modifier
-            .pressScale(interactionSource, pressedScale = 0.96f)
-            .animateContentSize(animationSpec = tween(160)),
-        leadingIcon = if (selected) {
-            {
-                Icon(
-                    imageVector = Icons.Default.Check,
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp)
-                )
-            }
-        } else null,
-        label = {
-            Text(
-                text = label,
-                fontSize = 11.sp,
-                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
-            )
-        },
-        colors = FilterChipDefaults.filterChipColors(
-            selectedContainerColor = MaterialTheme.colorScheme.primary,
-            selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
-            selectedLeadingIconColor = MaterialTheme.colorScheme.onPrimary,
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-            labelColor = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    )
 }

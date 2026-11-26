@@ -46,10 +46,9 @@ import com.silentinput.app.ui.KeyboardScreen
 import com.silentinput.app.ui.LandscapeKeyboardScreen
 import com.silentinput.app.ui.LocalAppStrings
 import com.silentinput.app.ui.LocalResolvedLanguage
-import com.silentinput.app.ui.MoreSettingsScreen
+import com.silentinput.app.ui.SettingsScreen
 import com.silentinput.app.ui.TextSenderScreen
 import com.silentinput.app.ui.TrackpadScreen
-import com.silentinput.app.ui.UnifiedConnectionDialog
 import com.silentinput.app.ui.theme.SilentInputTheme
 import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.ui.theme.findActivity
@@ -188,6 +187,7 @@ fun MainAppScaffold(
     val isNaturalScrolling by viewModel.isNaturalScrolling.collectAsState()
     val isLeftMouseHeld by viewModel.isLeftMouseHeld.collectAsState()
     val showInlineTrackpadInText by viewModel.showInlineTrackpadInText.collectAsState()
+    val showSnippetsInText by viewModel.showSnippetsInText.collectAsState()
     val imeSwitchKey by viewModel.imeSwitchKey.collectAsState()
     val snippets by viewModel.snippets.collectAsState()
     val longTextInput by viewModel.longTextInput.collectAsState()
@@ -196,10 +196,9 @@ fun MainAppScaffold(
     val enterOnSend by viewModel.enterOnSend.collectAsState()
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    var showConfigDialog by rememberSaveable { mutableStateOf(false) }
-    var configDialogInitialTab by rememberSaveable { mutableStateOf<Int?>(null) }
-    var showMoreSettingsPage by rememberSaveable { mutableStateOf(false) }
-    var returnToConfigDialogOnBack by rememberSaveable { mutableStateOf(false) }
+    var showSettingsPage by rememberSaveable { mutableStateOf(false) }
+    var settingsInitialTab by rememberSaveable { mutableStateOf<Int?>(null) }
+    var settingsExpandMore by rememberSaveable { mutableStateOf(false) }
     var showLandscapeKeyboard by rememberSaveable { mutableStateOf(false) }
 
     val context = LocalContext.current
@@ -209,13 +208,14 @@ fun MainAppScaffold(
         }
     }
 
-    fun openConfigDialog(preferredTab: Int? = null) {
-        configDialogInitialTab = preferredTab ?: when (currentMode) {
+    fun openSettings(preferredTab: Int? = null, expandMore: Boolean = false) {
+        settingsInitialTab = preferredTab ?: when (currentMode) {
             "bluetooth" -> 2
             "lan" -> 1
             else -> 0
         }
-        showConfigDialog = true
+        settingsExpandMore = expandMore
+        showSettingsPage = true
     }
 
     val activity = remember(context) { context.findActivity() }
@@ -230,19 +230,17 @@ fun MainAppScaffold(
         }
     }
 
-    if (showMoreSettingsPage) {
-        MoreSettingsScreen(
+    if (showSettingsPage) {
+        SettingsScreen(
             viewModel = viewModel,
-            onBack = {
-                showMoreSettingsPage = false
-                if (returnToConfigDialogOnBack) {
-                    returnToConfigDialogOnBack = false
-                    openConfigDialog()
-                }
-            },
-            onDone = {
-                showMoreSettingsPage = false
-                returnToConfigDialogOnBack = false
+            initialTab = settingsInitialTab,
+            initialExpandMore = settingsExpandMore,
+            onRequestBtPermission = onRequestBtPermission,
+            onToggleBluetoothSystem = onToggleBluetoothSystem,
+            onDismiss = {
+                showSettingsPage = false
+                settingsInitialTab = null
+                settingsExpandMore = false
             }
         )
         return
@@ -256,7 +254,7 @@ fun MainAppScaffold(
             onSendKey = { viewModel.sendKey(it) },
             onOpenSettings = {
                 showLandscapeKeyboard = false
-                openConfigDialog()
+                openSettings()
             },
             onExit = { showLandscapeKeyboard = false }
         )
@@ -265,28 +263,22 @@ fun MainAppScaffold(
 
     Scaffold(
         topBar = {
-            val settingsIconRotation by animateFloatAsState(
-                targetValue = if (showConfigDialog) 45f else 0f,
-                animationSpec = tween(SilentMotion.DURATION_STATE_MS, easing = FastOutSlowInEasing),
-                label = "settingsIconRotation"
-            )
             TopAppBar(
                 title = {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { openConfigDialog() }
+                            .clickable { openSettings() }
                     ) {
                         Text("SilentInput", fontSize = 18.sp, fontWeight = FontWeight.Bold)
                         TopBarConnectionStatusSubtitle(viewModel = viewModel)
                     }
                 },
                 actions = {
-                    IconButton(onClick = { openConfigDialog() }) {
+                    IconButton(onClick = { openSettings() }) {
                         Icon(
                             imageVector = Icons.Default.Settings,
-                            contentDescription = strings.settings,
-                            modifier = Modifier.graphicsLayer { rotationZ = settingsIconRotation }
+                            contentDescription = strings.settings
                         )
                     }
                 },
@@ -338,7 +330,7 @@ fun MainAppScaffold(
                     color = MaterialTheme.colorScheme.primaryContainer,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { openConfigDialog() }
+                        .clickable { openSettings() }
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
@@ -401,6 +393,7 @@ fun MainAppScaffold(
                         enterOnSend = enterOnSend,
                         onEnterOnSendChange = { viewModel.setEnterOnSend(it) },
                         snippets = snippets,
+                        showSnippets = showSnippetsInText,
                         showInlineTrackpad = showInlineTrackpadInText,
                         trackpadSensitivity = trackpadSensitivity,
                         naturalScrolling = isNaturalScrolling,
@@ -411,37 +404,16 @@ fun MainAppScaffold(
                         onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },
                         onMouseClick = { viewModel.sendMouseClick(it) },
                         onMouseScroll = { viewModel.sendMouseScroll(it) },
-                        onOpenSettings = {
-                            returnToConfigDialogOnBack = false
-                            showMoreSettingsPage = true
-                        }
+                        onOpenSettings = { openSettings(expandMore = true) }
                     )
                 }
             }
-        }
-
-        if (showConfigDialog) {
-            UnifiedConnectionDialog(
-                viewModel = viewModel,
-                initialTab = configDialogInitialTab,
-                onRequestBtPermission = onRequestBtPermission,
-                onToggleBluetoothSystem = onToggleBluetoothSystem,
-                onOpenMoreSettings = {
-                    showConfigDialog = false
-                    returnToConfigDialogOnBack = true
-                    showMoreSettingsPage = true
-                },
-                onDismiss = {
-                    showConfigDialog = false
-                    configDialogInitialTab = null
-                }
-            )
         }
     }
 }
 
 @Composable
-private fun TopBarConnectionStatusSubtitle(
+internal fun TopBarConnectionStatusSubtitle(
     viewModel: MainViewModel
 ) {
     val resolvedLanguage = LocalResolvedLanguage.current

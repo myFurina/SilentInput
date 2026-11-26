@@ -8,8 +8,10 @@ use std::time::Duration;
 use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
 use evdev::{AttributeSet, EventType, InputEvent, Key, RelativeAxisType};
 use silentinput_core::keymap::{
-    all_registered_keys, build_key_map, build_wtype_args, detect_wayland_env,
-    has_graphical_session, lookup_char, normalize_line_endings, resolve_key_combination,
+    all_registered_keys, build_key_map, build_wtype_args, build_xdotool_args,
+    clipboard_candidates_for_session, detect_session_capabilities, detect_wayland_env,
+    detect_x11_env, has_graphical_session, lookup_char, normalize_line_endings,
+    resolve_key_combination,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -226,14 +228,28 @@ impl InputController for SystemInputController {
                 }
             }
 
-            let Some(wtype_args) = build_wtype_args(combo) else {
-                eprintln!("[SilentInput] Warning: ignoring invalid fallback key '{combo}'.");
-                return;
-            };
+            let (has_wayland, has_x11) = detect_session_capabilities();
+            let mut env_vars = Vec::new();
+            if has_wayland {
+                env_vars.extend(detect_wayland_env());
+            }
+            if has_x11 {
+                env_vars.extend(detect_x11_env());
+            }
 
-            let env_vars = detect_wayland_env();
-            let mut candidates: Vec<(String, Vec<String>)> =
-                vec![("wtype".to_string(), wtype_args)];
+            let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
+            if has_wayland || !has_x11 {
+                let Some(wtype_args) = build_wtype_args(combo) else {
+                    eprintln!("[SilentInput] Warning: ignoring invalid fallback key '{combo}'.");
+                    return;
+                };
+                candidates.push(("wtype".to_string(), wtype_args));
+            }
+            if has_x11 {
+                if let Some(xdotool_args) = build_xdotool_args(combo) {
+                    candidates.push(("xdotool".to_string(), xdotool_args));
+                }
+            }
 
             if let Some(codes) = resolve_key_combination(combo) {
                 let mut ydo_args = vec!["key".to_string()];
@@ -333,56 +349,34 @@ impl InputController for SystemInputController {
 
     fn copy_clipboard<'a>(&'a self, text: &'a str) -> BoxFuture<'a, bool> {
         Box::pin(async move {
-            let env_vars = detect_wayland_env();
-            let mut cmd = Command::new("wl-copy");
-            cmd.stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
-            for (k, v) in env_vars {
-                cmd.env(k, v);
+            let (has_wayland, has_x11) = detect_session_capabilities();
+            let mut env_vars = Vec::new();
+            if has_wayland {
+                env_vars.extend(detect_wayland_env());
+            }
+            if has_x11 {
+                env_vars.extend(detect_x11_env());
             }
 
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(err) => {
-                    eprintln!("[SilentInput] Error writing to clipboard: {err}");
-                    return false;
-                }
-            };
-
-            if let Some(mut stdin) = child.stdin.take() {
-                if let Err(err) = stdin.write_all(text.as_bytes()).await {
-                    eprintln!("[SilentInput] Error writing to clipboard stdin: {err}");
-                    let _ = child.kill().await;
-                    return false;
-                }
-                let _ = stdin.shutdown().await;
-                drop(stdin);
-            }
-
-            match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
-                Ok(Ok(status)) if status.success() => {
-                    println!("[SilentInput] Copied {} chars to clipboard.", text.chars().count());
-                    true
-                }
-                Ok(Ok(status)) => {
-                    eprintln!(
-                        "[SilentInput] Error writing to clipboard: wl-copy exited with {status}"
+            let candidates = clipboard_candidates_for_session(has_wayland, has_x11);
+            for (bin, args) in &candidates {
+                if write_clipboard_with_tool(bin, args, &env_vars, text).await {
+                    println!(
+                        "[SilentInput] Copied {} chars to clipboard via {bin}.",
+                        text.chars().count()
                     );
-                    false
-                }
-                Ok(Err(err)) => {
-                    eprintln!("[SilentInput] Error waiting for wl-copy: {err}");
-                    false
-                }
-                Err(_) => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    eprintln!("[SilentInput] Error writing to clipboard: wl-copy timed out");
-                    false
+                    return true;
                 }
             }
+            eprintln!(
+                "[SilentInput] Error writing to clipboard: all clipboard tools failed (tried: {}).",
+                candidates
+                    .iter()
+                    .map(|(bin, _)| *bin)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            false
         })
     }
 
@@ -425,6 +419,61 @@ impl MouseHoldGuard {
 impl Drop for MouseHoldGuard {
     fn drop(&mut self) {
         self.input.release_connection_buttons(self.conn_id);
+    }
+}
+
+async fn write_clipboard_with_tool(
+    bin: &str,
+    args: &[&str],
+    env_vars: &[(String, String)],
+    text: &str,
+) -> bool {
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("[SilentInput] Error spawning clipboard tool '{bin}': {err}");
+            }
+            return false;
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(err) = stdin.write_all(text.as_bytes()).await {
+            eprintln!("[SilentInput] Error writing to '{bin}' stdin: {err}");
+            let _ = child.kill().await;
+            return false;
+        }
+        let _ = stdin.shutdown().await;
+        drop(stdin);
+    }
+
+    match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+        Ok(Ok(status)) if status.success() => true,
+        Ok(Ok(status)) => {
+            eprintln!("[SilentInput] Clipboard tool '{bin}' exited with {status}");
+            false
+        }
+        Ok(Err(err)) => {
+            eprintln!("[SilentInput] Error waiting for '{bin}': {err}");
+            false
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            eprintln!("[SilentInput] Clipboard tool '{bin}' timed out");
+            false
+        }
     }
 }
 

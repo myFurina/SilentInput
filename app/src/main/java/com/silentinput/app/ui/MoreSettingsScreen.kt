@@ -1,22 +1,17 @@
 package com.silentinput.app.ui
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -32,172 +27,100 @@ import com.silentinput.app.model.ImeSwitchShortcut
 import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.ui.theme.pressScale
 import com.silentinput.app.viewmodel.MainViewModel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MoreSettingsScreen(
+internal fun MoreSettingsSectionContent(
     viewModel: MainViewModel,
-    onBack: () -> Unit,
-    onDone: () -> Unit
+    onOpenHelp: () -> Unit,
+    onRequestScrollToBottom: () -> Unit = {}
 ) {
-    BackHandler(onBack = onBack)
-
     val isHapticEnabled by viewModel.isHapticEnabled.collectAsState()
     val isDarkMode by viewModel.isDarkMode.collectAsState()
     val appLanguage by viewModel.appLanguage.collectAsState()
     val showInlineTrackpadInText by viewModel.showInlineTrackpadInText.collectAsState()
+    val showSnippetsInText by viewModel.showSnippetsInText.collectAsState()
     val isNaturalScrolling by viewModel.isNaturalScrolling.collectAsState()
     val imeSwitchKey by viewModel.imeSwitchKey.collectAsState()
     val snippets by viewModel.snippets.collectAsState()
-    val daemonVersion by viewModel.daemonVersion.collectAsState()
     val strings = LocalAppStrings.current
-    val scrollState = rememberScrollState()
-    val coroutineScope = rememberCoroutineScope()
-    var showHelpDialog by rememberSaveable { mutableStateOf(false) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = strings.moreSettingsTitle,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = strings.collapseDesc
-                        )
-                    }
-                },
-                actions = {
-                    TextButton(onClick = onDone) {
-                        Text(strings.done, fontWeight = FontWeight.SemiBold)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                )
-            )
-        }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .verticalScroll(scrollState)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
-            ) {
-                Column(
-                    modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    LanguageSettingRow(
-                        selectedLanguage = appLanguage,
-                        onSelectLanguage = { viewModel.setAppLanguage(it) }
-                    )
+    Column(
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        LanguageSettingRow(
+            selectedLanguage = appLanguage,
+            onSelectLanguage = { viewModel.setAppLanguage(it) }
+        )
 
-                    SectionDivider()
+        SectionDivider()
 
-                    ToggleSettingRow(
-                        title = strings.silentModeTitle,
-                        subtitle = strings.silentModeSubtitle,
-                        checked = !isHapticEnabled,
-                        onCheckedChange = { viewModel.setHapticEnabled(!it) }
-                    )
+        ToggleSettingRow(
+            title = strings.silentModeTitle,
+            subtitle = strings.silentModeSubtitle,
+            checked = !isHapticEnabled,
+            onCheckedChange = { viewModel.setHapticEnabled(!it) }
+        )
 
-                    SectionDivider()
+        SectionDivider()
 
-                    ToggleSettingRow(
-                        title = strings.darkModeTitle,
-                        subtitle = strings.darkModeSubtitle,
-                        checked = isDarkMode,
-                        onCheckedChange = { viewModel.toggleDarkMode() }
-                    )
-                }
-            }
+        ToggleSettingRow(
+            title = strings.darkModeTitle,
+            subtitle = strings.darkModeSubtitle,
+            checked = isDarkMode,
+            onCheckedChange = { viewModel.toggleDarkMode() }
+        )
 
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
-            ) {
-                Column(
-                    modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    ToggleSettingRow(
-                        title = strings.inlineTrackpadTitle,
-                        subtitle = strings.inlineTrackpadSubtitle,
-                        checked = showInlineTrackpadInText,
-                        onCheckedChange = { viewModel.setShowInlineTrackpadInText(it) }
-                    )
+        SectionDivider()
 
-                    SectionDivider()
+        ToggleSettingRow(
+            title = strings.inlineTrackpadTitle,
+            subtitle = strings.inlineTrackpadSubtitle,
+            checked = showInlineTrackpadInText,
+            onCheckedChange = { viewModel.setShowInlineTrackpadInText(it) }
+        )
 
-                    ToggleSettingRow(
-                        title = strings.naturalScrollingTitle,
-                        subtitle = strings.naturalScrollingSubtitle,
-                        checked = isNaturalScrolling,
-                        onCheckedChange = { viewModel.setNaturalScrolling(it) }
-                    )
-                    SectionDivider()
-                    ImeSwitchSettingRow(
-                        selectedShortcut = imeSwitchKey,
-                        onSelectShortcut = { viewModel.setImeSwitchKey(it) }
-                    )
-                }
-            }
+        SectionDivider()
 
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
-            ) {
-                Box(modifier = Modifier.padding(14.dp)) {
-                    CustomSnippetsSection(
-                        snippets = snippets,
-                        onAddSnippet = {
-                            viewModel.addSnippet(it)
-                            coroutineScope.launch {
-                                delay(80)
-                                scrollState.animateScrollTo(
-                                    value = scrollState.maxValue,
-                                    animationSpec = tween(240, easing = FastOutSlowInEasing)
-                                )
-                            }
-                        },
-                        onDeleteSnippet = { viewModel.deleteSnippet(it) }
-                    )
-                }
-            }
+        ToggleSettingRow(
+            title = strings.naturalScrollingTitle,
+            subtitle = strings.naturalScrollingSubtitle,
+            checked = isNaturalScrolling,
+            onCheckedChange = { viewModel.setNaturalScrolling(it) }
+        )
 
-            MoreSettingsEntryRow(
-                title = strings.helpEntryTitle,
-                summary = strings.helpEntrySubtitle,
-                onClick = { showHelpDialog = true }
-            )
-        }
-    }
+        SectionDivider()
 
-    if (showHelpDialog) {
-        HelpAndAboutDialog(
-            daemonVersion = daemonVersion,
-            onDismiss = { showHelpDialog = false }
+        ImeSwitchSettingRow(
+            selectedShortcut = imeSwitchKey,
+            onSelectShortcut = { viewModel.setImeSwitchKey(it) }
+        )
+
+        SectionDivider()
+
+        ToggleSettingRow(
+            title = strings.showSnippetsTitle,
+            subtitle = strings.showSnippetsSubtitle,
+            checked = showSnippetsInText,
+            onCheckedChange = { viewModel.setShowSnippetsInText(it) }
+        )
+
+        SectionDivider()
+
+        CustomSnippetsSection(
+            snippets = snippets,
+            onAddSnippet = {
+                viewModel.addSnippet(it)
+                onRequestScrollToBottom()
+            },
+            onDeleteSnippet = { viewModel.deleteSnippet(it) }
+        )
+
+        SectionDivider()
+
+        MoreSettingsEntryRow(
+            title = strings.helpEntryTitle,
+            summary = strings.helpEntrySubtitle,
+            onClick = onOpenHelp
         )
     }
 }
@@ -314,11 +237,13 @@ private fun ImeSwitchSettingRow(
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Column {
             Text(strings.imeSwitchTitle, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-            Text(
-                strings.imeSwitchSubtitle,
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (strings.imeSwitchSubtitle.isNotBlank()) {
+                Text(
+                    strings.imeSwitchSubtitle,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -423,7 +348,9 @@ private fun ToggleSettingRow(
     ) {
         Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
             Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-            Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (subtitle.isNotBlank()) {
+                Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         Switch(
             checked = checked,
