@@ -181,6 +181,7 @@ fun MainAppScaffold(
     val isCurrentConnected by viewModel.isCurrentModeConnected.collectAsState()
     val isAnyConnected by viewModel.isAnyConnected.collectAsState()
     val supportsUnicodeDirectTyping by viewModel.supportsUnicodeDirectTyping.collectAsState()
+    val supportsHiResWheel by viewModel.supportsHiResWheel.collectAsState()
 
     val isHapticEnabled by viewModel.isHapticEnabled.collectAsState()
     val trackpadSensitivity by viewModel.trackpadSensitivity.collectAsState()
@@ -372,6 +373,7 @@ fun MainAppScaffold(
                         onSensitivityChange = { viewModel.updateTrackpadSensitivity(it, persist = false) },
                         onSensitivityChangeFinished = { viewModel.commitTrackpadSensitivity() },
                         naturalScrolling = isNaturalScrolling,
+                        hiResScroll = supportsHiResWheel,
                         isHapticEnabled = isHapticEnabled,
                         isConnected = isAnyConnected,
                         isLeftHeld = isLeftMouseHeld,
@@ -385,6 +387,7 @@ fun MainAppScaffold(
                         isConnected = isAnyConnected,
                         isHapticEnabled = isHapticEnabled,
                         supportsUnicodeDirectTyping = supportsUnicodeDirectTyping,
+                        supportsHiResWheel = supportsHiResWheel,
                         inputText = longTextInput,
                         onInputTextChange = { viewModel.updateLongTextInput(it) },
                         targetMode = sendTargetMode,

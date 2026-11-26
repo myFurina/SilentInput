@@ -8,6 +8,7 @@ import java.net.PortUnreachableException
 import java.net.SocketTimeoutException
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.LockSupport
@@ -36,6 +37,7 @@ object UdpMouseCodec {
 
     const val DIR_CLIENT_TO_SERVER: Int = 1
     const val DIR_SERVER_TO_CLIENT: Int = 2
+    const val FLAG_HI_RES_WHEEL: Int = 0x0001
 
     fun parseSessionIdHex(hex: String): Long? {
         val trimmed = hex.trim()
@@ -242,6 +244,7 @@ class UdpMouseChannel(
     private val pendingDx = AtomicInteger(0)
     private val pendingDy = AtomicInteger(0)
     private val pendingWheel = AtomicInteger(0)
+    private val pendingWheelIsHiRes = AtomicBoolean(false)
 
     fun start() {
         val thread = Thread({ runWorker() }, "SilentInput-UDP-Mouse").apply {
@@ -265,8 +268,11 @@ class UdpMouseChannel(
     /**
      * Lock-free two-finger scroll accumulation coalesced into the UDP datagram loop.
      */
-    fun enqueueScroll(wheel: Int) {
+    fun enqueueScroll(wheel: Int, hiRes: Boolean = false) {
         if (closed || !isReady || wheel == 0) return
+        if (pendingWheelIsHiRes.getAndSet(hiRes) != hiRes) {
+            pendingWheel.set(0)
+        }
         pendingWheel.addAndGet(wheel)
         LockSupport.unpark(workerThread)
     }
@@ -395,6 +401,12 @@ class UdpMouseChannel(
                 continue
             }
 
+            val flags = if (wheel != 0 && pendingWheelIsHiRes.get()) {
+                UdpMouseCodec.FLAG_HI_RES_WHEEL
+            } else {
+                0
+            }
+
             try {
                 val seq = nextSeq.incrementAndGet()
                 val totalLen = UdpMouseCodec.sealMoveInto(
@@ -405,6 +417,7 @@ class UdpMouseChannel(
                     dx = dx,
                     dy = dy,
                     wheel = wheel,
+                    flags = flags,
                     payloadScratch = payloadScratch,
                     nonceScratch = nonceScratch,
                     wireOut = wireBuf,

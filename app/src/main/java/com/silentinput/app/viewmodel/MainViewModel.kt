@@ -253,6 +253,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, true)
 
+    val supportsHiResWheel: StateFlow<Boolean> = combine(
+        connectionMode,
+        isBtConnected,
+        btClient.supportsHiResWheel,
+        isNetReady,
+        networkClient.supportsHiResWheel
+    ) { mode, btConn, btSupports, netReady, netSupports ->
+        when {
+            mode == "bluetooth" && btConn -> btSupports
+            mode != "bluetooth" && netReady -> netSupports
+            else -> false
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     val daemonVersion: StateFlow<String?> = combine(
         connectionMode,
         isBtConnected,

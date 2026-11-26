@@ -69,6 +69,7 @@ fun TextSenderScreen(
     isConnected: Boolean,
     isHapticEnabled: Boolean = false,
     supportsUnicodeDirectTyping: Boolean = true,
+    supportsHiResWheel: Boolean = false,
     inputText: String,
     onInputTextChange: (String) -> Unit,
     targetMode: String,
@@ -629,6 +630,7 @@ fun TextSenderScreen(
                 TrackpadSurface(
                     sensitivity = trackpadSensitivity,
                     naturalScrolling = naturalScrolling,
+                    hiResScroll = supportsHiResWheel,
                     isHapticEnabled = isHapticEnabled,
                     onMouseMove = onMouseMove,
                     onMouseClick = onMouseClick,

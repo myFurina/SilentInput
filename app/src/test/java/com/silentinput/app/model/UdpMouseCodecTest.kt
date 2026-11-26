@@ -114,6 +114,7 @@ class UdpMouseCodecTest {
             dx = -12,
             dy = 34,
             wheel = -3,
+            flags = UdpMouseCodec.FLAG_HI_RES_WHEEL,
             payloadScratch = payloadScratch,
             nonceScratch = nonceScratch,
             wireOut = wireBuf,
@@ -134,6 +135,6 @@ class UdpMouseCodecTest {
         assertEquals((-12).toShort(), bb.short)
         assertEquals(34.toShort(), bb.short)
         assertEquals((-3).toShort(), bb.short)
-        assertEquals(0.toShort(), bb.short)
+        assertEquals(UdpMouseCodec.FLAG_HI_RES_WHEEL.toShort(), bb.short)
     }
 }

@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.asStateFlow
 interface InputTransport {
     val isTransportReady: StateFlow<Boolean>
     val supportsUnicodeDirectTyping: StateFlow<Boolean>
+    val supportsHiResWheel: StateFlow<Boolean>
     val daemonVersion: StateFlow<String?>
     val pasteQueueBusyEvent: SharedFlow<String>
 
@@ -40,6 +41,9 @@ abstract class BaseInputTransport(
 
     protected val _supportsUnicodeDirectTyping = MutableStateFlow(true)
     override val supportsUnicodeDirectTyping: StateFlow<Boolean> = _supportsUnicodeDirectTyping.asStateFlow()
+
+    protected val _supportsHiResWheel = MutableStateFlow(false)
+    override val supportsHiResWheel: StateFlow<Boolean> = _supportsHiResWheel.asStateFlow()
 
     protected val _daemonVersion = MutableStateFlow<String?>(null)
     override val daemonVersion: StateFlow<String?> = _daemonVersion.asStateFlow()

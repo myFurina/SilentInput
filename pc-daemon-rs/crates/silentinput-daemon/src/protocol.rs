@@ -121,6 +121,7 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
             "authenticated": ctx.authenticated,
             "access_control_mode": ctx.config.access_control_mode,
             "unicode_direct_typing": ctx.input.is_graphical_session(),
+            "hi_res_wheel": true,
         });
         return ProcessOutcome::plain(ctx.authenticated, false, Some(reply.to_string()));
     }
@@ -132,6 +133,7 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                 "status": "ok",
                 "message": "Authenticated",
                 "unicode_direct_typing": ctx.input.is_graphical_session(),
+                "hi_res_wheel": true,
             });
             return ProcessOutcome::plain(true, false, Some(reply.to_string()));
         }
@@ -157,6 +159,7 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                 "status": "ok",
                 "message": "Authenticated",
                 "unicode_direct_typing": ctx.input.is_graphical_session(),
+                "hi_res_wheel": true,
             });
             let mut created_udp_id = None;
             if !is_localhost_ip(ctx.peer_ip) {
@@ -358,6 +361,7 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                     let mut btn_updates: Vec<(u16, bool)> = Vec::new();
                     let vx = safe_round_int(map.get("dx"));
                     let vy = safe_round_int(map.get("dy"));
+                    let vw_hi = safe_round_int(map.get("wheel_hi"));
                     let vw = safe_round_int(map.get("wheel"));
 
                     if vx != 0 {
@@ -374,11 +378,30 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                             vy,
                         ));
                     }
-                    if vw != 0 {
+                    if vw_hi != 0 {
+                        events.push(InputEvent::new(
+                            EventType::RELATIVE,
+                            RelativeAxisType::REL_WHEEL_HI_RES.0,
+                            vw_hi,
+                        ));
+                        let detents = ctx.input.take_wheel_detents(ctx.conn_id, vw_hi);
+                        if detents != 0 {
+                            events.push(InputEvent::new(
+                                EventType::RELATIVE,
+                                RelativeAxisType::REL_WHEEL.0,
+                                detents,
+                            ));
+                        }
+                    } else if vw != 0 {
                         events.push(InputEvent::new(
                             EventType::RELATIVE,
                             RelativeAxisType::REL_WHEEL.0,
                             vw,
+                        ));
+                        events.push(InputEvent::new(
+                            EventType::RELATIVE,
+                            RelativeAxisType::REL_WHEEL_HI_RES.0,
+                            vw.saturating_mul(120),
                         ));
                     }
                     if let Some(val) = map.get("btn_left") {

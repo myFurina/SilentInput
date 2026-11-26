@@ -9,13 +9,15 @@ use ring::rand::{SecureRandom, SystemRandom};
 use silentinput_core::acl::normalize_ip_str;
 use tokio::net::UdpSocket;
 
-use crate::input::InputController;
+use crate::input::{push_wheel_events, InputController};
 
 pub const UDP_MAGIC: [u8; 2] = *b"SI";
 pub const UDP_VERSION: u8 = 0x01;
 pub const PKT_PROBE: u8 = 0x01;
 pub const PKT_PROBE_ACK: u8 = 0x02;
 pub const PKT_MOUSE_MOVE: u8 = 0x03;
+
+pub const FLAG_HI_RES_WHEEL: u16 = 0x0001;
 
 pub const HEADER_LEN: usize = 20;
 pub const GCM_TAG_LEN: usize = 16;
@@ -71,6 +73,7 @@ pub struct UdpSession {
     pub peer_ip: String,
     key: LessSafeKey,
     replay: Mutex<ReplayWindow>,
+    wheel_hi_acc: Mutex<i32>,
     server_seq: AtomicU64,
     probe_logged: AtomicBool,
 }
@@ -138,6 +141,7 @@ impl UdpSessionRegistry {
             peer_ip: norm_ip,
             key: LessSafeKey::new(unbound),
             replay: Mutex::new(ReplayWindow::default()),
+            wheel_hi_acc: Mutex::new(0),
             server_seq: AtomicU64::new(0),
             probe_logged: AtomicBool::new(false),
         });
@@ -295,8 +299,10 @@ pub fn handle_udp_packet(
             let dx = i16::from_be_bytes([pt[0], pt[1]]) as i32;
             let dy = i16::from_be_bytes([pt[2], pt[3]]) as i32;
             let wheel = i16::from_be_bytes([pt[4], pt[5]]) as i32;
+            let flags = u16::from_be_bytes([pt[6], pt[7]]);
+            let is_hi_res = (flags & FLAG_HI_RES_WHEEL) != 0;
             if (dx != 0 || dy != 0 || wheel != 0) && input.ensure_ready(false) {
-                let mut events = Vec::with_capacity(3);
+                let mut events = Vec::with_capacity(4);
                 if dx != 0 {
                     events.push(InputEvent::new(
                         EventType::RELATIVE,
@@ -312,11 +318,12 @@ pub fn handle_udp_packet(
                     ));
                 }
                 if wheel != 0 {
-                    events.push(InputEvent::new(
-                        EventType::RELATIVE,
-                        RelativeAxisType::REL_WHEEL.0,
-                        wheel,
-                    ));
+                    let mut acc = session.wheel_hi_acc.lock().unwrap_or_else(|e| e.into_inner());
+                    if is_hi_res {
+                        push_wheel_events(&mut acc, wheel, 0, &mut events);
+                    } else {
+                        push_wheel_events(&mut acc, 0, wheel, &mut events);
+                    }
                 }
                 input.emit_uinput_events(&events);
             }
@@ -564,5 +571,63 @@ mod tests {
         .unwrap();
         assert!(handle_udp_packet(&move_pkt3, valid_peer, &registry, &*input).is_none());
         assert_eq!(input.events.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn udp_hi_res_wheel_accumulates_to_detents_and_preserves_legacy() {
+        let registry = UdpSessionRegistry::new(53318, true);
+        let input = Arc::new(TestUdpInput {
+            ready: AtomicBool::new(true),
+            ..Default::default()
+        });
+        let creds = registry.create_session("192.168.1.50").unwrap();
+        let key_bytes = decode_base64_for_test(&creds.key_b64);
+        let client_key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key_bytes).unwrap());
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 44445);
+
+        let make_pkt = |seq: u64, wheel: i16, flags: u16| {
+            let mut p = Vec::with_capacity(8);
+            p.extend_from_slice(&0i16.to_be_bytes());
+            p.extend_from_slice(&0i16.to_be_bytes());
+            p.extend_from_slice(&wheel.to_be_bytes());
+            p.extend_from_slice(&flags.to_be_bytes());
+            seal_udp_packet(
+                &client_key,
+                PKT_MOUSE_MOVE,
+                creds.session_id,
+                DIR_CLIENT_TO_SERVER,
+                seq,
+                &p,
+            )
+            .unwrap()
+        };
+
+        // 1. Hi-res 70 units -> only REL_WHEEL_HI_RES=70 (< 120 threshold)
+        assert!(handle_udp_packet(&make_pkt(1, 70, FLAG_HI_RES_WHEEL), peer, &registry, &*input).is_none());
+        // 2. Another hi-res 70 units -> sum 140 >= 120 -> emits REL_WHEEL_HI_RES=70 AND REL_WHEEL=1 (remainder 20)
+        assert!(handle_udp_packet(&make_pkt(2, 70, FLAG_HI_RES_WHEEL), peer, &registry, &*input).is_none());
+        // 3. Legacy detent (flags=0, wheel=-1) -> emits REL_WHEEL=-1 AND REL_WHEEL_HI_RES=-120
+        assert!(handle_udp_packet(&make_pkt(3, -1, 0), peer, &registry, &*input).is_none());
+
+        let evs = input.events.lock().unwrap();
+        assert_eq!(evs.len(), 3);
+        assert_eq!(
+            evs[0],
+            vec![(EventType::RELATIVE.0, RelativeAxisType::REL_WHEEL_HI_RES.0, 70)]
+        );
+        assert_eq!(
+            evs[1],
+            vec![
+                (EventType::RELATIVE.0, RelativeAxisType::REL_WHEEL_HI_RES.0, 70),
+                (EventType::RELATIVE.0, RelativeAxisType::REL_WHEEL.0, 1),
+            ]
+        );
+        assert_eq!(
+            evs[2],
+            vec![
+                (EventType::RELATIVE.0, RelativeAxisType::REL_WHEEL.0, -1),
+                (EventType::RELATIVE.0, RelativeAxisType::REL_WHEEL_HI_RES.0, -120),
+            ]
+        );
     }
 }

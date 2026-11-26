@@ -64,9 +64,31 @@ class TrackpadAccumulatorTest {
         val medium = TrackpadAccumulator.computePointerGain(0.4f)
         val fast = TrackpadAccumulator.computePointerGain(2.0f)
 
-        assertTrue(slow in 0.80f..0.95f)
+        assertTrue(slow in 0.72f..0.96f)
         assertTrue(medium > 1.0f && medium < fast)
-        assertTrue(fast > 1.30f && fast <= 1.45f)
+        assertTrue(fast > 1.28f && fast <= 1.40f)
+    }
+
+    @Test
+    fun `accelerated move delta normalizes physical distance across screen densities`() {
+        val lowDpiAcc = TrackpadAccumulator()
+        val highDpiAcc = TrackpadAccumulator()
+        // Same physical 10dp swipe over 20ms at 2.0x density (20px) vs 4.0x density (40px)
+        val (lowDx, _) = lowDpiAcc.addAcceleratedMoveDelta(dx = 20f, dy = 0f, dtMs = 20f, density = 2.0f, sensitivity = 1.0f)
+        val (highDx, _) = highDpiAcc.addAcceleratedMoveDelta(dx = 40f, dy = 0f, dtMs = 20f, density = 4.0f, sensitivity = 1.0f)
+        // Both represent 10dp at 0.5 dp/ms -> identical cursor displacement despite 2x pixel density
+        assertEquals(lowDx, highDx)
+    }
+
+    @Test
+    fun `hi-res scroll emits smooth fractional 1-120th units across devices`() {
+        val acc = TrackpadAccumulator()
+        // 5dp downward swipe (15px at 3.0 density) = 60 hi-res units (= half a detent)
+        assertEquals(60, acc.addHiResScrollDelta(avgDy = 15f, density = 3.0f, sensitivity = 1.0f))
+        // Sub-detent movement (2px at 3.0 density = 8 hi-res units) still scrolls immediately without waiting 28px
+        assertEquals(8, acc.addHiResScrollDelta(avgDy = 2f, density = 3.0f, sensitivity = 1.0f))
+        // Traditional mode flips direction
+        assertEquals(-60, acc.addHiResScrollDelta(avgDy = 15f, density = 3.0f, sensitivity = 1.0f, naturalScrolling = false))
     }
 
     @Test

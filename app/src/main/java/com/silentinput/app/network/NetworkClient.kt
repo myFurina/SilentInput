@@ -424,6 +424,7 @@ class NetworkClient(
                     _savedCertFingerprint.value = null
                     _isEncrypted.value = useTls
                     _supportsUnicodeDirectTyping.value = true
+                    _supportsHiResWheel.value = false
 
                     if (isUsb) {
                         _isAuthenticated.value = true
@@ -475,6 +476,7 @@ class NetworkClient(
                                 msg.unicodeDirectTyping?.let {
                                     _supportsUnicodeDirectTyping.value = it
                                 }
+                                _supportsHiResWheel.value = msg.hiResWheel == true
                                 setConnectionError(null)
                                 closeUdpChannelLocked()
                                 if (!isLoopbackHost(endpoint.host) && msg.udpPort != null && msg.udpSessionId != null && msg.udpKey != null) {
@@ -520,6 +522,9 @@ class NetworkClient(
                             if (this@NetworkClient.webSocket !== webSocket) return
                             msg.unicodeDirectTyping?.let {
                                 _supportsUnicodeDirectTyping.value = it
+                            }
+                            msg.hiResWheel?.let {
+                                _supportsHiResWheel.value = it
                             }
                             msg.version?.let {
                                 _daemonVersion.value = it
@@ -626,6 +631,7 @@ class NetworkClient(
         _latencyMs.value = null
         _isEncrypted.value = false
         _supportsUnicodeDirectTyping.value = true
+        _supportsHiResWheel.value = false
         _daemonVersion.value = null
         stopPingLoopLocked()
 
@@ -819,6 +825,7 @@ class NetworkClient(
     }
 
     override fun sendMouse(dx: Float, dy: Float, action: String, wheel: Float): Boolean {
+        val hiRes = _supportsHiResWheel.value
         if (action == MouseAction.MOVE.wireValue || action == MouseAction.SCROLL.wireValue) {
             val udp = udpMouseChannel
             if (udp != null && udp.isReady) {
@@ -831,13 +838,21 @@ class NetworkClient(
                 } else {
                     val iw = if (wheel.isFinite()) wheel.roundToInt() else 0
                     if (iw != 0) {
-                        udp.enqueueScroll(iw)
+                        udp.enqueueScroll(iw, hiRes = hiRes)
                     }
                 }
                 return true
             }
         }
-        return sendJson(ProtocolPayloads.buildMouseJson(dx, dy, action = action, wheel = wheel))
+        return sendJson(
+            ProtocolPayloads.buildMouseJson(
+                dx,
+                dy,
+                action = action,
+                wheel = wheel,
+                hiResWheel = action == MouseAction.SCROLL.wireValue && hiRes
+            )
+        )
     }
 
     private fun sendJson(payload: String): Boolean {
@@ -868,6 +883,7 @@ class NetworkClient(
         _latencyMs.value = null
         _isEncrypted.value = false
         _supportsUnicodeDirectTyping.value = true
+        _supportsHiResWheel.value = false
         _daemonVersion.value = null
         try {
             if (wasConnected) {

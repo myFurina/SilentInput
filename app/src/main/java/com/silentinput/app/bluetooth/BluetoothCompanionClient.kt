@@ -324,6 +324,7 @@ class BluetoothCompanionClient(
                         _isConnected.value = true
                         _isConnecting.value = false
                         _supportsUnicodeDirectTyping.value = true
+                        _supportsHiResWheel.value = false
                         val connectedLabel = safeDeviceName(device)
                         _connectedDeviceName.value = connectedLabel
                         _connectedDeviceAddress.value = device.address
@@ -412,6 +413,9 @@ class BluetoothCompanionClient(
                         msg.unicodeDirectTyping?.let {
                             _supportsUnicodeDirectTyping.value = it
                         }
+                        msg.hiResWheel?.let {
+                            _supportsHiResWheel.value = it
+                        }
                     } else {
                         val serverMsg = msg.message.takeIf { it.isNotBlank() }
                         disconnectLocked(resetStatus = false)
@@ -424,6 +428,9 @@ class BluetoothCompanionClient(
                     if (connectionGeneration != connGen) return
                     msg.unicodeDirectTyping?.let {
                         _supportsUnicodeDirectTyping.value = it
+                    }
+                    msg.hiResWheel?.let {
+                        _supportsHiResWheel.value = it
                     }
                     msg.version?.let {
                         _daemonVersion.value = it
@@ -525,6 +532,7 @@ class BluetoothCompanionClient(
             _connectedDeviceAddress.value = null
             _latencyMs.value = null
             _supportsUnicodeDirectTyping.value = true
+            _supportsHiResWheel.value = false
             if (wasConnectedOrConnecting) {
                 setStatusMessage { it.btStatusConnectionLost }
             }
@@ -547,6 +555,7 @@ class BluetoothCompanionClient(
         _connectedDeviceAddress.value = null
         _latencyMs.value = null
         _supportsUnicodeDirectTyping.value = true
+        _supportsHiResWheel.value = false
         _daemonVersion.value = null
         if (resetStatus) {
             setStatusMessage { it.btStatusDisconnected }
@@ -622,7 +631,15 @@ class BluetoothCompanionClient(
                 signal.trySend(Unit)
                 return true
             }
-            outboundQueue.enqueueControl(ProtocolPayloads.buildMouseJson(dx, dy, action = action, wheel = wheel))
+            outboundQueue.enqueueControl(
+                ProtocolPayloads.buildMouseJson(
+                    dx,
+                    dy,
+                    action = action,
+                    wheel = wheel,
+                    hiResWheel = action == "scroll" && _supportsHiResWheel.value
+                )
+            )
             signal.trySend(Unit)
             return true
         }

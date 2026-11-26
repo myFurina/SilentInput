@@ -8,11 +8,13 @@ sealed class ServerMessage {
         val unicodeDirectTyping: Boolean?,
         val udpPort: Int? = null,
         val udpSessionId: String? = null,
-        val udpKey: String? = null
+        val udpKey: String? = null,
+        val hiResWheel: Boolean? = null
     ) : ServerMessage()
     data class Status(
         val unicodeDirectTyping: Boolean?,
-        val version: String? = null
+        val version: String? = null,
+        val hiResWheel: Boolean? = null
     ) : ServerMessage()
     data class PasteResult(
         val status: String,
@@ -43,11 +45,21 @@ object ProtocolPayloads {
         return """{"type":"key","key":${quoteJson(key)},"action":${quoteJson(action)}}"""
     }
 
-    fun buildMouseJson(dx: Float, dy: Float, action: String = "move", wheel: Float = 0f): String {
+    fun buildMouseJson(
+        dx: Float,
+        dy: Float,
+        action: String = "move",
+        wheel: Float = 0f,
+        hiResWheel: Boolean = false
+    ): String {
         val safeDx = sanitizeFinite(dx)
         val safeDy = sanitizeFinite(dy)
         val safeWheel = sanitizeFinite(wheel)
-        val wheelField = if (safeWheel != 0f) ",\"wheel\":$safeWheel" else ""
+        val wheelField = when {
+            safeWheel == 0f -> ""
+            hiResWheel -> ",\"wheel_hi\":${safeWheel.toInt()}"
+            else -> ",\"wheel\":$safeWheel"
+        }
         return """{"type":"mouse","dx":$safeDx,"dy":$safeDy,"action":${quoteJson(action)}$wheelField}"""
     }
 
@@ -119,19 +131,22 @@ object ProtocolPayloads {
                 val udpPort = (obj["udp_port"] as? Number)?.toInt()
                 val udpSessionId = obj["udp_session_id"] as? String
                 val udpKey = obj["udp_key"] as? String
+                val hiResWheel = obj["hi_res_wheel"] as? Boolean
                 ServerMessage.AuthResult(
                     status = status,
                     message = message,
                     unicodeDirectTyping = unicode,
                     udpPort = udpPort,
                     udpSessionId = udpSessionId,
-                    udpKey = udpKey
+                    udpKey = udpKey,
+                    hiResWheel = hiResWheel
                 )
             }
             "status" -> {
                 val unicode = obj["unicode_direct_typing"] as? Boolean
                 val version = obj["version"] as? String
-                ServerMessage.Status(unicode, version)
+                val hiResWheel = obj["hi_res_wheel"] as? Boolean
+                ServerMessage.Status(unicode, version, hiResWheel)
             }
             "paste_result" -> {
                 val status = (obj["status"] as? String).orEmpty()

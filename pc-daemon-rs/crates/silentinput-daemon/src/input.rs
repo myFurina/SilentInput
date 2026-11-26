@@ -28,6 +28,46 @@ pub trait InputController: Send + Sync {
     fn emit_uinput_events(&self, events: &[InputEvent]) -> bool;
     fn track_mouse_button(&self, btn_code: u16, pressed: bool, conn_id: u64);
     fn release_connection_buttons(&self, conn_id: u64);
+    fn take_wheel_detents(&self, _conn_id: u64, delta_hi: i32) -> i32 {
+        delta_hi / 120
+    }
+}
+
+/// Emit paired Linux `REL_WHEEL_HI_RES` and legacy `REL_WHEEL` events cleanly without drift.
+pub fn push_wheel_events(
+    acc: &mut i32,
+    raw_hi: i32,
+    raw_detent: i32,
+    events: &mut Vec<InputEvent>,
+) {
+    if raw_hi != 0 {
+        events.push(InputEvent::new(
+            EventType::RELATIVE,
+            RelativeAxisType::REL_WHEEL_HI_RES.0,
+            raw_hi,
+        ));
+        *acc = acc.saturating_add(raw_hi);
+        let detents = *acc / 120;
+        if detents != 0 {
+            *acc -= detents * 120;
+            events.push(InputEvent::new(
+                EventType::RELATIVE,
+                RelativeAxisType::REL_WHEEL.0,
+                detents,
+            ));
+        }
+    } else if raw_detent != 0 {
+        events.push(InputEvent::new(
+            EventType::RELATIVE,
+            RelativeAxisType::REL_WHEEL.0,
+            raw_detent,
+        ));
+        events.push(InputEvent::new(
+            EventType::RELATIVE,
+            RelativeAxisType::REL_WHEEL_HI_RES.0,
+            raw_detent.saturating_mul(120),
+        ));
+    }
 }
 
 #[derive(Default)]
@@ -39,6 +79,7 @@ struct UinputHolder {
 #[derive(Default)]
 struct MouseHoldTracker {
     held: HashMap<u16, HashSet<u64>>,
+    wheel_acc: HashMap<u64, i32>,
 }
 
 impl MouseHoldTracker {
@@ -53,7 +94,18 @@ impl MouseHoldTracker {
         }
     }
 
+    fn accumulate_wheel(&mut self, conn_id: u64, delta_hi: i32) -> i32 {
+        let entry = self.wheel_acc.entry(conn_id).or_insert(0);
+        *entry = entry.saturating_add(delta_hi);
+        let detents = *entry / 120;
+        if detents != 0 {
+            *entry -= detents * 120;
+        }
+        detents
+    }
+
     fn release_connection(&mut self, conn_id: u64) -> Vec<u16> {
+        self.wheel_acc.remove(&conn_id);
         let mut to_release = Vec::new();
         let keys: Vec<u16> = self.held.keys().copied().collect();
         for code in keys {
@@ -99,6 +151,7 @@ impl SystemInputController {
         rels.insert(RelativeAxisType::REL_X);
         rels.insert(RelativeAxisType::REL_Y);
         rels.insert(RelativeAxisType::REL_WHEEL);
+        rels.insert(RelativeAxisType::REL_WHEEL_HI_RES);
 
         let dev = VirtualDeviceBuilder::new()
             .map_err(|e| format!("Failed to open /dev/uinput: {e}"))?
@@ -385,6 +438,13 @@ impl InputController for SystemInputController {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .track(btn_code, pressed, conn_id);
+    }
+
+    fn take_wheel_detents(&self, conn_id: u64, delta_hi: i32) -> i32 {
+        self.mouse_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .accumulate_wheel(conn_id, delta_hi)
     }
 
     fn release_connection_buttons(&self, conn_id: u64) {

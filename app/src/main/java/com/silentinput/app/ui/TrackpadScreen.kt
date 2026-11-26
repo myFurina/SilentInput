@@ -37,6 +37,7 @@ fun TrackpadScreen(
     onSensitivityChange: (Float) -> Unit,
     onSensitivityChangeFinished: () -> Unit = {},
     naturalScrolling: Boolean = true,
+    hiResScroll: Boolean = false,
     isHapticEnabled: Boolean = false,
     isConnected: Boolean = true,
     isLeftHeld: Boolean = false,
@@ -133,6 +134,7 @@ fun TrackpadScreen(
         TrackpadSurface(
             sensitivity = sensitivity,
             naturalScrolling = naturalScrolling,
+            hiResScroll = hiResScroll,
             isHapticEnabled = isHapticEnabled,
             onMouseMove = onMouseMove,
             onMouseClick = { btn ->
@@ -238,6 +240,7 @@ fun TrackpadScreen(
 fun TrackpadSurface(
     sensitivity: Float,
     naturalScrolling: Boolean = true,
+    hiResScroll: Boolean = false,
     isHapticEnabled: Boolean = false,
     onMouseMove: (dx: Float, dy: Float) -> Unit,
     onMouseClick: (button: String) -> Unit,
@@ -254,6 +257,7 @@ fun TrackpadSurface(
 
     val currentSensitivity by rememberUpdatedState(sensitivity)
     val currentNaturalScrolling by rememberUpdatedState(naturalScrolling)
+    val currentHiResScroll by rememberUpdatedState(hiResScroll)
     val currentHapticEnabled by rememberUpdatedState(isHapticEnabled)
     val currentOnMouseMove by rememberUpdatedState(onMouseMove)
     val currentOnMouseClick by rememberUpdatedState(onMouseClick)
@@ -342,6 +346,7 @@ fun TrackpadSurface(
                         var sumWheel = 0
                         val sens = currentSensitivity
                         val natural = currentNaturalScrolling
+                        val hiRes = currentHiResScroll
 
                         val histSize = event.historySize
                         for (h in 0 until histSize) {
@@ -357,7 +362,8 @@ fun TrackpadSurface(
                                 sampleTimeMs = event.getHistoricalEventTime(h),
                                 density = density,
                                 sensitivity = sens,
-                                naturalScrolling = natural
+                                naturalScrolling = natural,
+                                hiResScroll = hiRes
                             )
                             if (out.dragStartedNow) {
                                 longPressJobState.value?.cancel()
@@ -380,7 +386,8 @@ fun TrackpadSurface(
                             sampleTimeMs = event.eventTime,
                             density = density,
                             sensitivity = sens,
-                            naturalScrolling = natural
+                            naturalScrolling = natural,
+                            hiResScroll = hiRes
                         )
                         if (out.dragStartedNow) {
                             longPressJobState.value?.cancel()

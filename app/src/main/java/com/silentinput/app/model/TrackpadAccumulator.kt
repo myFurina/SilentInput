@@ -14,6 +14,8 @@ class TrackpadAccumulator {
         private set
     var accWheel: Float = 0f
         private set
+    var accWheelHiRes: Float = 0f
+        private set
     private var smoothedVelocityDpPerMs: Float = 0f
 
     fun addMoveDelta(dx: Float, dy: Float, sensitivity: Float): Pair<Int, Int> {
@@ -26,10 +28,9 @@ class TrackpadAccumulator {
     }
 
     /**
-     * Velocity-aware pointer ballistics calibrated for host OS acceleration (libinput):
-     * uses a 4ms sample-interval floor + EMA velocity low-pass filter to eliminate
-     * millisecond timestamp quantization spikes, and a gentle [0.80x..1.45x] curve
-     * so host acceleration never stacks into sudden cursor jumps.
+     * DPI-normalized, velocity-aware pointer ballistics calibrated for host OS acceleration (libinput):
+     * normalizes raw pixels to a 2.75x (~440ppi) baseline so physical finger travel produces consistent
+     * pointer distance across 1080p/2K/tablet screens, with 4ms floor + EMA filtering + [0.72x..1.40x] gain.
      */
     fun addAcceleratedMoveDelta(
         dx: Float,
@@ -44,16 +45,17 @@ class TrackpadAccumulator {
         val safeDensity = density.coerceAtLeast(1f)
         val safeDt = dtMs.coerceIn(4f, 40f)
         val distDp = hypot(dx, dy) / safeDensity
-        val instVelocity = distDp / safeDt
+        val instVelocity = (distDp / safeDt).coerceAtMost(5.0f)
         smoothedVelocityDpPerMs = if (smoothedVelocityDpPerMs == 0f) {
             instVelocity
         } else {
             smoothedVelocityDpPerMs * 0.65f + instVelocity * 0.35f
         }
         val gain = computePointerGain(smoothedVelocityDpPerMs)
+        val dpiScale = REF_DENSITY / safeDensity.coerceIn(1.0f, 5.0f)
 
-        accX += dx * sensitivity * gain
-        accY += dy * sensitivity * gain
+        accX += dx * dpiScale * sensitivity * gain
+        accY += dy * dpiScale * sensitivity * gain
         return extractIntegerDelta()
     }
 
@@ -85,22 +87,47 @@ class TrackpadAccumulator {
         return intWheel
     }
 
+    fun addHiResScrollDelta(
+        avgDy: Float,
+        density: Float,
+        sensitivity: Float,
+        naturalScrolling: Boolean = true
+    ): Int {
+        if (!avgDy.isFinite() || !density.isFinite() || !sensitivity.isFinite()) {
+            return 0
+        }
+        val safeDensity = density.coerceAtLeast(1f)
+        val directionSign = if (naturalScrolling) 1f else -1f
+        val dpDy = avgDy / safeDensity
+        // 10dp swipe = 120 REL_WHEEL_HI_RES units (= 1 standard detent), emitted smoothly per-pixel
+        accWheelHiRes += directionSign * dpDy * sensitivity * HI_RES_UNITS_PER_DP
+        val intHiRes = accWheelHiRes.toInt()
+        if (intHiRes != 0) {
+            accWheelHiRes -= intHiRes
+        }
+        return intHiRes
+    }
+
     fun reset() {
         accX = 0f
         accY = 0f
         accWheel = 0f
+        accWheelHiRes = 0f
         smoothedVelocityDpPerMs = 0f
     }
 
     companion object {
+        const val REF_DENSITY = 2.75f
+        const val HI_RES_UNITS_PER_DP = 12.0f
+
         internal fun computePointerGain(velocityDpPerMs: Float): Float {
             val v = velocityDpPerMs.coerceAtLeast(0f)
             return when {
-                v < 0.15f -> 0.80f + (v / 0.15f) * 0.20f
-                v < 1.2f -> 1.00f + ((v - 0.15f) / 1.05f).pow(1.1f) * 0.30f
+                v < 0.12f -> 0.72f + (v / 0.12f) * 0.24f
+                v < 1.2f -> 0.96f + ((v - 0.12f) / 1.08f).pow(1.05f) * 0.32f
                 else -> {
-                    val extra = ((v - 1.2f) / (v - 1.2f + 1.5f)) * 0.15f
-                    1.30f + extra
+                    val extra = ((v - 1.2f) / (v - 1.2f + 1.5f)) * 0.12f
+                    1.28f + extra
                 }
             }
         }
@@ -173,7 +200,8 @@ class TrackpadGestureProcessor(
         sampleTimeMs: Long,
         density: Float,
         sensitivity: Float,
-        naturalScrolling: Boolean
+        naturalScrolling: Boolean,
+        hiResScroll: Boolean = false
     ): FrameOutput {
         if (count <= 0 || pointers.isEmpty()) return FrameOutput()
         val dtMs = (sampleTimeMs - lastSampleTimeMs).coerceAtLeast(1L).toFloat()
@@ -206,11 +234,20 @@ class TrackpadGestureProcessor(
             }
             if (movedCount == 0) return FrameOutput()
             val avgDy = dySum / movedCount
-            val wheel = accumulator.addScrollDelta(
-                avgDy = avgDy,
-                sensitivity = sensitivity,
-                naturalScrolling = naturalScrolling
-            )
+            val wheel = if (hiResScroll) {
+                accumulator.addHiResScrollDelta(
+                    avgDy = avgDy,
+                    density = density,
+                    sensitivity = sensitivity,
+                    naturalScrolling = naturalScrolling
+                )
+            } else {
+                accumulator.addScrollDelta(
+                    avgDy = avgDy,
+                    sensitivity = sensitivity,
+                    naturalScrolling = naturalScrolling
+                )
+            }
             return FrameOutput(wheelDelta = wheel)
         }
 
