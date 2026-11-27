@@ -296,17 +296,26 @@ class UdpMouseChannel(
     private val port: Int,
     private val sessionId: Long,
     private val secretKey: SecretKeySpec,
-    private val onReadyChanged: (Boolean) -> Unit = {}
+    private val onReadyChanged: (Boolean) -> Unit = {},
+    private val keepaliveIntervalMs: Long = 15_000L,
+    private val keepaliveTimeoutMs: Long = 2_000L
 ) {
     companion object {
         private const val TAG = "SilentInputUDP"
         private const val PROBE_ATTEMPTS = 3
         private const val PROBE_TIMEOUT_MS = 320
+        private const val FEC_MAX_AGE_NS = 100_000_000L
+        private const val MAX_MISSED_KEEPALIVES = 2
     }
 
     @Volatile
     var isReady: Boolean = false
         private set
+
+    private val lifecycleLock = Any()
+
+    @Volatile
+    private var started = false
 
     @Volatile
     private var closed = false
@@ -324,11 +333,14 @@ class UdpMouseChannel(
     private val pendingWheelIsHiRes = AtomicBoolean(false)
 
     fun start() {
-        val thread = Thread({ runWorker() }, "SilentInput-UDP-Mouse").apply {
-            isDaemon = true
-            priority = Thread.MAX_PRIORITY.coerceAtMost(Thread.NORM_PRIORITY + 2)
+        val thread = synchronized(lifecycleLock) {
+            if (closed || started) return
+            started = true
+            Thread({ runWorker() }, "SilentInput-UDP-Mouse").apply {
+                isDaemon = true
+                priority = Thread.MAX_PRIORITY.coerceAtMost(Thread.NORM_PRIORITY + 2)
+            }.also { workerThread = it }
         }
-        workerThread = thread
         thread.start()
     }
 
@@ -355,203 +367,336 @@ class UdpMouseChannel(
     }
 
     fun close() {
-        if (closed) return
-        closed = true
-        isReady = false
+        val sockToClose: DatagramSocket?
+        val threadToUnpark: Thread?
+        synchronized(lifecycleLock) {
+            if (closed) return
+            closed = true
+            isReady = false
+            sockToClose = socket
+            socket = null
+            threadToUnpark = workerThread
+        }
         onReadyChanged(false)
         try {
-            socket?.close()
+            sockToClose?.close()
         } catch (_: Exception) {}
-        socket = null
-        LockSupport.unpark(workerThread)
+        LockSupport.unpark(threadToUnpark)
     }
 
     private fun runWorker() {
-        val localSocket: DatagramSocket
-        val targetAddr: InetAddress
+        var localSocket: DatagramSocket? = null
         try {
-            targetAddr = InetAddress.getByName(host)
-            localSocket = DatagramSocket()
-            localSocket.connect(targetAddr, port)
+            val targetAddr: InetAddress
             try {
-                // DSCP EF (0xB8) maps to WMM AC_VO/AC_VI low-latency queue on Wi-Fi; fall back to IPTOS_LOWDELAY.
-                localSocket.trafficClass = 0xB8
-            } catch (_: Exception) {
+                targetAddr = InetAddress.getByName(host)
+                val createdSocket = DatagramSocket()
+                createdSocket.connect(targetAddr, port)
                 try {
-                    localSocket.trafficClass = 0x10
-                } catch (_: Exception) {}
-            }
-            localSocket.soTimeout = PROBE_TIMEOUT_MS
-            socket = localSocket
-        } catch (e: Exception) {
-            Log.w(TAG, "UDP socket init failed for $host:$port: ${e.message}")
-            close()
-            return
-        }
-
-        val cipher = try {
-            Cipher.getInstance("AES/GCM/NoPadding")
-        } catch (e: Exception) {
-            Log.w(TAG, "AES-GCM unavailable: ${e.message}")
-            close()
-            return
-        }
-
-        // Phase 1: Reachability probe (detect firewall drops/ICMP reject and fall back cleanly to TCP)
-        val probeTag = SecureRandom().nextInt()
-        val probePayload = UdpMouseCodec.encodeProbePayload(probeTag)
-        val recvBuf = ByteArray(128)
-        val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
-        var probeOk = false
-
-        for (attempt in 1..PROBE_ATTEMPTS) {
-            if (closed) break
-            try {
-                val seq = nextSeq.incrementAndGet()
-                val wire = UdpMouseCodec.sealPacket(
-                    secretKey = secretKey,
-                    pktType = UdpMouseCodec.PKT_PROBE,
-                    sessionId = sessionId,
-                    dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
-                    seq = seq,
-                    plaintext = probePayload,
-                    cipher = cipher
-                )
-                localSocket.send(DatagramPacket(wire, wire.size))
-
-                val deadlineMs = System.currentTimeMillis() + PROBE_TIMEOUT_MS
-                while (!closed) {
-                    val remaining = (deadlineMs - System.currentTimeMillis()).toInt()
-                    if (remaining <= 0) break
-                    localSocket.soTimeout = remaining
+                    // DSCP AF41 (0x88) maps to WMM AC_VI without AC_VO A-MPDU/ACM penalties; fall back to IPTOS_LOWDELAY.
+                    createdSocket.trafficClass = 0x88
+                } catch (_: Exception) {
                     try {
-                        recvPacket.setData(recvBuf, 0, recvBuf.size)
-                        localSocket.receive(recvPacket)
-                        val pt = UdpMouseCodec.openPacket(
-                            secretKey = secretKey,
-                            expectedSessionId = sessionId,
-                            expectedDir = UdpMouseCodec.DIR_SERVER_TO_CLIENT,
-                            expectedPktType = UdpMouseCodec.PKT_PROBE_ACK,
-                            packet = recvBuf,
-                            length = recvPacket.length,
-                            cipher = cipher
-                        )
-                        if (pt != null && pt.size >= 4) {
-                            val echoedTag = ((pt[0].toInt() and 0xFF) shl 24) or
-                                ((pt[1].toInt() and 0xFF) shl 16) or
-                                ((pt[2].toInt() and 0xFF) shl 8) or
-                                (pt[3].toInt() and 0xFF)
-                            if (echoedTag == probeTag) {
-                                probeOk = true
-                                break
+                        createdSocket.trafficClass = 0x10
+                    } catch (_: Exception) {}
+                }
+                createdSocket.soTimeout = PROBE_TIMEOUT_MS
+                val accepted = synchronized(lifecycleLock) {
+                    localSocket = createdSocket
+                    if (closed) {
+                        false
+                    } else {
+                        socket = createdSocket
+                        true
+                    }
+                }
+                if (!accepted) {
+                    return
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "UDP socket init failed for $host:$port: ${e.message}")
+                return
+            }
+            val activeSocket = localSocket ?: return
+
+            val cipher = try {
+                Cipher.getInstance("AES/GCM/NoPadding")
+            } catch (e: Exception) {
+                Log.w(TAG, "AES-GCM unavailable: ${e.message}")
+                return
+            }
+
+            // Phase 1: Reachability probe (detect firewall drops/ICMP reject and fall back cleanly to TCP)
+            val keepaliveRandom = SecureRandom()
+            val probeTag = keepaliveRandom.nextInt()
+            val probePayload = UdpMouseCodec.encodeProbePayload(probeTag)
+            val recvBuf = ByteArray(128)
+            val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
+            var probeOk = false
+
+            for (attempt in 1..PROBE_ATTEMPTS) {
+                if (closed) break
+                try {
+                    val seq = nextSeq.incrementAndGet()
+                    val wire = UdpMouseCodec.sealPacket(
+                        secretKey = secretKey,
+                        pktType = UdpMouseCodec.PKT_PROBE,
+                        sessionId = sessionId,
+                        dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+                        seq = seq,
+                        plaintext = probePayload,
+                        cipher = cipher
+                    )
+                    activeSocket.send(DatagramPacket(wire, wire.size))
+
+                    val deadlineMs = System.currentTimeMillis() + PROBE_TIMEOUT_MS
+                    while (!closed) {
+                        val remaining = (deadlineMs - System.currentTimeMillis()).toInt()
+                        if (remaining <= 0) break
+                        activeSocket.soTimeout = remaining
+                        try {
+                            recvPacket.setData(recvBuf, 0, recvBuf.size)
+                            activeSocket.receive(recvPacket)
+                            val pt = UdpMouseCodec.openPacket(
+                                secretKey = secretKey,
+                                expectedSessionId = sessionId,
+                                expectedDir = UdpMouseCodec.DIR_SERVER_TO_CLIENT,
+                                expectedPktType = UdpMouseCodec.PKT_PROBE_ACK,
+                                packet = recvBuf,
+                                length = recvPacket.length,
+                                cipher = cipher
+                            )
+                            if (pt != null && pt.size >= 4) {
+                                val echoedTag = ((pt[0].toInt() and 0xFF) shl 24) or
+                                    ((pt[1].toInt() and 0xFF) shl 16) or
+                                    ((pt[2].toInt() and 0xFF) shl 8) or
+                                    (pt[3].toInt() and 0xFF)
+                                if (echoedTag == probeTag) {
+                                    probeOk = true
+                                    break
+                                }
+                            }
+                        } catch (_: SocketTimeoutException) {
+                            break
+                        }
+                    }
+                    if (probeOk) break
+                } catch (e: PortUnreachableException) {
+                    Log.i(TAG, "UDP port unreachable for $host:$port; falling back immediately to WebSocket")
+                    break
+                } catch (e: Exception) {
+                    Log.d(TAG, "UDP probe attempt $attempt failed: ${e.message}")
+                }
+            }
+
+            if (!probeOk) {
+                if (!closed) {
+                    Log.i(TAG, "UDP probe timed out for $host:$port; keeping WebSocket TCP fallback")
+                }
+                return
+            }
+
+            val activated = synchronized(lifecycleLock) {
+                if (closed) {
+                    false
+                } else {
+                    isReady = true
+                    true
+                }
+            }
+            if (!activated) return
+            onReadyChanged(true)
+            Log.i(TAG, "UDP low-latency mouse channel active for $host:$port")
+
+            // Phase 2: Dedicated zero-allocation send loop over connected UDP socket with bounded-age 2-frame FEC tail + blackhole probe
+            val payloadScratch = ByteArray(UdpMouseCodec.MOVE_FEC_PAYLOAD_LEN)
+            val nonceScratch = ByteArray(UdpMouseCodec.NONCE_LEN)
+            val wireBuf = ByteArray(UdpMouseCodec.MOVE_FEC_WIRE_LEN)
+            val sendPacket = DatagramPacket(wireBuf, wireBuf.size)
+
+            val keepaliveIntervalNs = keepaliveIntervalMs.coerceAtLeast(20L) * 1_000_000L
+            val keepaliveTimeoutNs = keepaliveTimeoutMs.coerceAtLeast(20L) * 1_000_000L
+            val idleParkNs = if (keepaliveIntervalMs < 200L) {
+                (keepaliveIntervalMs * 1_000_000L).coerceIn(5_000_000L, 50_000_000L)
+            } else {
+                200_000_000L
+            }
+
+            var hasPrev1 = false
+            var prev1Dx = 0
+            var prev1Dy = 0
+            var prev1Wheel = 0
+            var prev1Flags = 0
+            var hasPrev2 = false
+            var prev2Dx = 0
+            var prev2Dy = 0
+            var prev2Wheel = 0
+            var prev2Flags = 0
+            var lastSentNs = 0L
+
+            var lastAckNs = System.nanoTime()
+            var lastHadActivity = false
+            var keepaliveInFlight = false
+            var keepaliveSentNs = 0L
+            var keepaliveTag = 0
+            var missedKeepalives = 0
+
+            while (!closed) {
+                val nowLoopNs = System.nanoTime()
+                if (keepaliveInFlight) {
+                    var acked = false
+                    try {
+                        activeSocket.soTimeout = 1
+                        while (!closed) {
+                            recvPacket.setData(recvBuf, 0, recvBuf.size)
+                            activeSocket.receive(recvPacket)
+                            val pt = UdpMouseCodec.openPacket(
+                                secretKey = secretKey,
+                                expectedSessionId = sessionId,
+                                expectedDir = UdpMouseCodec.DIR_SERVER_TO_CLIENT,
+                                expectedPktType = UdpMouseCodec.PKT_PROBE_ACK,
+                                packet = recvBuf,
+                                length = recvPacket.length,
+                                cipher = cipher
+                            )
+                            if (pt != null && pt.size >= 4) {
+                                val echoedTag = ((pt[0].toInt() and 0xFF) shl 24) or
+                                    ((pt[1].toInt() and 0xFF) shl 16) or
+                                    ((pt[2].toInt() and 0xFF) shl 8) or
+                                    (pt[3].toInt() and 0xFF)
+                                if (echoedTag == keepaliveTag) {
+                                    acked = true
+                                    break
+                                }
                             }
                         }
                     } catch (_: SocketTimeoutException) {
+                        // No pending ACK yet
+                    } catch (e: PortUnreachableException) {
+                        Log.i(TAG, "UDP port became unreachable for $host:$port; falling back to WebSocket")
+                        break
+                    } catch (_: Exception) {
+                        // Ignore transient receive errors while keepalive timer tracks blackhole
+                    }
+
+                    if (acked) {
+                        keepaliveInFlight = false
+                        missedKeepalives = 0
+                        lastAckNs = System.nanoTime()
+                    } else if ((nowLoopNs - keepaliveSentNs) >= keepaliveTimeoutNs) {
+                        keepaliveInFlight = false
+                        missedKeepalives++
+                        if (missedKeepalives >= MAX_MISSED_KEEPALIVES) {
+                            Log.w(TAG, "UDP channel blackholed for $host:$port; falling back to WebSocket")
+                            break
+                        }
+                    }
+                }
+
+                if (!keepaliveInFlight && lastHadActivity && (nowLoopNs - lastAckNs) >= keepaliveIntervalNs) {
+                    try {
+                        keepaliveTag = keepaliveRandom.nextInt()
+                        val kaPayload = UdpMouseCodec.encodeProbePayload(keepaliveTag)
+                        val kaSeq = nextSeq.incrementAndGet()
+                        val kaWire = UdpMouseCodec.sealPacket(
+                            secretKey = secretKey,
+                            pktType = UdpMouseCodec.PKT_PROBE,
+                            sessionId = sessionId,
+                            dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+                            seq = kaSeq,
+                            plaintext = kaPayload,
+                            cipher = cipher
+                        )
+                        activeSocket.send(DatagramPacket(kaWire, kaWire.size))
+                        keepaliveInFlight = true
+                        keepaliveSentNs = nowLoopNs
+                    } catch (e: Exception) {
+                        if (!closed) {
+                            Log.w(TAG, "UDP keepalive send failed; falling back to WebSocket: ${e.message}")
+                        }
                         break
                     }
                 }
-                if (probeOk) break
-            } catch (e: PortUnreachableException) {
-                Log.i(TAG, "UDP port unreachable for $host:$port; falling back immediately to WebSocket")
-                break
-            } catch (e: Exception) {
-                Log.d(TAG, "UDP probe attempt $attempt failed: ${e.message}")
+
+                val dx = pendingDx.getAndSet(0)
+                val dy = pendingDy.getAndSet(0)
+                val wheel = pendingWheel.getAndSet(0)
+                if (dx == 0 && dy == 0 && wheel == 0) {
+                    val sleepNs = if (keepaliveInFlight) {
+                        minOf(idleParkNs, 15_000_000L)
+                    } else {
+                        idleParkNs
+                    }
+                    LockSupport.parkNanos(sleepNs)
+                    continue
+                }
+
+                lastHadActivity = true
+                val flags = if (wheel != 0 && pendingWheelIsHiRes.get()) {
+                    UdpMouseCodec.FLAG_HI_RES_WHEEL
+                } else {
+                    0
+                }
+
+                try {
+                    val nowNs = System.nanoTime()
+                    if (lastSentNs != 0L && (nowNs - lastSentNs) > FEC_MAX_AGE_NS) {
+                        hasPrev1 = false
+                        hasPrev2 = false
+                    }
+                    val seq = nextSeq.incrementAndGet()
+                    val totalLen = UdpMouseCodec.sealMoveWithFecInto(
+                        secretKey = secretKey,
+                        sessionId = sessionId,
+                        dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+                        seq = seq,
+                        dx = dx,
+                        dy = dy,
+                        wheel = wheel,
+                        flags = flags,
+                        hasPrev1 = hasPrev1,
+                        prev1Dx = prev1Dx,
+                        prev1Dy = prev1Dy,
+                        prev1Wheel = prev1Wheel,
+                        prev1Flags = prev1Flags,
+                        hasPrev2 = hasPrev2,
+                        prev2Dx = prev2Dx,
+                        prev2Dy = prev2Dy,
+                        prev2Wheel = prev2Wheel,
+                        prev2Flags = prev2Flags,
+                        payloadScratch = payloadScratch,
+                        nonceScratch = nonceScratch,
+                        wireOut = wireBuf,
+                        cipher = cipher
+                    )
+                    sendPacket.setLength(totalLen)
+                    activeSocket.send(sendPacket)
+                    lastSentNs = nowNs
+
+                    if (hasPrev1) {
+                        hasPrev2 = true
+                        prev2Dx = prev1Dx
+                        prev2Dy = prev1Dy
+                        prev2Wheel = prev1Wheel
+                        prev2Flags = prev1Flags
+                    }
+                    hasPrev1 = true
+                    prev1Dx = dx
+                    prev1Dy = dy
+                    prev1Wheel = wheel
+                    prev1Flags = flags
+                } catch (e: Exception) {
+                    if (!closed) {
+                        Log.w(TAG, "UDP send error; falling back to WebSocket: ${e.message}")
+                    }
+                    break
+                }
             }
-        }
-
-        if (!probeOk || closed) {
-            if (!closed) {
-                Log.i(TAG, "UDP probe timed out for $host:$port; keeping WebSocket TCP fallback")
-            }
-            close()
-            return
-        }
-
-        isReady = true
-        onReadyChanged(true)
-        Log.i(TAG, "UDP low-latency mouse channel active for $host:$port")
-
-        // Phase 2: Dedicated zero-allocation send loop over connected UDP socket with 2-frame FEC tail
-        val payloadScratch = ByteArray(UdpMouseCodec.MOVE_FEC_PAYLOAD_LEN)
-        val nonceScratch = ByteArray(UdpMouseCodec.NONCE_LEN)
-        val wireBuf = ByteArray(UdpMouseCodec.MOVE_FEC_WIRE_LEN)
-        val sendPacket = DatagramPacket(wireBuf, wireBuf.size)
-
-        var hasPrev1 = false
-        var prev1Dx = 0
-        var prev1Dy = 0
-        var prev1Wheel = 0
-        var prev1Flags = 0
-        var hasPrev2 = false
-        var prev2Dx = 0
-        var prev2Dy = 0
-        var prev2Wheel = 0
-        var prev2Flags = 0
-
-        while (!closed) {
-            val dx = pendingDx.getAndSet(0)
-            val dy = pendingDy.getAndSet(0)
-            val wheel = pendingWheel.getAndSet(0)
-            if (dx == 0 && dy == 0 && wheel == 0) {
-                LockSupport.parkNanos(200_000_000L)
-                continue
-            }
-
-            val flags = if (wheel != 0 && pendingWheelIsHiRes.get()) {
-                UdpMouseCodec.FLAG_HI_RES_WHEEL
-            } else {
-                0
-            }
-
+        } finally {
             try {
-                val seq = nextSeq.incrementAndGet()
-                val totalLen = UdpMouseCodec.sealMoveWithFecInto(
-                    secretKey = secretKey,
-                    sessionId = sessionId,
-                    dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
-                    seq = seq,
-                    dx = dx,
-                    dy = dy,
-                    wheel = wheel,
-                    flags = flags,
-                    hasPrev1 = hasPrev1,
-                    prev1Dx = prev1Dx,
-                    prev1Dy = prev1Dy,
-                    prev1Wheel = prev1Wheel,
-                    prev1Flags = prev1Flags,
-                    hasPrev2 = hasPrev2,
-                    prev2Dx = prev2Dx,
-                    prev2Dy = prev2Dy,
-                    prev2Wheel = prev2Wheel,
-                    prev2Flags = prev2Flags,
-                    payloadScratch = payloadScratch,
-                    nonceScratch = nonceScratch,
-                    wireOut = wireBuf,
-                    cipher = cipher
-                )
-                sendPacket.setLength(totalLen)
-                localSocket.send(sendPacket)
-
-                if (hasPrev1) {
-                    hasPrev2 = true
-                    prev2Dx = prev1Dx
-                    prev2Dy = prev1Dy
-                    prev2Wheel = prev1Wheel
-                    prev2Flags = prev1Flags
-                }
-                hasPrev1 = true
-                prev1Dx = dx
-                prev1Dy = dy
-                prev1Wheel = wheel
-                prev1Flags = flags
-            } catch (e: Exception) {
-                if (!closed) {
-                    Log.w(TAG, "UDP send error; falling back to WebSocket: ${e.message}")
-                }
-                break
-            }
+                localSocket?.close()
+            } catch (_: Exception) {}
+            close()
         }
-
-        close()
     }
 }

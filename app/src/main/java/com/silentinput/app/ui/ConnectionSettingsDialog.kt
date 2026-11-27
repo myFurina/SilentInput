@@ -152,14 +152,15 @@ fun SettingsScreen(
     }
 
     val isUsbTarget = currentMode == ConnectionMode.USB.wireValue
+    val isLanTarget = currentMode == ConnectionMode.LAN.wireValue
     val isUsbConnected = isNetConnected && isUsbTarget
-    val isLanConnected = isNetConnected && !isUsbTarget
+    val isLanConnected = isNetConnected && isLanTarget
     val isUsbConnecting = isNetConnecting && isUsbTarget
-    val isLanConnecting = isNetConnecting && !isUsbTarget
+    val isLanConnecting = isNetConnecting && isLanTarget
     val isUsbReconnecting = isNetReconnecting && isUsbTarget
-    val isLanReconnecting = isNetReconnecting && !isUsbTarget
+    val isLanReconnecting = isNetReconnecting && isLanTarget
     val usbConnError = if (isUsbTarget) connError else null
-    val lanConnError = lanInputError ?: if (!isUsbTarget) connError else null
+    val lanConnError = lanInputError ?: if (isLanTarget) connError else null
     val pinnedCertFingerprint = remember(ipInput, isLanConnected, pinnedCertNonce) {
         viewModel.getPinnedCertFingerprint(ipInput)
     }
@@ -280,7 +281,7 @@ fun SettingsScreen(
                                     tokenInput = host.token
                                     viewModel.clearLanInputError()
                                     if (host.token.isBlank()) {
-                                        viewModel.toggleTlsEncryption(host.tlsEnabled)
+                                        viewModel.toggleTlsEncryption(host.tlsEnabled, reconnectIfActive = false)
                                         viewModel.notifyUserToast { it.lanSavedHostNeedsKeyToast }
                                     } else {
                                         viewModel.connectLan(host.endpoint, host.token, host.tlsEnabled, host.name)

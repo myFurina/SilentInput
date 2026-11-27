@@ -1,5 +1,6 @@
 package com.silentinput.app.model
 
+import kotlin.math.exp
 import kotlin.math.hypot
 
 /**
@@ -42,13 +43,14 @@ class TrackpadAccumulator {
             return 0 to 0
         }
         val safeDensity = density.coerceAtLeast(1f)
-        val safeDt = dtMs.coerceIn(4f, 40f)
+        val safeDt = dtMs.coerceIn(2f, 40f)
         val distDp = hypot(dx, dy) / safeDensity
         val instVelocity = (distDp / safeDt).coerceAtMost(5.0f)
+        val alpha = 1f - exp(-safeDt / VELOCITY_EMA_TAU_MS)
         smoothedVelocityDpPerMs = if (smoothedVelocityDpPerMs == 0f) {
             instVelocity
         } else {
-            smoothedVelocityDpPerMs * 0.50f + instVelocity * 0.50f
+            smoothedVelocityDpPerMs * (1f - alpha) + instVelocity * alpha
         }
         val gain = computePointerGain(smoothedVelocityDpPerMs)
         val dpiScale = REF_DENSITY / safeDensity.coerceIn(1.0f, 5.0f)
@@ -72,13 +74,15 @@ class TrackpadAccumulator {
         avgDy: Float,
         sensitivity: Float,
         stepDivisor: Float = 28f,
-        naturalScrolling: Boolean = true
+        naturalScrolling: Boolean = true,
+        density: Float = REF_DENSITY
     ): Int {
-        if (!avgDy.isFinite() || !sensitivity.isFinite() || !stepDivisor.isFinite() || stepDivisor == 0f) {
+        if (!avgDy.isFinite() || !sensitivity.isFinite() || !stepDivisor.isFinite() || !density.isFinite() || stepDivisor == 0f) {
             return 0
         }
         val directionSign = if (naturalScrolling) 1f else -1f
-        accWheel += (directionSign * avgDy * sensitivity) / stepDivisor
+        val dpiScale = REF_DENSITY / density.coerceAtLeast(1f)
+        accWheel += (directionSign * avgDy * dpiScale * sensitivity) / stepDivisor
         val intWheel = accWheel.toInt()
         if (intWheel != 0) {
             accWheel -= intWheel
@@ -118,6 +122,7 @@ class TrackpadAccumulator {
     companion object {
         const val REF_DENSITY = 3.0f
         const val HI_RES_UNITS_PER_DP = 12.0f
+        const val VELOCITY_EMA_TAU_MS = 12.0f
 
         internal fun computePointerGain(velocityDpPerMs: Float): Float {
             val v = velocityDpPerMs.coerceAtLeast(0f)
@@ -244,7 +249,8 @@ class TrackpadGestureProcessor(
                 accumulator.addScrollDelta(
                     avgDy = avgDy,
                     sensitivity = sensitivity,
-                    naturalScrolling = naturalScrolling
+                    naturalScrolling = naturalScrolling,
+                    density = density
                 )
             }
             return FrameOutput(wheelDelta = wheel)
@@ -303,16 +309,11 @@ class TrackpadGestureProcessor(
         return FrameOutput(moveDx = mx, moveDy = my)
     }
 
-    fun onPointerUp(pointerId: Int, x: Float, y: Float) {
+    fun onPointerUp(pointerId: Int, @Suppress("UNUSED_PARAMETER") x: Float, @Suppress("UNUSED_PARAMETER") y: Float) {
         pointers.remove(pointerId)
         if (pointerId == primaryPointerId && pointers.isNotEmpty()) {
             val next = pointers.entries.first()
             primaryPointerId = next.key
-        } else {
-            pointers[pointerId]?.let {
-                it.x = x
-                it.y = y
-            }
         }
     }
 

@@ -46,4 +46,29 @@ class BluetoothOutboundQueueTest {
 
         assertNull(queue.pollNext())
     }
+
+    @Test
+    fun `consecutive scrolls coalesce and preserve order across moves and control frames`() {
+        val queue = BluetoothOutboundQueue()
+        val clickLeft = ProtocolPayloads.buildMouseJson(0f, 0f, action = "click_left")
+
+        queue.enqueueMove(3f, 1f)
+        queue.enqueueScroll(40f, hiRes = true)
+        queue.enqueueScroll(35f, hiRes = true)
+        queue.enqueueControl(clickLeft)
+        queue.enqueueScroll(-2f, hiRes = false)
+        queue.enqueueScroll(-1f, hiRes = false)
+
+        val batch = queue.drainBatch(16)
+        assertEquals(
+            listOf(
+                ProtocolPayloads.buildMouseJson(3f, 1f, action = "move"),
+                ProtocolPayloads.buildMouseJson(0f, 0f, action = "scroll", wheel = 75f, hiResWheel = true),
+                clickLeft,
+                ProtocolPayloads.buildMouseJson(0f, 0f, action = "scroll", wheel = -3f, hiResWheel = false)
+            ),
+            batch
+        )
+        assertNull(queue.pollNext())
+    }
 }

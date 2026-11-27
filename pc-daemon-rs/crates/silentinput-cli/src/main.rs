@@ -235,7 +235,7 @@ fn cmd_qr() {
         println!(" 传输加密:    TLS 已关闭 (明文 WS)");
     }
     if config.access_control_mode == "localhost_only" {
-        println!(" ⚠️ 当前访问控制为「仅限本机」，手机局域网扫码前需先切换为「白名单」模式。");
+        println!(" ⚠️ 当前访问控制为「仅限本机」，手机局域网扫码前需先切换为「白名单」模式并重启服务 (silentinput restart)。");
     }
     println!();
     if let Some(qr) = render_qr_terminal(&uri) {
@@ -480,7 +480,7 @@ fn cmd_reset() {
     println!(" 默认服务端口: 53318");
     println!(" 传输加密:     TLS 开启 (WSS)");
     println!(" USB 免密:     已开启 (仅限 127.0.0.1)");
-    println!(" 白名单网段:   127.0.0.1, 10.*, 192.168.*, 100.*, 172.16.0.0/12");
+    println!(" 白名单网段:   127.0.0.1, 10.*, 192.168.*, 100.64.0.0/10, 172.16.0.0/12");
     println!(" 新配对密钥:   {}", default_cfg.auth_token);
     println!("=========================================");
     println!("正在重启后台服务使新配置生效...");

@@ -8,7 +8,7 @@ use std::time::Duration;
 use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
 use evdev::{AttributeSet, EventType, InputEvent, Key, RelativeAxisType};
 use silentinput_core::keymap::{
-    all_registered_keys, build_key_map, build_wtype_args, build_xdotool_args,
+    all_registered_keys, build_wtype_args, build_xdotool_args,
     clipboard_candidates_for_session, detect_session_capabilities, detect_wayland_env,
     detect_x11_env, has_graphical_session, lookup_char, normalize_line_endings,
     resolve_key_combination,
@@ -247,6 +247,12 @@ impl InputController for SystemInputController {
                             "[SilentInput] Warning: uinput write failed ({err}), resetting virtual device."
                         );
                         guard.device = None;
+                        drop(guard);
+                        self.mouse_tracker
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .held
+                            .clear();
                         if attempt == 0 {
                             continue;
                         }
@@ -270,7 +276,7 @@ impl InputController for SystemInputController {
                     .map(|k| InputEvent::new(EventType::KEY, k.code(), 1))
                     .collect();
                 if self.emit_uinput_events(&press) {
-                    tokio::time::sleep(Duration::from_millis(15)).await;
+                    tokio::time::sleep(Duration::from_millis(8)).await;
                     let release: Vec<InputEvent> = codes
                         .iter()
                         .rev()
@@ -315,7 +321,6 @@ impl InputController for SystemInputController {
                 candidates.push(("ydotool".to_string(), ydo_args));
             }
 
-            let _ = build_key_map();
             for (bin, args) in candidates {
                 let mut cmd = Command::new(&bin);
                 cmd.args(&args)

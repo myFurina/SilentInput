@@ -407,7 +407,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         isNetConnected = networkClient.isConnected.value,
                         isNetConnecting = networkClient.isConnecting.value,
                         manualDisconnected = _isNetManualDisconnected.value,
-                        serverIp = _lanIp.value
+                        serverIp = _lanIp.value,
+                        suppressAutoReconnect = networkClient.shouldSuppressAutoReconnectOnResume() ||
+                            networkClient.isReconnecting.value
                     )
                 ) {
                     applyNetworkConnection(
@@ -425,7 +427,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         isNetConnected = networkClient.isConnected.value,
                         isNetConnecting = networkClient.isConnecting.value,
                         manualDisconnected = _isNetManualDisconnected.value,
-                        serverIp = "127.0.0.1"
+                        serverIp = "127.0.0.1",
+                        suppressAutoReconnect = networkClient.shouldSuppressAutoReconnectOnResume() ||
+                            networkClient.isReconnecting.value
                     )
                 ) {
                     applyNetworkConnection(
@@ -650,11 +654,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         networkClient.disconnect()
     }
 
-    fun toggleTlsEncryption(enabled: Boolean) {
+    fun toggleTlsEncryption(enabled: Boolean, reconnectIfActive: Boolean = true) {
         _isTlsEnabled.value = enabled
         prefs.edit().putBoolean(KEY_TLS_ENCRYPTION, enabled).apply()
         networkClient.isTlsEnabled = enabled
-        if (_connectionMode.value == ConnectionMode.LAN.wireValue && (isNetConnected.value || isNetReconnecting.value)) {
+        if (reconnectIfActive &&
+            _connectionMode.value == ConnectionMode.LAN.wireValue &&
+            (isNetConnected.value || isNetReconnecting.value)
+        ) {
             networkClient.connect()
         }
     }

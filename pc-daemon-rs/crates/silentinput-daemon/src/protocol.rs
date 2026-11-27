@@ -193,10 +193,15 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
         } else {
             println!("[SilentInput] Authentication FAILED from {peer_display}");
         }
+        let reply_msg = if locked_now {
+            "Too many failed attempts. Try again later."
+        } else {
+            "Invalid token"
+        };
         let reply = json!({
             "type": "auth_result",
             "status": "fail",
-            "message": "Invalid token",
+            "message": reply_msg,
         });
         return ProcessOutcome::plain(false, locked_now, Some(reply.to_string()));
     }
@@ -308,7 +313,8 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                         .input
                         .emit_uinput_events(&[InputEvent::new(EventType::KEY, btn, 1)])
                     {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        ctx.input.track_mouse_button(btn, true, ctx.conn_id);
+                        tokio::time::sleep(Duration::from_millis(8)).await;
                         ctx.input
                             .emit_uinput_events(&[InputEvent::new(EventType::KEY, btn, 0)]);
                     }
@@ -320,7 +326,8 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                         .input
                         .emit_uinput_events(&[InputEvent::new(EventType::KEY, btn, 1)])
                     {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        ctx.input.track_mouse_button(btn, true, ctx.conn_id);
+                        tokio::time::sleep(Duration::from_millis(8)).await;
                         ctx.input
                             .emit_uinput_events(&[InputEvent::new(EventType::KEY, btn, 0)]);
                     }

@@ -149,7 +149,7 @@ class BluetoothCompanionClient(
                         BluetoothAdapter.STATE_OFF, BluetoothAdapter.STATE_TURNING_OFF -> {
                             Log.d(TAG, "Bluetooth adapter turned off, closing connection")
                             _isBluetoothEnabled.value = false
-                            onConnectionLost()
+                            clientScope.launch { onConnectionLost() }
                             onAdapterStateChanged?.invoke(false)
                         }
                     }
@@ -170,7 +170,7 @@ class BluetoothCompanionClient(
                     }
                     if (matchedGen != null) {
                         Log.d(TAG, "ACL disconnected for active device ${device?.address}")
-                        onConnectionLost(expectedGen = matchedGen)
+                        clientScope.launch { onConnectionLost(expectedGen = matchedGen) }
                     }
                 }
             }
@@ -356,9 +356,13 @@ class BluetoothCompanionClient(
             try {
                 for (ignored in signal) {
                     while (true) {
-                        val nextPayload = outboundQueue.pollNext() ?: break
-                        val bytes = (nextPayload.trim() + "\n").toByteArray(Charsets.UTF_8)
-                        out.write(bytes)
+                        val batch = outboundQueue.drainBatch(16)
+                        if (batch.isEmpty()) break
+                        val sb = StringBuilder(batch.size * 48)
+                        for (payload in batch) {
+                            sb.append(payload.trim()).append('\n')
+                        }
+                        out.write(sb.toString().toByteArray(Charsets.UTF_8))
                         out.flush()
                     }
                 }
@@ -525,6 +529,8 @@ class BluetoothCompanionClient(
                 return
             }
             connectionGeneration++
+            connectJob?.cancel()
+            connectJob = null
             val wasConnectedOrConnecting = _isConnected.value || _isConnecting.value
             _isConnected.value = false
             _isConnecting.value = false
@@ -533,6 +539,7 @@ class BluetoothCompanionClient(
             _latencyMs.value = null
             _supportsUnicodeDirectTyping.value = true
             _supportsHiResWheel.value = false
+            _daemonVersion.value = null
             if (wasConnectedOrConnecting) {
                 setStatusMessage { it.btStatusConnectionLost }
             }
@@ -628,6 +635,11 @@ class BluetoothCompanionClient(
             if (!_isConnected.value || signal == null) return false
             if (action == "move" && wheel == 0f) {
                 outboundQueue.enqueueMove(dx, dy)
+                signal.trySend(Unit)
+                return true
+            }
+            if (action == "scroll" && wheel != 0f) {
+                outboundQueue.enqueueScroll(wheel, hiRes = _supportsHiResWheel.value)
                 signal.trySend(Unit)
                 return true
             }

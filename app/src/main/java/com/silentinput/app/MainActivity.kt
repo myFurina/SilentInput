@@ -204,9 +204,10 @@ fun MainAppScaffold(
     var showLandscapeKeyboard by rememberSaveable { mutableStateOf(false) }
 
     val context = LocalContext.current
+    val currentStrings by rememberUpdatedState(strings)
     LaunchedEffect(Unit) {
         viewModel.userToastEvent.collect { event ->
-            Toast.makeText(context, event(strings), Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, event(currentStrings), Toast.LENGTH_SHORT).show()
         }
     }
 

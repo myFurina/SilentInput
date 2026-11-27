@@ -171,4 +171,76 @@ class TrackpadAccumulatorTest {
             processor.onAllUp(timeMs = 3500L)
         )
     }
+
+    @Test
+    fun `legacy scroll delta normalizes across screen densities`() {
+        val accLow = TrackpadAccumulator()
+        val accHigh = TrackpadAccumulator()
+        // 18px at 2.0x density vs 36px at 4.0x density represent identical physical swipe distance
+        val lowWheel = accLow.addScrollDelta(avgDy = 18f, sensitivity = 1.0f, density = 2.0f)
+        val highWheel = accHigh.addScrollDelta(avgDy = 36f, sensitivity = 1.0f, density = 4.0f)
+        assertEquals(lowWheel, highWheel)
+    }
+
+    @Test
+    fun `gesture processor two finger scroll ignores residual single finger motion after lift`() {
+        val processor = TrackpadGestureProcessor(TrackpadAccumulator())
+        val ids = intArrayOf(0, 1)
+        val xs = floatArrayOf(100f, 160f)
+        val ys = floatArrayOf(100f, 100f)
+
+        processor.onPrimaryDown(pointerId = 0, x = 100f, y = 100f, timeMs = 1000L)
+        processor.onPointerDown(pointerId = 1, x = 160f, y = 100f)
+
+        ys[0] = 130f
+        ys[1] = 130f
+        val scrollOut = processor.onMoveSample(
+            pointerIds = ids,
+            xs = xs,
+            ys = ys,
+            count = 2,
+            sampleTimeMs = 1016L,
+            density = 3.0f,
+            sensitivity = 1.0f,
+            naturalScrolling = true,
+            hiResScroll = true
+        )
+        assertEquals(120, scrollOut.wheelDelta)
+
+        // Lift second finger and keep moving primary finger -> must NOT jump cursor
+        processor.onPointerUp(pointerId = 1, x = 160f, y = 130f)
+        xs[0] = 140f
+        ys[0] = 150f
+        val residualOut = processor.onMoveSample(
+            pointerIds = intArrayOf(0),
+            xs = floatArrayOf(140f),
+            ys = floatArrayOf(150f),
+            count = 1,
+            sampleTimeMs = 1024L,
+            density = 3.0f,
+            sensitivity = 1.0f,
+            naturalScrolling = true
+        )
+        assertEquals(0, residualOut.moveDx)
+        assertEquals(0, residualOut.moveDy)
+        assertEquals(0, residualOut.wheelDelta)
+    }
+
+    @Test
+    fun `ema velocity smoothing decays consistently across 60hz and 240hz sample rates`() {
+        val acc60 = TrackpadAccumulator()
+        val acc240 = TrackpadAccumulator()
+
+        // Prime both at 1.0 dp/ms
+        acc60.addAcceleratedMoveDelta(dx = 48f, dy = 0f, dtMs = 16f, density = 3.0f, sensitivity = 1.0f)
+        acc240.addAcceleratedMoveDelta(dx = 12f, dy = 0f, dtMs = 4f, density = 3.0f, sensitivity = 1.0f)
+
+        // Over 16ms at 0.25 dp/ms: 1x16ms step vs 4x4ms steps should yield nearly identical displacement
+        val (dx60, _) = acc60.addAcceleratedMoveDelta(dx = 12f, dy = 0f, dtMs = 16f, density = 3.0f, sensitivity = 1.0f)
+        var dx240 = 0
+        repeat(4) {
+            dx240 += acc240.addAcceleratedMoveDelta(dx = 3f, dy = 0f, dtMs = 4f, density = 3.0f, sensitivity = 1.0f).first
+        }
+        assertTrue("Expected similar 60Hz ($dx60) vs 240Hz ($dx240) output", kotlin.math.abs(dx60 - dx240) <= 1)
+    }
 }

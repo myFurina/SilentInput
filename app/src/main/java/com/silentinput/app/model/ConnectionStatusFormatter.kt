@@ -43,12 +43,14 @@ object ConnectionStatusFormatter {
         isNetConnected: Boolean,
         isNetConnecting: Boolean,
         manualDisconnected: Boolean,
-        serverIp: String
+        serverIp: String,
+        suppressAutoReconnect: Boolean = false
     ): Boolean {
         return mode == targetMode &&
             !isNetConnected &&
             !isNetConnecting &&
             !manualDisconnected &&
+            !suppressAutoReconnect &&
             serverIp.isNotBlank()
     }
 

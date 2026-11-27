@@ -2,8 +2,15 @@ use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use evdev::Key;
+
+static KEY_MAP_CACHE: OnceLock<HashMap<&'static str, Key>> = OnceLock::new();
+
+fn cached_key_map() -> &'static HashMap<&'static str, Key> {
+    KEY_MAP_CACHE.get_or_init(build_key_map)
+}
 
 pub fn build_key_map() -> HashMap<&'static str, Key> {
     HashMap::from([
@@ -217,7 +224,7 @@ pub fn lookup_char(ch: char) -> Option<(Key, bool)> {
 
 pub fn all_registered_keys() -> Vec<Key> {
     let mut keys = BTreeSet::new();
-    for key in build_key_map().values() {
+    for key in cached_key_map().values() {
         keys.insert(key.code());
     }
     for code_u8 in 0x09u8..=0x7eu8 {
@@ -234,7 +241,7 @@ pub fn all_registered_keys() -> Vec<Key> {
 /// Resolve a key combination strictly: EVERY segment must exist in KEY_MAP,
 /// otherwise returns `None` without partially triggering modifiers.
 pub fn resolve_key_combination(combo_str: &str) -> Option<Vec<Key>> {
-    let key_map = build_key_map();
+    let key_map = cached_key_map();
     let parts: Vec<&str> = combo_str
         .split('+')
         .map(|s| s.trim())
@@ -310,7 +317,14 @@ fn wtype_key_name(key: &str) -> Option<String> {
 }
 
 fn resolve_keysym_name(target_key: &str) -> Option<String> {
-    let key_map = build_key_map();
+    match target_key {
+        "ctrl" => return Some("Control_L".to_string()),
+        "alt" => return Some("Alt_L".to_string()),
+        "shift" => return Some("Shift_L".to_string()),
+        "super" | "win" => return Some("Super_L".to_string()),
+        _ => {}
+    }
+    let key_map = cached_key_map();
     let is_single_alnum = target_key.len() == 1
         && target_key
             .chars()
@@ -493,6 +507,37 @@ pub fn detect_x11_display_in(x_display: Option<&str>, x11_unix_dir: &Path) -> Op
     best.map(|(_, d)| d)
 }
 
+pub fn find_xauthority_in(runtime_dir: &Path, home_dir: Option<&Path>) -> Option<PathBuf> {
+    if let Some(home) = home_dir {
+        let candidate = home.join(".Xauthority");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let gdm_xauth = runtime_dir.join("gdm").join("Xauthority");
+    if gdm_xauth.is_file() {
+        return Some(gdm_xauth);
+    }
+    let entries = std::fs::read_dir(runtime_dir).ok()?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !(name.starts_with("xauth_") || name.starts_with(".mutter-Xwaylandauth.")) {
+            continue;
+        }
+        let path = entry.path();
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_file() {
+                let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                if best.as_ref().is_none_or(|(b_time, _)| mtime > *b_time) {
+                    best = Some((mtime, path));
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 pub fn detect_x11_env() -> Vec<(String, String)> {
     let x_display = env::var("DISPLAY").ok();
     let Some(display) = detect_x11_display_in(x_display.as_deref(), Path::new("/tmp/.X11-unix"))
@@ -506,12 +551,17 @@ pub fn detect_x11_env() -> Vec<(String, String)> {
         .filter(|s| !s.is_empty() && Path::new(s).exists())
     {
         vars.push(("XAUTHORITY".to_string(), auth));
-    } else if let Some(home) = env::var_os("HOME") {
-        let candidate = PathBuf::from(home).join(".Xauthority");
-        if candidate.exists() {
+    } else {
+        let uid = unsafe { libc::geteuid() };
+        let runtime_dir = env::var("XDG_RUNTIME_DIR")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("/run/user/{uid}"));
+        let home_path = env::var_os("HOME").map(PathBuf::from);
+        if let Some(found) = find_xauthority_in(Path::new(&runtime_dir), home_path.as_deref()) {
             vars.push((
                 "XAUTHORITY".to_string(),
-                candidate.to_string_lossy().to_string(),
+                found.to_string_lossy().to_string(),
             ));
         }
     }

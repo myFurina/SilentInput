@@ -363,7 +363,9 @@ class NetworkClient(
         if (cleanFp.length != 64 || !cleanFp.all { it in '0'..'9' || it in 'a'..'f' }) {
             return false
         }
-        prefs.edit().putString(endpoint.hostKey, cleanFp).apply()
+        synchronized(stateLock) {
+            prefs.edit().putString(endpoint.hostKey, cleanFp).apply()
+        }
         return true
     }
 
@@ -497,14 +499,17 @@ class NetworkClient(
                                     val sid = UdpMouseCodec.parseSessionIdHex(msg.udpSessionId)
                                     val key = UdpMouseCodec.decodeAes256Key(msg.udpKey)
                                     if (sid != null && key != null && msg.udpPort in 1..65535) {
-                                        val ch = UdpMouseChannel(
+                                        lateinit var ch: UdpMouseChannel
+                                        ch = UdpMouseChannel(
                                             host = endpoint.host,
                                             port = msg.udpPort,
                                             sessionId = sid,
                                             secretKey = key,
                                             onReadyChanged = { ready ->
-                                                if (!closedMatches(this@NetworkClient.webSocket, webSocket)) {
-                                                    _isUdpMouseActive.value = ready
+                                                synchronized(stateLock) {
+                                                    if (this@NetworkClient.webSocket === webSocket && udpMouseChannel === ch) {
+                                                        _isUdpMouseActive.value = ready
+                                                    }
                                                 }
                                             }
                                         )
@@ -622,10 +627,6 @@ class NetworkClient(
             return
         }
         webSocket = newSocket
-    }
-
-    private fun closedMatches(current: WebSocket?, expected: WebSocket): Boolean {
-        return current !== expected
     }
 
     private fun closeUdpChannelLocked() {
@@ -800,20 +801,9 @@ class NetworkClient(
         }
     }
 
-    /**
-     * Check connection state and immediately reconnect if disconnected.
-     * Called when MainActivity is resumed (Lifecycle.Event.ON_RESUME).
-     */
-    fun checkAndReconnect() {
-        synchronized(stateLock) {
-            if (!isInBackground && shouldBeConnected && !_isConnected.value && !_isConnecting.value) {
-                Log.d(TAG, "Checking connection state, immediately reconnecting...")
-                reconnectAttempts = 0
-                reconnectJob?.cancel()
-                reconnectJob = null
-                _isReconnecting.value = false
-                doConnectLocked()
-            }
+    fun shouldSuppressAutoReconnectOnResume(): Boolean {
+        return synchronized(stateLock) {
+            _certMismatchHost.value != null || (!shouldBeConnected && _connectionError.value != null)
         }
     }
 
@@ -928,9 +918,16 @@ class NetworkClient(
         val ws = webSocket ?: return false
         if (!dx.isFinite() || !dy.isFinite() || (dx == 0f && dy == 0f)) return true
 
-        val directPayload: String? = synchronized(wsMoveLock) {
+        // USB loopback (<1ms) needs zero artificial 8ms coalescing lag
+        if (!activeHostIsLan) {
+            return sendJson(ProtocolPayloads.buildMouseJson(dx, dy, action = MouseAction.MOVE.wireValue))
+        }
+
+        var sendFailed = false
+        synchronized(wsMoveLock) {
             if (!hasPendingWsMove && ws.queueSize() == 0L) {
-                ProtocolPayloads.buildMouseJson(dx, dy, action = MouseAction.MOVE.wireValue)
+                val directPayload = ProtocolPayloads.buildMouseJson(dx, dy, action = MouseAction.MOVE.wireValue)
+                sendFailed = !ws.send(directPayload)
             } else {
                 pendingWsMoveDx += dx
                 pendingWsMoveDy += dy
@@ -952,18 +949,18 @@ class NetworkClient(
                         }
                     }
                 }
-                null
             }
         }
-        return if (directPayload != null) {
-            sendRawJson(ws, directPayload)
-        } else {
-            true
+        if (sendFailed) {
+            handleWsSendFailure(ws)
+            return false
         }
+        return true
     }
 
     private fun flushPendingWsMoves(expectedWs: WebSocket): Boolean {
-        val payload = synchronized(wsMoveLock) {
+        var sendFailed = false
+        synchronized(wsMoveLock) {
             if (!hasPendingWsMove) return true
             val dx = pendingWsMoveDx
             val dy = pendingWsMoveDy
@@ -971,34 +968,61 @@ class NetworkClient(
             pendingWsMoveDy = 0f
             hasPendingWsMove = false
             if (dx == 0f && dy == 0f) return true
-            ProtocolPayloads.buildMouseJson(
+            val payload = ProtocolPayloads.buildMouseJson(
                 dx,
                 dy,
                 action = MouseAction.MOVE.wireValue
             )
+            sendFailed = !expectedWs.send(payload)
         }
-        return sendRawJson(expectedWs, payload)
+        if (sendFailed) {
+            handleWsSendFailure(expectedWs)
+            return false
+        }
+        return true
     }
 
     private fun sendJson(payload: String): Boolean {
         val ws = webSocket ?: return false
-        if (!flushPendingWsMoves(ws)) return false
-        return sendRawJson(ws, payload)
-    }
-
-    private fun sendRawJson(ws: WebSocket, payload: String): Boolean {
-        val sent = ws.send(payload)
-        if (!sent) {
-            synchronized(stateLock) {
-                if (webSocket === ws && _isConnected.value) {
-                    Log.w(TAG, "Failed to enqueue WebSocket frame; socket dead")
-                    _latencyMs.value = null
-                    ws.cancel()
-                    handleDisconnectedLocked()
+        var sendFailed = false
+        synchronized(wsMoveLock) {
+            if (hasPendingWsMove) {
+                val dx = pendingWsMoveDx
+                val dy = pendingWsMoveDy
+                pendingWsMoveDx = 0f
+                pendingWsMoveDy = 0f
+                hasPendingWsMove = false
+                if (dx != 0f || dy != 0f) {
+                    val movePayload = ProtocolPayloads.buildMouseJson(
+                        dx,
+                        dy,
+                        action = MouseAction.MOVE.wireValue
+                    )
+                    if (!ws.send(movePayload)) {
+                        sendFailed = true
+                    }
                 }
             }
+            if (!sendFailed && !ws.send(payload)) {
+                sendFailed = true
+            }
         }
-        return sent
+        if (sendFailed) {
+            handleWsSendFailure(ws)
+            return false
+        }
+        return true
+    }
+
+    private fun handleWsSendFailure(ws: WebSocket) {
+        synchronized(stateLock) {
+            if (webSocket === ws && _isConnected.value) {
+                Log.w(TAG, "Failed to enqueue WebSocket frame; socket dead")
+                _latencyMs.value = null
+                ws.cancel()
+                handleDisconnectedLocked()
+            }
+        }
     }
 
     private fun disconnectSocketOnlyLocked() {

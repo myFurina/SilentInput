@@ -3,7 +3,7 @@ use std::ffi::CStr;
 use qrcode::render::unicode;
 use qrcode::{Color, EcLevel, QrCode};
 
-use crate::certs::get_cert_sha256_hex_at;
+use crate::certs::{ensure_certificates_at, get_cert_sha256_hex_at};
 use crate::config::SilentInputConfig;
 use crate::paths::SilentInputPaths;
 use crate::process::get_all_host_ips;
@@ -37,7 +37,10 @@ pub fn get_host_display_name() -> String {
 
 pub fn build_pairing_payload_at(paths: &SilentInputPaths, config: &SilentInputConfig) -> PairingQrPayload {
     let fingerprint = if config.enable_tls {
-        get_cert_sha256_hex_at(paths)
+        get_cert_sha256_hex_at(paths).or_else(|| {
+            let _ = ensure_certificates_at(paths);
+            get_cert_sha256_hex_at(paths)
+        })
     } else {
         None
     };

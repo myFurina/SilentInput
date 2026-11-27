@@ -544,10 +544,21 @@ impl ControlCenterState {
                 Task::batch([iced::clipboard::write(ip), self.show_toast(msg)])
             }
             Message::AclModeSelected(opt) => {
+                let was_localhost = self.config.access_control_mode == "localhost_only";
+                let now_localhost = opt.key == "localhost_only";
                 self.config_generation += 1;
                 self.config.access_control_mode = opt.key.to_string();
                 let _ = save_config_at(&self.paths, &self.config);
-                self.show_toast(t(self.is_zh, "控制模式已更新", "Access control mode updated"))
+                if was_localhost != now_localhost && self.service_action_count == 0 {
+                    let toast = self.show_toast(t(
+                        self.is_zh,
+                        "控制模式已更新，正在重启服务...",
+                        "Access control mode updated, restarting service...",
+                    ));
+                    Task::batch([toast, Task::done(Message::RestartService)])
+                } else {
+                    self.show_toast(t(self.is_zh, "控制模式已更新", "Access control mode updated"))
+                }
             }
             Message::WhitelistChanged(val) => {
                 self.whitelist_input = val;
@@ -1531,7 +1542,7 @@ impl ControlCenterState {
                             .size(17),
                         text(t(
                             zh,
-                            "此操作将重置以下配置并重启服务：\n• 访问控制：仅限本机\n• 密钥有效期：1 小时\n• 生成新的 256 位配对密钥\n• 白名单恢复默认网段（127.0.0.1, 10.*, 192.168.*, 100.*, 172.16.0.0/12）",
+                            "此操作将重置以下配置并重启服务：\n• 访问控制：仅限本机\n• 密钥有效期：1 小时\n• 生成新的 256 位配对密钥\n• 白名单恢复默认网段（127.0.0.1, 10.*, 192.168.*, 100.64.0.0/10, 172.16.0.0/12）",
                             "This resets the following settings and restarts the service:\n• Access mode: Localhost Only\n• Key expiration: 1 hour\n• Generate a new 256-bit pairing key\n• Restore default whitelist subnets",
                         ))
                         .size(13)
@@ -2206,6 +2217,33 @@ mod tests {
         assert_eq!(state.page, super::ActivePage::Home);
         assert!(!state.pending_acl_save);
         assert_eq!(load_config_at(&paths).whitelist, vec!["192.168.50.*"]);
+
+        let _ = fs::remove_dir_all(&paths.config_dir);
+    }
+
+    #[test]
+    fn acl_mode_switch_between_localhost_and_lan_restarts_service() {
+        let paths = tmp_paths("acl_restart");
+        save_config_at(&paths, &SilentInputConfig::default()).unwrap();
+
+        let (mut state, _) = ControlCenterState::new_with_paths(paths.clone());
+        assert_eq!(state.config.access_control_mode, "localhost_only");
+
+        let whitelist_opt = super::i18n::find_option(&super::i18n::acl_mode_options(false), "whitelist").unwrap();
+        let _ = state.update(Message::AclModeSelected(whitelist_opt));
+        assert_eq!(state.config.access_control_mode, "whitelist");
+        assert!(state
+            .toast
+            .as_deref()
+            .unwrap_or("")
+            .contains("restart")
+            || state.toast.as_deref().unwrap_or("").contains("重启"));
+
+        let blacklist_opt = super::i18n::find_option(&super::i18n::acl_mode_options(false), "blacklist").unwrap();
+        let _ = state.update(Message::AclModeSelected(blacklist_opt));
+        assert_eq!(state.config.access_control_mode, "blacklist");
+        assert!(!state.toast.as_deref().unwrap_or("").contains("restart"));
+        assert!(!state.toast.as_deref().unwrap_or("").contains("重启"));
 
         let _ = fs::remove_dir_all(&paths.config_dir);
     }

@@ -6,16 +6,21 @@ mod protocol;
 mod udp_mouse;
 mod ws_server;
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, OpenOptions};
+use std::io;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::time::Duration;
 
 use silentinput_core::acl::get_bind_addresses;
 use silentinput_core::certs::ensure_certificates;
 use silentinput_core::config::{ensure_config_dir_at, load_config};
 use silentinput_core::paths::SilentInputPaths;
 use silentinput_core::process::get_all_host_ips;
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::signal::unix::{signal, SignalKind};
 
@@ -29,6 +34,92 @@ use crate::ws_server::{load_tls_acceptor, run_ws_listener, WsServerDeps};
 
 fn cleanup_pid(paths: &SilentInputPaths) {
     let _ = fs::remove_file(paths.pid_file());
+}
+
+fn acquire_instance_lock(paths: &SilentInputPaths) -> Option<fs::File> {
+    let lock_path = paths.config_dir.join("silentinput.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .ok()?;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        Some(file)
+    } else {
+        None
+    }
+}
+
+fn bind_tcp_listener(addr: &str, port: u16) -> io::Result<(TcpListener, String)> {
+    if addr == "0.0.0.0" {
+        if let Ok(sock) = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP)) {
+            let _ = sock.set_only_v6(false);
+            let _ = sock.set_reuse_address(true);
+            let v6_addr = SocketAddr::from((Ipv6Addr::UNSPECIFIED, port));
+            if sock.bind(&v6_addr.into()).is_ok()
+                && sock.listen(128).is_ok()
+                && sock.set_nonblocking(true).is_ok()
+            {
+                let std_listener: std::net::TcpListener = sock.into();
+                if let Ok(listener) = TcpListener::from_std(std_listener) {
+                    return Ok((listener, format!("[::]:{port}")));
+                }
+            }
+        }
+    } else if addr == "::1" {
+        let sock = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+        let _ = sock.set_only_v6(true);
+        let _ = sock.set_reuse_address(true);
+        let v6_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, port));
+        sock.bind(&v6_addr.into())?;
+        sock.listen(128)?;
+        sock.set_nonblocking(true)?;
+        let std_listener: std::net::TcpListener = sock.into();
+        return Ok((TcpListener::from_std(std_listener)?, format!("[::1]:{port}")));
+    }
+
+    let ip: Ipv4Addr = addr
+        .parse()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    let _ = sock.set_reuse_address(true);
+    let v4_addr = SocketAddr::from((ip, port));
+    sock.bind(&v4_addr.into())?;
+    sock.listen(128)?;
+    sock.set_nonblocking(true)?;
+    let std_listener: std::net::TcpListener = sock.into();
+    Ok((TcpListener::from_std(std_listener)?, format!("{addr}:{port}")))
+}
+
+fn bind_udp_socket(addr: &str, port: u16) -> io::Result<(UdpSocket, String)> {
+    if addr == "0.0.0.0" {
+        if let Ok(sock) = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)) {
+            let _ = sock.set_only_v6(false);
+            let _ = sock.set_reuse_address(true);
+            let v6_addr = SocketAddr::from((Ipv6Addr::UNSPECIFIED, port));
+            if sock.bind(&v6_addr.into()).is_ok() && sock.set_nonblocking(true).is_ok() {
+                let std_sock: std::net::UdpSocket = sock.into();
+                if let Ok(udp_sock) = UdpSocket::from_std(std_sock) {
+                    return Ok((udp_sock, format!("[::]:{port}")));
+                }
+            }
+        }
+    }
+
+    let ip: Ipv4Addr = addr
+        .parse()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    let _ = sock.set_reuse_address(true);
+    let v4_addr = SocketAddr::from((ip, port));
+    sock.bind(&v4_addr.into())?;
+    sock.set_nonblocking(true)?;
+    let std_sock: std::net::UdpSocket = sock.into();
+    Ok((UdpSocket::from_std(std_sock)?, format!("{addr}:{port}")))
 }
 
 #[tokio::main]
@@ -49,6 +140,10 @@ async fn main() {
 
     let paths = SilentInputPaths::system();
     let _ = ensure_config_dir_at(&paths);
+    let Some(_instance_lock) = acquire_instance_lock(&paths) else {
+        eprintln!("[SilentInput] Another silentinput-daemon instance is already running; exiting.");
+        return;
+    };
     let pid_path = paths.pid_file();
     let _ = fs::write(&pid_path, std::process::id().to_string());
     let _ = fs::set_permissions(&pid_path, fs::Permissions::from_mode(0o600));
@@ -77,7 +172,8 @@ async fn main() {
         Arc::clone(&next_conn_id),
     );
     bt_deps.paste_semaphore = Arc::clone(&paste_semaphore);
-    let bt_handle = tokio::spawn(run_bluetooth_server(bt_deps));
+    let (bt_shutdown_tx, bt_shutdown_rx) = tokio::sync::watch::channel(false);
+    let bt_handle = tokio::spawn(run_bluetooth_server(bt_deps, bt_shutdown_rx));
 
     let host_ips = get_all_host_ips();
     let mut tls_acceptor = None;
@@ -136,9 +232,8 @@ async fn main() {
 
     if udp_enabled {
         for addr in &bind_addrs {
-            let bind_spec = format!("{addr}:{port}");
-            match UdpSocket::bind(&bind_spec).await {
-                Ok(udp_sock) => {
+            match bind_udp_socket(addr, port) {
+                Ok((udp_sock, bind_spec)) => {
                     udp_bound = true;
                     println!(
                         "[SilentInput] UDP low-latency mouse channel listening on {bind_spec}"
@@ -151,7 +246,7 @@ async fn main() {
                 }
                 Err(err) => {
                     eprintln!(
-                        "[SilentInput] Warning: Failed to bind UDP mouse socket on {bind_spec}: {err}"
+                        "[SilentInput] Warning: Failed to bind UDP mouse socket on {addr}:{port}: {err}"
                     );
                 }
             }
@@ -175,9 +270,8 @@ async fn main() {
 
     let mut accept_handles = Vec::new();
     for addr in &bind_addrs {
-        let bind_spec = format!("{addr}:{port}");
-        match TcpListener::bind(&bind_spec).await {
-            Ok(listener) => {
+        match bind_tcp_listener(addr, port) {
+            Ok((listener, bind_spec)) => {
                 let proto = if tls_acceptor.is_some() {
                     "WSS (TLS)"
                 } else {
@@ -191,7 +285,22 @@ async fn main() {
                 )));
             }
             Err(err) => {
-                eprintln!("[SilentInput] Warning: Failed to bind to {bind_spec}: {err}");
+                eprintln!("[SilentInput] Warning: Failed to bind to {addr}:{port}: {err}");
+            }
+        }
+        if addr == "127.0.0.1" {
+            if let Ok((listener_v6, bind_spec_v6)) = bind_tcp_listener("::1", port) {
+                let proto = if tls_acceptor.is_some() {
+                    "WSS (TLS)"
+                } else {
+                    "WS"
+                };
+                println!("[SilentInput] Server listening on {bind_spec_v6} ({proto})");
+                accept_handles.push(tokio::spawn(run_ws_listener(
+                    listener_v6,
+                    tls_acceptor.clone(),
+                    ws_deps.clone(),
+                )));
             }
         }
     }
@@ -221,6 +330,8 @@ async fn main() {
     }
 
     println!("\n[SilentInput] Shutting down daemon...");
+    let _ = bt_shutdown_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_millis(500), bt_handle).await;
     for handle in accept_handles {
         handle.abort();
     }
@@ -229,7 +340,6 @@ async fn main() {
     }
     uinput_handle.abort();
     adb_handle.abort();
-    bt_handle.abort();
     cleanup_pid(&paths);
 }
 
@@ -476,6 +586,11 @@ mod tests {
             .await;
             assert!(!res.authenticated);
             assert_eq!(res.should_close, idx == 4);
+            if idx == 4 {
+                let fifth_json: Value =
+                    serde_json::from_str(res.reply.as_deref().unwrap()).unwrap();
+                assert!(fifth_json["message"].as_str().unwrap().contains("Too many"));
+            }
         }
         let locked_msg = format!(r#"{{"type":"auth","token":"{valid_token}"}}"#);
         let locked_res = process_message(

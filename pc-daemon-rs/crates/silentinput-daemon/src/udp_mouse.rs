@@ -24,9 +24,10 @@ pub const FLAG_FEC_PREV2: u16 = 0x0004;
 pub const HEADER_LEN: usize = 20;
 pub const GCM_TAG_LEN: usize = 16;
 pub const MAX_UDP_PACKET_LEN: usize = 128;
-const UDP_PACER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(6);
-const UDP_SMOOTHER_DRAIN_RATIO: f64 = 0.60;
+const UDP_PACER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+const UDP_SMOOTHER_DRAIN_RATIO: f64 = 0.78;
 const UDP_SMOOTHER_SNAP_THRESHOLD: i32 = 4;
+const UDP_BURST_SMOOTH_THRESHOLD: i32 = 40;
 
 #[derive(Default)]
 struct UdpMoveSmoother {
@@ -543,9 +544,20 @@ pub async fn run_udp_mouse_server(
                                     frame_dy = frame_dy.saturating_add(f.dy);
                                 }
                                 if frame_dx != 0 || frame_dy != 0 {
-                                    smoother.push(frame_dx, frame_dy);
-                                    if let Some((sx, sy)) = smoother.take_step(tokio::time::Instant::now()) {
-                                        emit_rel_move(&*input, sx, sy);
+                                    let is_burst = frames.len() > 1
+                                        || smoother.has_pending()
+                                        || frame_dx.abs().max(frame_dy.abs())
+                                            > UDP_BURST_SMOOTH_THRESHOLD;
+                                    if !is_burst {
+                                        // Pass normal single frames directly to kernel uinput with zero pacing jitter.
+                                        emit_rel_move(&*input, frame_dx, frame_dy);
+                                    } else {
+                                        smoother.push(frame_dx, frame_dy);
+                                        if let Some((sx, sy)) =
+                                            smoother.take_step(tokio::time::Instant::now())
+                                        {
+                                            emit_rel_move(&*input, sx, sy);
+                                        }
                                     }
                                 }
                             }
@@ -570,27 +582,7 @@ pub async fn run_udp_mouse_server(
 }
 
 pub fn encode_base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as usize;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[(triple >> 18) & 0x3f] as char);
-        out.push(TABLE[(triple >> 12) & 0x3f] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(triple >> 6) & 0x3f] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[triple & 0x3f] as char
-        } else {
-            '='
-        });
-    }
-    out
+    silentinput_core::config::encode_base64_std(bytes)
 }
 
 #[cfg(test)]
@@ -959,14 +951,152 @@ mod tests {
 
         // 4. Rapid reversal cancels stale backlog cleanly
         smoother.push(20, 0);
-        assert_eq!(smoother.take_step(cur), Some((12, 0))); // 8 remaining
-        smoother.push(-14, 0); // net backlog = -6
+        assert_eq!(smoother.take_step(cur), Some((16, 0))); // 4 remaining
+        smoother.push(-14, 0); // net backlog = -10
         assert!(smoother.take_step(cur + std::time::Duration::from_millis(1)).is_none());
-        assert_eq!(smoother.take_step(cur + UDP_PACER_INTERVAL), Some((-4, 0)));
+        assert_eq!(smoother.take_step(cur + UDP_PACER_INTERVAL), Some((-8, 0)));
         assert_eq!(
             smoother.take_step(cur + UDP_PACER_INTERVAL * 2),
             Some((-2, 0))
         );
         assert!(!smoother.has_pending());
+    }
+
+    #[tokio::test]
+    async fn run_udp_mouse_server_end_to_end_probe_move_fec_and_wheel() {
+        let registry = UdpSessionRegistry::new(53318, true);
+        let input = Arc::new(TestUdpInput {
+            ready: AtomicBool::new(true),
+            ..Default::default()
+        });
+        let creds = registry.create_session("127.0.0.1").unwrap();
+        let key_bytes = decode_base64_for_test(&creds.key_b64);
+        let client_key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key_bytes).unwrap());
+
+        let srv_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let srv_addr = srv_sock.local_addr().unwrap();
+        let srv_handle = tokio::spawn(run_udp_mouse_server(
+            srv_sock,
+            Arc::clone(&registry),
+            Arc::clone(&input) as Arc<dyn InputController>,
+        ));
+
+        let client_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client_sock.connect(srv_addr).await.unwrap();
+
+        // 1. Probe -> PROBE_ACK
+        let probe = seal_udp_packet(
+            &client_key,
+            PKT_PROBE,
+            creds.session_id,
+            DIR_CLIENT_TO_SERVER,
+            1,
+            &0xCAFEBABEu32.to_be_bytes(),
+        )
+        .unwrap();
+        client_sock.send(&probe).await.unwrap();
+        let mut ack_buf = [0u8; 128];
+        let ack_len = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client_sock.recv(&mut ack_buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(ack_buf[3], PKT_PROBE_ACK);
+        let ack_seq = u64::from_be_bytes(ack_buf[12..20].try_into().unwrap());
+        let mut ack_ct = ack_buf[HEADER_LEN..ack_len].to_vec();
+        let ack_pt = client_key
+            .open_in_place(
+                make_nonce(DIR_SERVER_TO_CLIENT, ack_seq),
+                Aad::from(&ack_buf[..HEADER_LEN]),
+                &mut ack_ct,
+            )
+            .unwrap();
+        assert_eq!(ack_pt, &0xCAFEBABEu32.to_be_bytes());
+
+        let encode_frame = |dx: i16, dy: i16, wheel: i16, flags: u16| -> [u8; 8] {
+            let mut b = [0u8; 8];
+            b[0..2].copy_from_slice(&dx.to_be_bytes());
+            b[2..4].copy_from_slice(&dy.to_be_bytes());
+            b[4..6].copy_from_slice(&wheel.to_be_bytes());
+            b[6..8].copy_from_slice(&flags.to_be_bytes());
+            b
+        };
+
+        // 2. Normal single move frame emits immediately without pacer splitting
+        let pkt2 = seal_udp_packet(
+            &client_key,
+            PKT_MOUSE_MOVE,
+            creds.session_id,
+            DIR_CLIENT_TO_SERVER,
+            2,
+            &encode_frame(14, -9, 0, 0),
+        )
+        .unwrap();
+        client_sock.send(&pkt2).await.unwrap();
+
+        // 3. Drop seq=3, send seq=4 carrying FEC prev1 (seq=3) + hi-res wheel
+        let mut pt4 = Vec::with_capacity(16);
+        pt4.extend_from_slice(&encode_frame(6, 2, 120, FLAG_FEC_PREV1 | FLAG_HI_RES_WHEEL));
+        pt4.extend_from_slice(&encode_frame(4, 3, 0, 0));
+        let pkt4 = seal_udp_packet(
+            &client_key,
+            PKT_MOUSE_MOVE,
+            creds.session_id,
+            DIR_CLIENT_TO_SERVER,
+            4,
+            &pt4,
+        )
+        .unwrap();
+        client_sock.send(&pkt4).await.unwrap();
+
+        // 4. Replay pkt2 -> must be ignored
+        client_sock.send(&pkt2).await.unwrap();
+
+        // Wait for async server to emit events (with smoother drain completing if burst)
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            let total_dx: i32 = input
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .flatten()
+                .filter(|(t, c, _)| *t == EventType::RELATIVE.0 && *c == RelativeAxisType::REL_X.0)
+                .map(|(_, _, v)| *v)
+                .sum();
+            let has_wheel = input.events.lock().unwrap().iter().flatten().any(|(t, c, v)| {
+                *t == EventType::RELATIVE.0 && *c == RelativeAxisType::REL_WHEEL.0 && *v == 1
+            });
+            if total_dx == 24 && has_wheel {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for UDP events: {:?}",
+                *input.events.lock().unwrap()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let all_events = input.events.lock().unwrap().clone();
+        // First emission is unsplit immediate move (14, -9)
+        assert_eq!(
+            all_events[0],
+            vec![
+                (EventType::RELATIVE.0, RelativeAxisType::REL_X.0, 14),
+                (EventType::RELATIVE.0, RelativeAxisType::REL_Y.0, -9),
+            ]
+        );
+        let total_dy: i32 = all_events
+            .iter()
+            .flatten()
+            .filter(|(t, c, _)| *t == EventType::RELATIVE.0 && *c == RelativeAxisType::REL_Y.0)
+            .map(|(_, _, v)| *v)
+            .sum();
+        assert_eq!(total_dy, -4); // -9 + 3 + 2
+
+        srv_handle.abort();
     }
 }

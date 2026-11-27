@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::env;
+use std::ffi::CStr;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
@@ -53,7 +54,18 @@ pub fn resolve_binary(bin_name: &str) -> PathBuf {
     PathBuf::from(bin_name)
 }
 
-/// Enumerate non-loopback IPv4 interface addresses via `libc::getifaddrs` (zero subprocesses).
+fn is_virtual_interface_name(name: &str) -> bool {
+    const VIRTUAL_PREFIXES: &[&str] = &[
+        "docker", "br-", "virbr", "veth", "cni", "flannel", "podman", "lxcbr", "vboxnet", "vmnet",
+    ];
+    let lower = name.to_ascii_lowercase();
+    VIRTUAL_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+}
+
+/// Enumerate active non-loopback IPv4 interface addresses via `libc::getifaddrs` (zero subprocesses),
+/// prioritizing non-virtual interfaces ahead of container/VM bridges.
 pub fn get_all_host_ips() -> Vec<String> {
     let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: `getifaddrs` initializes `head` on success (return value 0).
@@ -62,14 +74,15 @@ pub fn get_all_host_ips() -> Vec<String> {
     }
     let _guard = IfAddrsGuard(head);
 
-    let mut results = Vec::new();
+    let mut preferred = Vec::new();
+    let mut fallback = Vec::new();
     let mut cur = head;
     while !cur.is_null() {
         // SAFETY: `cur` walks a valid null-terminated linked list owned by `_guard`.
         let ifa = unsafe { &*cur };
         cur = ifa.ifa_next;
 
-        if ifa.ifa_addr.is_null() {
+        if ifa.ifa_addr.is_null() || (ifa.ifa_flags & (libc::IFF_UP as u32)) == 0 {
             continue;
         }
         // SAFETY: `ifa_addr` is non-null; reading `sa_family` checks address family before casting.
@@ -80,15 +93,31 @@ pub fn get_all_host_ips() -> Vec<String> {
         // SAFETY: `sa_family == AF_INET` guarantees `ifa_addr` points to a `sockaddr_in`.
         let sin = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr_in>() };
         let ipv4 = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-        if ipv4.is_loopback() || ipv4.is_unspecified() {
+        if ipv4.is_loopback() || ipv4.is_unspecified() || ipv4.is_link_local() {
             continue;
         }
         let ip_s = ipv4.to_string();
-        if !results.contains(&ip_s) {
-            results.push(ip_s);
+        let is_virtual = if !ifa.ifa_name.is_null() {
+            // SAFETY: `ifa_name` is a valid C string for the lifetime of `_guard`.
+            let name = unsafe { CStr::from_ptr(ifa.ifa_name) }.to_string_lossy();
+            is_virtual_interface_name(&name)
+        } else {
+            false
+        };
+        let target = if is_virtual {
+            &mut fallback
+        } else {
+            &mut preferred
+        };
+        if !target.contains(&ip_s) {
+            target.push(ip_s);
         }
     }
-    results
+    if !preferred.is_empty() {
+        preferred
+    } else {
+        fallback
+    }
 }
 
 /// Encode an ADB host/service command with its 4-hex-digit length prefix.

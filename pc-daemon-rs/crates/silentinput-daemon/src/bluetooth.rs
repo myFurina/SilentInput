@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::pin::Pin;
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -345,12 +344,17 @@ async fn check_bluez_device_paired(conn: &Connection, device_path: &str) -> bool
     }
 }
 
-async fn register_bluez_profile(conn: &Connection, reason: &str) -> bool {
+async fn register_bluez_profile(
+    conn: &Connection,
+    reason: &str,
+    allow_already_exists: bool,
+) -> bool {
     let mut opts: HashMap<&str, Value<'_>> = HashMap::new();
     opts.insert("Name", Value::from("SilentInput Bluetooth"));
     opts.insert("Role", Value::from("server"));
     opts.insert("Channel", Value::from(1u16));
     opts.insert("Service", Value::from(SPP_UUID));
+    opts.insert("RequireAuthentication", Value::from(true));
     opts.insert("AutoConnect", Value::from(true));
 
     let profile_path = ObjectPath::from_str_unchecked(PROFILE_PATH);
@@ -371,7 +375,14 @@ async fn register_bluez_profile(conn: &Connection, reason: &str) -> bool {
         Err(zbus::Error::MethodError(name, _, _))
             if name.as_str().contains("AlreadyExists") =>
         {
-            true
+            if allow_already_exists {
+                true
+            } else {
+                eprintln!(
+                    "[SilentInput] Warning: BlueZ RegisterProfile ({reason}) returned AlreadyExists (another daemon/service may still own SPP profile)"
+                );
+                false
+            }
         }
         Err(err) => {
             eprintln!("[SilentInput] BlueZ RegisterProfile ({reason}) failed: {err}");
@@ -380,15 +391,32 @@ async fn register_bluez_profile(conn: &Connection, reason: &str) -> bool {
     }
 }
 
-pub async fn run_bluetooth_server(deps: BtServerDeps) {
-    match setup_bluez_dbus_profile(deps.clone()).await {
+async fn unregister_bluez_profile(conn: &Connection) {
+    let profile_path = ObjectPath::from_str_unchecked(PROFILE_PATH);
+    let _ = conn
+        .call_method(
+            Some("org.bluez"),
+            "/org/bluez",
+            Some("org.bluez.ProfileManager1"),
+            "UnregisterProfile",
+            &(profile_path,),
+        )
+        .await;
+}
+
+pub async fn run_bluetooth_server(
+    deps: BtServerDeps,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    match setup_bluez_dbus_profile(deps).await {
         Ok(conn) => {
             // Keep D-Bus Connection & exported object alive and listen for BlueZ/adapter/sleep recovery
-            run_dbus_lifecycle_watchers(conn).await;
+            run_dbus_lifecycle_watchers(conn, shutdown_rx).await;
         }
         Err(err) => {
-            println!("[SilentInput] Info: BlueZ D-Bus profile registration skipped: {err}");
-            run_direct_rfcomm_fallback(deps);
+            println!(
+                "[SilentInput] Info: BlueZ D-Bus profile unavailable ({err}); Bluetooth SPP disabled."
+            );
         }
     }
 }
@@ -410,21 +438,34 @@ async fn setup_bluez_dbus_profile(deps: BtServerDeps) -> Result<Connection, Stri
     Ok(conn)
 }
 
-async fn run_dbus_lifecycle_watchers(conn: Connection) {
-    let registered = Arc::new(AtomicBool::new(register_bluez_profile(&conn, "startup").await));
+async fn run_dbus_lifecycle_watchers(
+    conn: Connection,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    let registered = Arc::new(AtomicBool::new(
+        register_bluez_profile(&conn, "startup", false).await,
+    ));
 
-    // Retry boot registration up to 20 times every 3s if bluetoothd comes up late
+    // Retry boot registration up to 20 times every 3s if bluetoothd comes up late or an old instance is releasing
     if !registered.load(Ordering::Acquire) {
         let conn_retry = conn.clone();
         let reg_retry = Arc::clone(&registered);
+        let mut retry_shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
             for attempt in 1..=20 {
-                tokio::time::sleep(Duration::from_secs(3)).await;
-                if reg_retry.load(Ordering::Acquire) {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                    _ = retry_shutdown.changed() => {
+                        if *retry_shutdown.borrow() {
+                            break;
+                        }
+                    }
+                }
+                if *retry_shutdown.borrow() || reg_retry.load(Ordering::Acquire) {
                     break;
                 }
                 let reason = format!("boot-retry-{attempt}");
-                if register_bluez_profile(&conn_retry, &reason).await {
+                if register_bluez_profile(&conn_retry, &reason, false).await {
                     reg_retry.store(true, Ordering::Release);
                     break;
                 }
@@ -469,7 +510,15 @@ async fn run_dbus_lifecycle_watchers(conn: Connection) {
     };
 
     loop {
+        if *shutdown_rx.borrow() {
+            break;
+        }
         tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
             Some(Ok(msg)) = async {
                 match owner_stream.as_mut() {
                     Some(s) => s.next().await,
@@ -480,7 +529,7 @@ async fn run_dbus_lifecycle_watchers(conn: Connection) {
                     if !new_owner.is_empty() {
                         registered.store(false, Ordering::Release);
                         tokio::time::sleep(Duration::from_millis(500)).await;
-                        if register_bluez_profile(&conn, "bluez-restarted").await {
+                        if register_bluez_profile(&conn, "bluez-restarted", false).await {
                             registered.store(true, Ordering::Release);
                         }
                     }
@@ -501,7 +550,8 @@ async fn run_dbus_lifecycle_watchers(conn: Connection) {
                         .unwrap_or(false);
                     if powered {
                         tokio::time::sleep(Duration::from_millis(300)).await;
-                        if register_bluez_profile(&conn, "adapter-powered-on").await {
+                        let already = registered.load(Ordering::Acquire);
+                        if register_bluez_profile(&conn, "adapter-powered-on", already).await {
                             registered.store(true, Ordering::Release);
                         }
                     }
@@ -516,7 +566,8 @@ async fn run_dbus_lifecycle_watchers(conn: Connection) {
                 if let Ok(sleeping) = msg.body().deserialize::<bool>() {
                     if !sleeping {
                         tokio::time::sleep(Duration::from_millis(1500)).await;
-                        if register_bluez_profile(&conn, "system-resume").await {
+                        let already = registered.load(Ordering::Acquire);
+                        if register_bluez_profile(&conn, "system-resume", already).await {
                             registered.store(true, Ordering::Release);
                         }
                     }
@@ -527,114 +578,151 @@ async fn run_dbus_lifecycle_watchers(conn: Connection) {
             }
         }
     }
-}
 
-fn is_bt_mac_paired(mac_addr: &str) -> bool {
-    if mac_addr.is_empty() {
-        return false;
+    if registered.load(Ordering::Acquire) {
+        unregister_bluez_profile(&conn).await;
     }
-    let Ok(out) = Command::new("bluetoothctl")
-        .args(["info", mac_addr])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return false;
-    };
-    String::from_utf8_lossy(&out.stdout).lines().any(|line| {
-        let trimmed = line.trim().to_ascii_lowercase();
-        trimmed.starts_with("paired:") && trimmed.contains("yes")
-    })
-}
-
-fn run_direct_rfcomm_fallback(deps: BtServerDeps) {
-    const BTPROTO_RFCOMM: libc::c_int = 3;
-
-    #[repr(C)]
-    struct SockAddrRc {
-        rc_family: libc::sa_family_t,
-        rc_bdaddr: [u8; 6],
-        rc_channel: u8,
-    }
-
-    let handle = tokio::runtime::Handle::current();
-    std::thread::spawn(move || loop {
-        unsafe {
-            let server_fd =
-                libc::socket(libc::AF_BLUETOOTH, libc::SOCK_STREAM, BTPROTO_RFCOMM);
-            if server_fd < 0 {
-                std::thread::sleep(Duration::from_secs(3));
-                continue;
-            }
-
-            let addr = SockAddrRc {
-                rc_family: libc::AF_BLUETOOTH as libc::sa_family_t,
-                rc_bdaddr: [0u8; 6],
-                rc_channel: 1,
-            };
-
-            if libc::bind(
-                server_fd,
-                &addr as *const SockAddrRc as *const libc::sockaddr,
-                std::mem::size_of::<SockAddrRc>() as libc::socklen_t,
-            ) < 0
-                || libc::listen(server_fd, 4) < 0
-            {
-                libc::close(server_fd);
-                std::thread::sleep(Duration::from_secs(3));
-                continue;
-            }
-
-            println!("[SilentInput] Direct RFCOMM fallback socket listening on Channel 1");
-            loop {
-                let mut client_addr = SockAddrRc {
-                    rc_family: 0,
-                    rc_bdaddr: [0u8; 6],
-                    rc_channel: 0,
-                };
-                let mut len = std::mem::size_of::<SockAddrRc>() as libc::socklen_t;
-                let client_fd = libc::accept(
-                    server_fd,
-                    &mut client_addr as *mut SockAddrRc as *mut libc::sockaddr,
-                    &mut len,
-                );
-                if client_fd < 0 {
-                    break;
-                }
-
-                let owned = OwnedFd::from_raw_fd(client_fd);
-                let mac = format!(
-                    "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                    client_addr.rc_bdaddr[5],
-                    client_addr.rc_bdaddr[4],
-                    client_addr.rc_bdaddr[3],
-                    client_addr.rc_bdaddr[2],
-                    client_addr.rc_bdaddr[1],
-                    client_addr.rc_bdaddr[0]
-                );
-                if !is_bt_mac_paired(&mac) {
-                    println!("[SilentInput] Rejected unpaired direct RFCOMM device: {mac}");
-                    drop(owned);
-                    continue;
-                }
-                let deps_c = deps.clone();
-                handle.spawn(async move {
-                    if let Ok(stream) = AsyncRfcommStream::from_owned_fd(owned) {
-                        handle_bt_stream(stream, format!("RFCOMM({mac})"), deps_c, None).await;
-                    }
-                });
-            }
-            libc::close(server_fd);
-        }
-        std::thread::sleep(Duration::from_secs(3));
-    });
 }
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::{AsyncWriteExt, BufReader};
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, Mutex};
 
-    use super::read_bounded_line;
+    use evdev::{EventType, InputEvent, Key};
+    use serde_json::Value;
+    use silentinput_core::config::SilentInputConfig;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    use super::{handle_bt_stream, read_bounded_line, BtServerDeps};
+    use crate::auth_limiter::AuthRateLimiter;
+    use crate::input::{BoxFuture, InputController};
+
+    #[derive(Default)]
+    struct MockBtInput {
+        events: Mutex<Vec<Vec<(u16, u16, i32)>>>,
+        held: Mutex<HashMap<u16, HashSet<u64>>>,
+    }
+
+    impl InputController for MockBtInput {
+        fn ensure_ready(&self, _log_failure: bool) -> bool {
+            true
+        }
+        fn has_uinput_device(&self) -> bool {
+            true
+        }
+        fn is_graphical_session(&self) -> bool {
+            true
+        }
+        fn emit_key_combination<'a>(&'a self, _combo: &'a str) -> BoxFuture<'a, ()> {
+            Box::pin(async {})
+        }
+        fn type_text<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, bool> {
+            Box::pin(async { true })
+        }
+        fn copy_clipboard<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, bool> {
+            Box::pin(async { true })
+        }
+        fn emit_uinput_events(&self, events: &[InputEvent]) -> bool {
+            let tuples = events
+                .iter()
+                .map(|ev| (ev.event_type().0, ev.code(), ev.value()))
+                .collect();
+            self.events.lock().unwrap().push(tuples);
+            true
+        }
+        fn track_mouse_button(&self, btn_code: u16, pressed: bool, conn_id: u64) {
+            let mut held = self.held.lock().unwrap();
+            if pressed {
+                held.entry(btn_code).or_default().insert(conn_id);
+            } else if let Some(set) = held.get_mut(&btn_code) {
+                set.remove(&conn_id);
+                if set.is_empty() {
+                    held.remove(&btn_code);
+                }
+            }
+        }
+        fn release_connection_buttons(&self, conn_id: u64) {
+            let mut to_release = Vec::new();
+            {
+                let mut held = self.held.lock().unwrap();
+                let keys: Vec<u16> = held.keys().copied().collect();
+                for code in keys {
+                    if let Some(set) = held.get_mut(&code) {
+                        if set.remove(&conn_id) && set.is_empty() {
+                            held.remove(&code);
+                            to_release.push(code);
+                        }
+                    }
+                }
+            }
+            if !to_release.is_empty() {
+                let evs: Vec<InputEvent> = to_release
+                    .into_iter()
+                    .map(|c| InputEvent::new(EventType::KEY, c, 0))
+                    .collect();
+                self.emit_uinput_events(&evs);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_bt_stream_processes_frames_and_releases_held_button_on_eof() {
+        let input = Arc::new(MockBtInput::default());
+        let deps = BtServerDeps::new(
+            Arc::new(AuthRateLimiter::new()),
+            Arc::clone(&input) as Arc<dyn InputController>,
+            Arc::new(tokio::sync::Mutex::new(())),
+            Arc::new(AtomicU64::new(1)),
+        );
+        let cfg = SilentInputConfig::default();
+
+        let (server_stream, client_stream) = tokio::io::duplex(4096);
+        let srv_task = tokio::spawn(handle_bt_stream(
+            server_stream,
+            "Bluetooth(test)".to_string(),
+            deps,
+            Some(cfg),
+        ));
+
+        let (client_read, mut client_write) = tokio::io::split(client_stream);
+        let mut lines = BufReader::new(client_read).lines();
+
+        client_write
+            .write_all(b"{\"type\":\"get_status\"}\n")
+            .await
+            .unwrap();
+        let status_line = lines.next_line().await.unwrap().unwrap();
+        let status_json: Value = serde_json::from_str(&status_line).unwrap();
+        assert_eq!(status_json["type"], "status");
+        assert_eq!(status_json["hi_res_wheel"], true);
+
+        client_write
+            .write_all(b"{\"type\":\"ping\",\"t\":777}\n")
+            .await
+            .unwrap();
+        let pong_line = lines.next_line().await.unwrap().unwrap();
+        let pong_json: Value = serde_json::from_str(&pong_line).unwrap();
+        assert_eq!(pong_json["type"], "pong");
+        assert_eq!(pong_json["t"], 777);
+
+        client_write
+            .write_all(b"{\"type\":\"mouse\",\"action\":\"down_left\"}\n")
+            .await
+            .unwrap();
+        client_write.shutdown().await.unwrap();
+        drop(client_write);
+        drop(lines);
+
+        srv_task.await.unwrap();
+
+        assert!(input.held.lock().unwrap().is_empty());
+        let evs = input.events.lock().unwrap();
+        assert_eq!(evs.len(), 2);
+        assert_eq!(evs[0], vec![(EventType::KEY.0, Key::BTN_LEFT.code(), 1)]);
+        assert_eq!(evs[1], vec![(EventType::KEY.0, Key::BTN_LEFT.code(), 0)]);
+    }
 
     #[tokio::test]
     async fn read_bounded_line_rejects_oversized_and_tolerates_invalid_utf8() {

@@ -41,7 +41,7 @@ pub fn default_whitelist() -> Vec<String> {
         "127.0.0.1".to_string(),
         "10.*".to_string(),
         "192.168.*".to_string(),
-        "100.*".to_string(),
+        "100.64.0.0/10".to_string(),
         "172.16.0.0/12".to_string(),
     ]
 }
@@ -110,6 +110,30 @@ pub fn unix_timestamp_secs() -> f64 {
 
 pub const TOKEN_PREFIX: &str = "si_";
 pub const STRONG_TOKEN_LEN: usize = 46;
+
+pub fn encode_base64_std(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[(triple >> 18) & 0x3f] as char);
+        out.push(TABLE[(triple >> 12) & 0x3f] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(triple >> 6) & 0x3f] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[triple & 0x3f] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
 
 pub fn encode_base64url_nopad(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -302,7 +326,7 @@ fn save_config_unlocked(paths: &SilentInputPaths, config: &SilentInputConfig) ->
     atomic_write_private_file(&paths.config_dir, &paths.config_file(), serialized.as_bytes())
 }
 
-pub fn load_config_at(paths: &SilentInputPaths) -> SilentInputConfig {
+fn load_config_inner_at(paths: &SilentInputPaths, rotate_token: bool) -> SilentInputConfig {
     let _guard = config_mutex().lock().unwrap_or_else(|e| e.into_inner());
     let _ = ensure_config_dir_at(paths);
 
@@ -332,8 +356,18 @@ pub fn load_config_at(paths: &SilentInputPaths) -> SilentInputConfig {
         }
     }
 
-    check_and_rotate_token_locked(paths, &mut config);
+    if rotate_token {
+        check_and_rotate_token_locked(paths, &mut config);
+    }
     config
+}
+
+pub fn load_config_at(paths: &SilentInputPaths) -> SilentInputConfig {
+    load_config_inner_at(paths, true)
+}
+
+pub fn load_config_without_rotation_at(paths: &SilentInputPaths) -> SilentInputConfig {
+    load_config_inner_at(paths, false)
 }
 
 pub fn save_config_at(paths: &SilentInputPaths, config: &SilentInputConfig) -> std::io::Result<()> {
@@ -359,6 +393,10 @@ pub fn set_tls_enabled_at(paths: &SilentInputPaths, enable: bool) -> bool {
 
 pub fn load_config() -> SilentInputConfig {
     load_config_at(&SilentInputPaths::system())
+}
+
+pub fn load_config_without_rotation() -> SilentInputConfig {
+    load_config_without_rotation_at(&SilentInputPaths::system())
 }
 
 pub fn save_config(config: &SilentInputConfig) -> std::io::Result<()> {

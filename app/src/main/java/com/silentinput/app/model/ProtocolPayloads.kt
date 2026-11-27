@@ -92,33 +92,10 @@ object ProtocolPayloads {
         }
     }
 
-    internal fun quoteJson(raw: String): String {
-        val sb = StringBuilder(raw.length + 2)
-        sb.append('"')
-        for (ch in raw) {
-            when (ch) {
-                '"' -> sb.append("\\\"")
-                '\\' -> sb.append("\\\\")
-                '\b' -> sb.append("\\b")
-                '\u000C' -> sb.append("\\f")
-                '\n' -> sb.append("\\n")
-                '\r' -> sb.append("\\r")
-                '\t' -> sb.append("\\t")
-                else -> {
-                    if (ch.code < 0x20) {
-                        sb.append("\\u%04x".format(ch.code))
-                    } else {
-                        sb.append(ch)
-                    }
-                }
-            }
-        }
-        sb.append('"')
-        return sb.toString()
-    }
+    internal fun quoteJson(raw: String): String = SimpleJson.quoteString(raw)
 
     fun parseServerMessage(rawJson: String): ServerMessage? {
-        val obj = SimpleJsonObjectParser(rawJson).parseRootObject() ?: return null
+        val obj = SimpleJson.parseObject(rawJson) ?: return null
         return when (obj["type"] as? String) {
             "pong" -> {
                 val t = (obj["t"] as? Number)?.toLong()
@@ -159,7 +136,42 @@ object ProtocolPayloads {
     }
 }
 
-private class SimpleJsonObjectParser(private val input: String) {
+internal object SimpleJson {
+    fun quoteString(raw: String): String {
+        val sb = StringBuilder(raw.length + 2)
+        sb.append('"')
+        for (ch in raw) {
+            when (ch) {
+                '"' -> sb.append("\\\"")
+                '\\' -> sb.append("\\\\")
+                '\b' -> sb.append("\\b")
+                '\u000C' -> sb.append("\\f")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                else -> {
+                    if (ch.code < 0x20) {
+                        sb.append("\\u%04x".format(ch.code))
+                    } else {
+                        sb.append(ch)
+                    }
+                }
+            }
+        }
+        sb.append('"')
+        return sb.toString()
+    }
+
+    fun parseObject(raw: String): Map<String, Any?>? {
+        return SimpleJsonParser(raw).parseRootObject()
+    }
+
+    fun parseObjectArray(raw: String): List<Map<String, Any?>>? {
+        return SimpleJsonParser(raw).parseRootObjectArray()
+    }
+}
+
+private class SimpleJsonParser(private val input: String) {
     private var pos = 0
 
     fun parseRootObject(): Map<String, Any?>? {
@@ -168,6 +180,25 @@ private class SimpleJsonObjectParser(private val input: String) {
         val obj = parseObject() ?: return null
         skipWhitespace()
         return if (pos == input.length) obj else null
+    }
+
+    fun parseRootObjectArray(): List<Map<String, Any?>>? {
+        skipWhitespace()
+        if (pos >= input.length || input[pos] != '[') return null
+        val arr = try {
+            parseArray()
+        } catch (_: Exception) {
+            return null
+        }
+        skipWhitespace()
+        if (pos != input.length) return null
+        val out = ArrayList<Map<String, Any?>>(arr.size)
+        for (item in arr) {
+            @Suppress("UNCHECKED_CAST")
+            val obj = item as? Map<String, Any?> ?: return null
+            out.add(obj)
+        }
+        return out
     }
 
     private fun parseValue(): Any? {

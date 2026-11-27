@@ -54,8 +54,10 @@ class PairingQrParserTest {
     }
 
     @Test
-    fun `formatEndpoint omits default port and keeps custom port`() {
+    fun `formatEndpoint omits default port keeps custom port and brackets bare ipv6`() {
         assertEquals("192.168.1.20", PairingQrParser.formatEndpoint("192.168.1.20", 53318))
         assertEquals("192.168.1.20:54000", PairingQrParser.formatEndpoint("192.168.1.20", 54000))
+        assertEquals("fd7a:115c:a1e0::1", PairingQrParser.formatEndpoint("fd7a:115c:a1e0::1", 53318))
+        assertEquals("[fd7a:115c:a1e0::1]:54000", PairingQrParser.formatEndpoint("fd7a:115c:a1e0::1", 54000))
     }
 }

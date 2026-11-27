@@ -26,14 +26,14 @@ mod tests {
     use crate::certs::{self, ensure_certificates_at};
     use crate::pairing;
     use crate::config::{
-        constant_time_token_eq, generate_pairing_token, generate_token_hex,
-        get_token_status_text_at, is_valid_strong_token, load_config_at, STRONG_TOKEN_LEN,
-        save_config_at, SilentInputConfig,
+        constant_time_token_eq, encode_base64_std, generate_pairing_token, generate_token_hex,
+        get_token_status_text_at, is_valid_strong_token, load_config_at,
+        load_config_without_rotation_at, save_config_at, SilentInputConfig, STRONG_TOKEN_LEN,
     };
     use crate::keymap::{
         all_registered_keys, build_key_map, build_wtype_args, build_xdotool_args,
-        clipboard_candidates_for_session, detect_x11_display_in, has_graphical_session_in,
-        lookup_char, normalize_line_endings, resolve_key_combination,
+        clipboard_candidates_for_session, detect_x11_display_in, find_xauthority_in,
+        has_graphical_session_in, lookup_char, normalize_line_endings, resolve_key_combination,
     };
     use crate::logs::{
         parse_short_unix_timestamp_secs, read_log_tail_from_file, should_prefer_log_file,
@@ -176,6 +176,12 @@ mod tests {
         assert!(is_ip_allowed("172.31.255.254", &whitelist_cfg));
         assert!(!is_ip_allowed("172.15.255.255", &whitelist_cfg));
         assert!(!is_ip_allowed("172.32.0.1", &whitelist_cfg));
+
+        // Tailscale CGNAT range 100.64.0.0/10 only (do not allow arbitrary public 100.x)
+        assert!(is_ip_allowed("100.64.0.1", &whitelist_cfg));
+        assert!(is_ip_allowed("100.127.255.254", &whitelist_cfg));
+        assert!(!is_ip_allowed("100.1.2.3", &whitelist_cfg));
+        assert!(!is_ip_allowed("100.128.0.1", &whitelist_cfg));
     }
 
     #[test]
@@ -228,6 +234,33 @@ mod tests {
         assert_eq!(matrix.len(), width * width);
         assert!(pairing::render_qr_terminal(&uri).is_some());
         let _ = fs::remove_dir_all(&tmp);
+
+        assert_eq!(encode_base64_std(b""), "");
+        assert_eq!(encode_base64_std(b"f"), "Zg==");
+        assert_eq!(encode_base64_std(b"fo"), "Zm8=");
+        assert_eq!(encode_base64_std(b"foo"), "Zm9v");
+        assert_eq!(encode_base64_std(b"foobar"), "Zm9vYmFy");
+
+        // Pairing payload auto-generates certificates when TLS is enabled on fresh config dir
+        let fresh_tmp = tempfile_dir("pairing_fresh_certs");
+        let fresh_paths = SilentInputPaths::from_dir(&fresh_tmp);
+        let tls_cfg = SilentInputConfig {
+            enable_tls: true,
+            auth_token: strong.clone(),
+            ..SilentInputConfig::default()
+        };
+        let auto_payload = pairing::build_pairing_payload_at(&fresh_paths, &tls_cfg);
+        assert!(auto_payload.fingerprint.is_some());
+        assert!(fresh_paths.cert_file().exists());
+        let _ = fs::remove_dir_all(&fresh_tmp);
+
+        // load_config_without_rotation_at does not write config.json on empty dir
+        let ro_tmp = tempfile_dir("ro_cfg");
+        let ro_paths = SilentInputPaths::from_dir(&ro_tmp);
+        let ro_cfg = load_config_without_rotation_at(&ro_paths);
+        assert!(ro_cfg.auth_token.is_empty());
+        assert!(!ro_paths.config_file().exists());
+        let _ = fs::remove_dir_all(&ro_tmp);
 
         let def_cfg = SilentInputConfig::default();
         assert_eq!(def_cfg.token_expire_mode, "1h");
@@ -296,6 +329,20 @@ mod tests {
         );
         assert!(build_xdotool_args("--help").is_none());
         assert!(build_xdotool_args("ctrl+-M").is_none());
+        assert_eq!(build_wtype_args("super"), Some(vec!["-k".into(), "Super_L".into()]));
+        assert_eq!(
+            build_xdotool_args("ctrl"),
+            Some(vec!["key".into(), "Control_L".into()])
+        );
+
+        // Xauthority fallback discovery for GDM / SDDM / GNOME XWayland
+        let xauth_tmp = tempfile_dir("xauth");
+        let xauth_rt = xauth_tmp.join("runtime");
+        fs::create_dir_all(xauth_rt.join("gdm")).unwrap();
+        let gdm_file = xauth_rt.join("gdm").join("Xauthority");
+        fs::write(&gdm_file, b"xauth").unwrap();
+        assert_eq!(find_xauthority_in(&xauth_rt, None), Some(gdm_file));
+        let _ = fs::remove_dir_all(&xauth_tmp);
 
         // CRLF normalization
         assert_eq!(normalize_line_endings("a\r\nb\rc\n"), "a\nb\nc\n");

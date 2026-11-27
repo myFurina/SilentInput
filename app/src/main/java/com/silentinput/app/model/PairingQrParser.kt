@@ -103,7 +103,11 @@ object PairingQrParser {
 
     fun formatEndpoint(ip: String, port: Int, defaultPort: Int = 53318): String {
         val cleanIp = ip.trim()
-        return if (port == defaultPort) cleanIp else "$cleanIp:$port"
+        return when {
+            port == defaultPort -> cleanIp
+            cleanIp.contains(':') && !cleanIp.startsWith("[") -> "[$cleanIp]:$port"
+            else -> "$cleanIp:$port"
+        }
     }
 
     private fun isLoopbackLiteral(rawHost: String): Boolean {

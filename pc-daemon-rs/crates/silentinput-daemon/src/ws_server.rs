@@ -1,14 +1,17 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use silentinput_core::acl::{is_ip_allowed, is_localhost_ip, normalize_ip_str};
-use silentinput_core::config::{load_config, SilentInputConfig};
+use silentinput_core::config::{
+    load_config, load_config_without_rotation, SilentInputConfig,
+};
 use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
@@ -27,6 +30,7 @@ use crate::udp_mouse::UdpSessionRegistry;
 
 pub const MAX_WS_FRAME_SIZE: usize = 1024 * 1024; // 1 MiB
 pub const MAX_WS_CONNECTIONS: usize = 32;
+pub const MAX_WS_CONNECTIONS_PER_IP: usize = 8;
 pub const WS_AUTH_DEADLINE_SECS: u64 = 15;
 pub const WS_IDLE_TIMEOUT_SECS: u64 = 45;
 
@@ -53,6 +57,40 @@ impl ActiveWsGuard {
 impl Drop for ActiveWsGuard {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct PerIpConnGuard {
+    map: Arc<Mutex<HashMap<String, usize>>>,
+    ip: String,
+}
+
+impl PerIpConnGuard {
+    fn try_acquire(map: Arc<Mutex<HashMap<String, usize>>>, ip: &str, max: usize) -> Option<Self> {
+        let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+        let count = guard.get(ip).copied().unwrap_or(0);
+        if count >= max {
+            return None;
+        }
+        guard.insert(ip.to_string(), count + 1);
+        drop(guard);
+        Some(Self {
+            map,
+            ip: ip.to_string(),
+        })
+    }
+}
+
+impl Drop for PerIpConnGuard {
+    fn drop(&mut self) {
+        let mut guard = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = guard.get_mut(&self.ip) {
+            if *count <= 1 {
+                guard.remove(&self.ip);
+            } else {
+                *count -= 1;
+            }
+        }
     }
 }
 
@@ -125,7 +163,9 @@ pub struct WsServerDeps {
     pub paste_semaphore: Arc<tokio::sync::Semaphore>,
     pub next_conn_id: Arc<AtomicU64>,
     pub active_ws: Arc<AtomicUsize>,
+    pub active_per_ip: Arc<Mutex<HashMap<String, usize>>>,
     pub max_ws_connections: usize,
+    pub max_connections_per_ip: usize,
     pub auth_deadline: Duration,
     pub idle_timeout: Duration,
     pub udp_registry: Arc<UdpSessionRegistry>,
@@ -145,7 +185,9 @@ impl WsServerDeps {
             paste_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_PASTE_TASKS)),
             next_conn_id,
             active_ws: Arc::new(AtomicUsize::new(0)),
+            active_per_ip: Arc::new(Mutex::new(HashMap::new())),
             max_ws_connections: MAX_WS_CONNECTIONS,
+            max_connections_per_ip: MAX_WS_CONNECTIONS_PER_IP,
             auth_deadline: Duration::from_secs(WS_AUTH_DEADLINE_SECS),
             idle_timeout: Duration::from_secs(WS_IDLE_TIMEOUT_SECS),
             udp_registry: UdpSessionRegistry::disabled(),
@@ -214,19 +256,30 @@ pub async fn handle_tcp_client(
         return;
     };
 
+    let peer_ip = normalize_ip_str(&peer_addr.ip().to_string());
+    let Some(_per_ip_guard) = PerIpConnGuard::try_acquire(
+        Arc::clone(&deps.active_per_ip),
+        &peer_ip,
+        deps.max_connections_per_ip,
+    ) else {
+        println!(
+            "[SilentInput] Access REJECTED for {peer_addr}: too many connections from peer IP."
+        );
+        return;
+    };
+
     let _ = stream.set_nodelay(true);
     enable_tcp_keepalive(&stream);
-    let peer_ip = normalize_ip_str(&peer_addr.ip().to_string());
 
-    let config = match config_override {
-        Some(cfg) => cfg,
-        None => match tokio::task::spawn_blocking(load_config).await {
+    let initial_cfg = match config_override.as_ref() {
+        Some(cfg) => cfg.clone(),
+        None => match tokio::task::spawn_blocking(load_config_without_rotation).await {
             Ok(cfg) => cfg,
             Err(_) => return,
         },
     };
 
-    if !is_ip_allowed(&peer_ip, &config) {
+    if !is_ip_allowed(&peer_ip, &initial_cfg) {
         println!(
             "[SilentInput] Access REJECTED for {peer_addr}: blocked by custom IP policy."
         );
@@ -240,6 +293,14 @@ pub async fn handle_tcp_client(
         );
         return;
     }
+
+    let config = match config_override {
+        Some(cfg) => cfg,
+        None => match tokio::task::spawn_blocking(load_config).await {
+            Ok(cfg) => cfg,
+            Err(_) => return,
+        },
+    };
 
     let initial_authenticated = if is_localhost && config.allow_usb_unauthenticated {
         println!("[SilentInput] New connection from {peer_addr} (Local/USB: Auto-authenticated)");

@@ -637,6 +637,19 @@ class ConnectionStatusAndNetworkClientTest {
                 serverIp = ""
             )
         )
+
+        // Suppressed auto-reconnect (e.g. TOFU mismatch or auth lockout) stays idle on resume
+        assertFalse(
+            ConnectionStatusFormatter.shouldAutoReconnectNetwork(
+                mode = "lan",
+                targetMode = "lan",
+                isNetConnected = false,
+                isNetConnecting = false,
+                manualDisconnected = false,
+                serverIp = "192.168.1.10",
+                suppressAutoReconnect = true
+            )
+        )
     }
 
     @Test

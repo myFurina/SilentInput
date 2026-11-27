@@ -19,7 +19,7 @@ object SavedLanHostsStore {
     fun fromJson(rawJson: String?): List<SavedLanHost> {
         if (rawJson.isNullOrBlank()) return emptyList()
         return try {
-            val objects = parseJsonObjectArray(rawJson) ?: return emptyList()
+            val objects = SimpleJson.parseObjectArray(rawJson) ?: return emptyList()
             val seenEndpoints = HashSet<String>()
             val out = ArrayList<SavedLanHost>(objects.size)
             for (obj in objects) {
@@ -58,10 +58,10 @@ object SavedLanHostsStore {
         for ((idx, host) in list.withIndex()) {
             if (idx > 0) sb.append(',')
             sb.append('{')
-            sb.append("\"id\":").append(jsonString(host.id)).append(',')
-            sb.append("\"name\":").append(jsonString(host.name)).append(',')
-            sb.append("\"endpoint\":").append(jsonString(host.endpoint)).append(',')
-            sb.append("\"token\":").append(jsonString(host.token)).append(',')
+            sb.append("\"id\":").append(SimpleJson.quoteString(host.id)).append(',')
+            sb.append("\"name\":").append(SimpleJson.quoteString(host.name)).append(',')
+            sb.append("\"endpoint\":").append(SimpleJson.quoteString(host.endpoint)).append(',')
+            sb.append("\"token\":").append(SimpleJson.quoteString(host.token)).append(',')
             sb.append("\"tlsEnabled\":").append(host.tlsEnabled).append(',')
             sb.append("\"isFavorite\":").append(host.isFavorite).append(',')
             sb.append("\"lastConnectedAtMs\":").append(host.lastConnectedAtMs)
@@ -173,154 +173,5 @@ object SavedLanHostsStore {
                 lastConnectedAtMs = 0L
             )
         )
-    }
-
-    private fun jsonString(value: String): String {
-        val sb = StringBuilder(value.length + 2)
-        sb.append('"')
-        for (ch in value) {
-            when (ch) {
-                '\\' -> sb.append("\\\\")
-                '"' -> sb.append("\\\"")
-                '\n' -> sb.append("\\n")
-                '\r' -> sb.append("\\r")
-                '\t' -> sb.append("\\t")
-                '\b' -> sb.append("\\b")
-                else -> {
-                    if (ch.code < 0x20) {
-                        sb.append(String.format(Locale.ROOT, "\\u%04x", ch.code))
-                    } else {
-                        sb.append(ch)
-                    }
-                }
-            }
-        }
-        sb.append('"')
-        return sb.toString()
-    }
-
-    private fun parseJsonObjectArray(raw: String): List<Map<String, Any?>>? {
-        val parser = MiniJsonParser(raw)
-        parser.skipWs()
-        if (!parser.consume('[')) return null
-        val list = ArrayList<Map<String, Any?>>()
-        parser.skipWs()
-        if (parser.consume(']')) return list
-        while (true) {
-            parser.skipWs()
-            val obj = parser.parseObject() ?: return null
-            list.add(obj)
-            parser.skipWs()
-            when {
-                parser.consume(',') -> continue
-                parser.consume(']') -> return list
-                else -> return null
-            }
-        }
-    }
-
-    private class MiniJsonParser(private val src: String) {
-        private var pos = 0
-
-        fun skipWs() {
-            while (pos < src.length && src[pos].isWhitespace()) pos++
-        }
-
-        fun consume(ch: Char): Boolean {
-            if (pos < src.length && src[pos] == ch) {
-                pos++
-                return true
-            }
-            return false
-        }
-
-        fun parseObject(): Map<String, Any?>? {
-            if (!consume('{')) return null
-            val map = LinkedHashMap<String, Any?>()
-            skipWs()
-            if (consume('}')) return map
-            while (true) {
-                skipWs()
-                val key = parseString() ?: return null
-                skipWs()
-                if (!consume(':')) return null
-                skipWs()
-                val value = parseValue()
-                map[key] = value
-                skipWs()
-                when {
-                    consume(',') -> continue
-                    consume('}') -> return map
-                    else -> return null
-                }
-            }
-        }
-
-        private fun parseValue(): Any? {
-            if (pos >= src.length) return null
-            return when (src[pos]) {
-                '"' -> parseString()
-                't' -> if (src.startsWith("true", pos)) {
-                    pos += 4
-                    true
-                } else {
-                    null
-                }
-                'f' -> if (src.startsWith("false", pos)) {
-                    pos += 5
-                    false
-                } else {
-                    null
-                }
-                'n' -> if (src.startsWith("null", pos)) {
-                    pos += 4
-                    null
-                } else {
-                    null
-                }
-                '-', in '0'..'9' -> parseNumber()
-                else -> null
-            }
-        }
-
-        private fun parseString(): String? {
-            if (!consume('"')) return null
-            val sb = StringBuilder()
-            while (pos < src.length) {
-                val c = src[pos++]
-                when (c) {
-                    '"' -> return sb.toString()
-                    '\\' -> {
-                        if (pos >= src.length) return null
-                        when (val esc = src[pos++]) {
-                            '"' -> sb.append('"')
-                            '\\' -> sb.append('\\')
-                            '/' -> sb.append('/')
-                            'b' -> sb.append('\b')
-                            'f' -> sb.append('\u000C')
-                            'n' -> sb.append('\n')
-                            'r' -> sb.append('\r')
-                            't' -> sb.append('\t')
-                            'u' -> {
-                                if (pos + 4 > src.length) return null
-                                val code = src.substring(pos, pos + 4).toIntOrNull(16) ?: return null
-                                sb.append(code.toChar())
-                                pos += 4
-                            }
-                            else -> sb.append(esc)
-                        }
-                    }
-                    else -> sb.append(c)
-                }
-            }
-            return null
-        }
-
-        private fun parseNumber(): Long? {
-            val start = pos
-            if (pos < src.length && src[pos] == '-') pos++
-            while (pos < src.length && src[pos] in '0'..'9') pos++
-            return src.substring(start, pos).toLongOrNull()
-        }
     }
 }
