@@ -201,6 +201,12 @@ fn cmd_status() {
         }
     );
     println!(" USB 模式:    物理线连接免密");
+    let restore_str = if config.restore_clipboard {
+        "🟢 已开启 (文本粘贴后自动还原原剪贴板)"
+    } else {
+        "⚪ 已关闭"
+    };
+    println!(" 剪贴板还原:  {restore_str}");
     println!(" 蓝牙信道:    📶 RFCOMM Channel 1 (SPP 串口)");
     let autostart_str = if is_autostart_enabled() {
         "🟢 已开启"

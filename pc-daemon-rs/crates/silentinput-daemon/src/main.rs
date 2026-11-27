@@ -365,7 +365,7 @@ mod tests {
         AuthRateLimiter, AUTH_FAILURE_MAX_ENTRIES, AUTH_FAILURE_TTL_SECS, AUTH_LOCKOUT_SECS,
         AUTH_MAX_FAILURES,
     };
-    use crate::input::{BoxFuture, InputController, MouseHoldGuard};
+    use crate::input::{BoxFuture, InputController, MouseHoldGuard, TouchContact};
     use crate::protocol::{process_message, safe_round_int, SessionContext};
     use crate::udp_mouse::UdpSessionRegistry;
     use crate::ws_server::{handle_tcp_client, WsServerDeps};
@@ -374,10 +374,14 @@ mod tests {
     struct MockInput {
         graphical: AtomicBool,
         clipboard_ok: AtomicBool,
-        slow_type_ms: AtomicU64,
+        initial_clipboard: Mutex<Option<String>>,
         typed_texts: Mutex<Vec<String>>,
+        copied_texts: Mutex<Vec<String>>,
+        slow_type_ms: AtomicU64,
         combos: Mutex<Vec<String>>,
         uinput_events: Mutex<Vec<Vec<(u16, u16, i32)>>>,
+        touchpad_frames: Mutex<Vec<(u64, Vec<TouchContact>)>>,
+        touchpad_releases: Mutex<Vec<u64>>,
         held: Mutex<std::collections::HashMap<u16, std::collections::HashSet<u64>>>,
     }
 
@@ -399,6 +403,22 @@ mod tests {
 
         fn has_uinput_device(&self) -> bool {
             true
+        }
+
+        fn has_touchpad_device(&self) -> bool {
+            true
+        }
+
+        fn apply_touchpad_frame(&self, conn_id: u64, contacts: &[TouchContact]) -> bool {
+            self.touchpad_frames
+                .lock()
+                .unwrap()
+                .push((conn_id, contacts.to_vec()));
+            true
+        }
+
+        fn release_connection_touchpad(&self, conn_id: u64) {
+            self.touchpad_releases.lock().unwrap().push(conn_id);
         }
 
         fn is_graphical_session(&self) -> bool {
@@ -427,8 +447,19 @@ mod tests {
             })
         }
 
-        fn copy_clipboard<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, bool> {
-            Box::pin(async move { self.clipboard_ok.load(Ordering::Acquire) })
+        fn copy_clipboard<'a>(&'a self, text: &'a str) -> BoxFuture<'a, bool> {
+            let owned = text.to_string();
+            Box::pin(async move {
+                if !self.clipboard_ok.load(Ordering::Acquire) {
+                    return false;
+                }
+                self.copied_texts.lock().unwrap().push(owned);
+                true
+            })
+        }
+
+        fn read_clipboard<'a>(&'a self) -> BoxFuture<'a, Option<String>> {
+            Box::pin(async move { self.initial_clipboard.lock().unwrap().clone() })
         }
 
         fn emit_uinput_events(&self, events: &[InputEvent]) -> bool {
@@ -540,6 +571,7 @@ mod tests {
                 paste_lock: Arc::clone(&paste_lock),
                 paste_semaphore: Arc::clone(&paste_sem),
                 udp_registry: None,
+                udp_session_id: None,
             },
         )
         .await;
@@ -560,6 +592,7 @@ mod tests {
                 paste_lock: Arc::clone(&paste_lock),
                 paste_semaphore: Arc::clone(&paste_sem),
                 udp_registry: None,
+                udp_session_id: None,
             },
         )
         .await;
@@ -581,6 +614,7 @@ mod tests {
                     paste_lock: Arc::clone(&paste_lock),
                     paste_semaphore: Arc::clone(&paste_sem),
                     udp_registry: None,
+                    udp_session_id: None,
                 },
             )
             .await;
@@ -605,6 +639,7 @@ mod tests {
                 paste_lock: Arc::clone(&paste_lock),
                 paste_semaphore: Arc::clone(&paste_sem),
                 udp_registry: None,
+                udp_session_id: None,
             },
         )
         .await;
@@ -630,6 +665,7 @@ mod tests {
                 paste_lock: Arc::clone(&paste_lock),
                 paste_semaphore: Arc::clone(&paste_sem),
                 udp_registry: None,
+                udp_session_id: None,
             },
         )
         .await;
@@ -651,6 +687,7 @@ mod tests {
                 paste_lock,
                 paste_semaphore: tiny_sem,
                 udp_registry: None,
+                udp_session_id: None,
             },
         )
         .await;
@@ -807,6 +844,7 @@ mod tests {
                     paste_lock,
                     paste_semaphore: paste_sem,
                     udp_registry: None,
+                    udp_session_id: None,
                 },
             )
             .await;
@@ -850,6 +888,7 @@ mod tests {
                 paste_lock: Arc::clone(&paste_lock),
                 paste_semaphore: Arc::clone(&paste_sem),
                 udp_registry: Some(&registry),
+                udp_session_id: None,
             },
         )
         .await;
@@ -871,6 +910,7 @@ mod tests {
                 paste_lock: Arc::clone(&paste_lock),
                 paste_semaphore: Arc::clone(&paste_sem),
                 udp_registry: Some(&registry),
+                udp_session_id: None,
             },
         )
         .await;
@@ -903,10 +943,282 @@ mod tests {
                 paste_lock,
                 paste_semaphore: paste_sem,
                 udp_registry: Some(&registry),
+                udp_session_id: None,
             },
         )
         .await;
         assert!(!weak_auth.authenticated);
         assert_eq!(registry.session_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn protocol_hwheel_restore_clipboard_and_udp_click_barrier() {
+        use evdev::RelativeAxisType;
+        let input = MockInput::new();
+        let paste_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let paste_sem = Arc::new(tokio::sync::Semaphore::new(
+            crate::protocol::MAX_PENDING_PASTE_TASKS,
+        ));
+        let limiter = AuthRateLimiter::new();
+        let registry = UdpSessionRegistry::new(53318, true);
+        let valid_token = silentinput_core::config::generate_pairing_token();
+        let cfg = SilentInputConfig {
+            auth_token: valid_token.clone(),
+            access_control_mode: "whitelist".to_string(),
+            restore_clipboard: true,
+            ..SilentInputConfig::default()
+        };
+
+        // 1. Horizontal hi-res & legacy wheel via JSON
+        process_message(
+            r#"{"type":"mouse","action":"scroll","hwheel_hi":120}"#,
+            SessionContext {
+                authenticated: true,
+                config: &cfg,
+                peer_ip: "127.0.0.1",
+                conn_id: 10,
+                auth_limiter: &limiter,
+                input: Arc::clone(&input) as Arc<dyn InputController>,
+                paste_lock: Arc::clone(&paste_lock),
+                paste_semaphore: Arc::clone(&paste_sem),
+                udp_registry: None,
+                udp_session_id: None,
+            },
+        )
+        .await;
+        process_message(
+            r#"{"type":"mouse","action":"scroll","hwheel":-1}"#,
+            SessionContext {
+                authenticated: true,
+                config: &cfg,
+                peer_ip: "127.0.0.1",
+                conn_id: 10,
+                auth_limiter: &limiter,
+                input: Arc::clone(&input) as Arc<dyn InputController>,
+                paste_lock: Arc::clone(&paste_lock),
+                paste_semaphore: Arc::clone(&paste_sem),
+                udp_registry: None,
+                udp_session_id: None,
+            },
+        )
+        .await;
+        {
+            let evs = input.uinput_events.lock().unwrap();
+            assert_eq!(
+                evs[0],
+                vec![
+                    (EventType::RELATIVE.0, RelativeAxisType::REL_HWHEEL_HI_RES.0, 120),
+                    (EventType::RELATIVE.0, RelativeAxisType::REL_HWHEEL.0, 1),
+                ]
+            );
+            assert_eq!(
+                evs[1],
+                vec![
+                    (EventType::RELATIVE.0, RelativeAxisType::REL_HWHEEL.0, -1),
+                    (EventType::RELATIVE.0, RelativeAxisType::REL_HWHEEL_HI_RES.0, -120),
+                ]
+            );
+        }
+
+        // 2. Restore clipboard: enabled restores original content after paste
+        *input.initial_clipboard.lock().unwrap() = Some("previous clip".to_string());
+        process_message(
+            r#"{"type":"paste","content":"new text","mode":"gui"}"#,
+            SessionContext {
+                authenticated: true,
+                config: &cfg,
+                peer_ip: "127.0.0.1",
+                conn_id: 10,
+                auth_limiter: &limiter,
+                input: Arc::clone(&input) as Arc<dyn InputController>,
+                paste_lock: Arc::clone(&paste_lock),
+                paste_semaphore: Arc::clone(&paste_sem),
+                udp_registry: None,
+                udp_session_id: None,
+            },
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        assert_eq!(
+            input.copied_texts.lock().unwrap().as_slice(),
+            &["new text".to_string(), "previous clip".to_string()]
+        );
+
+        // 3. When restore_clipboard=false, previous clipboard is not restored
+        input.copied_texts.lock().unwrap().clear();
+        let no_restore_cfg = SilentInputConfig {
+            restore_clipboard: false,
+            ..cfg.clone()
+        };
+        process_message(
+            r#"{"type":"paste","content":"overwrite only","mode":"gui"}"#,
+            SessionContext {
+                authenticated: true,
+                config: &no_restore_cfg,
+                peer_ip: "127.0.0.1",
+                conn_id: 10,
+                auth_limiter: &limiter,
+                input: Arc::clone(&input) as Arc<dyn InputController>,
+                paste_lock: Arc::clone(&paste_lock),
+                paste_semaphore: Arc::clone(&paste_sem),
+                udp_registry: None,
+                udp_session_id: None,
+            },
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert_eq!(
+            input.copied_texts.lock().unwrap().as_slice(),
+            &["overwrite only".to_string()]
+        );
+
+        // 4. udp_seq barrier waits until UDP session advances applied_seq before emitting click_left
+        let creds = registry.create_session("127.0.0.1", 11).unwrap();
+        let key_bytes = silentinput_core::certs::format_short_fingerprint("00").len(); // keep imports minimal
+        let _ = key_bytes;
+        // Inject seq=5 asynchronously after 8ms via UDP server
+        let srv_sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let srv_addr = srv_sock.local_addr().unwrap();
+        let srv_handle = tokio::spawn(crate::udp_mouse::run_udp_mouse_server(
+            srv_sock,
+            Arc::clone(&registry),
+            Arc::clone(&input) as Arc<dyn InputController>,
+        ));
+        let cli_sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        cli_sock.connect(srv_addr).await.unwrap();
+        // Decode creds.key_b64 manually with standard base64 for sealing seq=5
+        let b64_dec = |s: &str| -> Vec<u8> {
+            let val = |c: u8| match c {
+                b'A'..=b'Z' => (c - b'A') as u32,
+                b'a'..=b'z' => (c - b'a' + 26) as u32,
+                b'0'..=b'9' => (c - b'0' + 52) as u32,
+                b'+' => 62,
+                _ => 63,
+            };
+            let mut out = Vec::new();
+            for ch in s.as_bytes().chunks(4) {
+                let t = (val(ch[0]) << 18) | (val(ch[1]) << 12) | (val(ch[2]) << 6) | val(ch[3]);
+                out.push(((t >> 16) & 0xff) as u8);
+                if ch[2] != b'=' { out.push(((t >> 8) & 0xff) as u8); }
+                if ch[3] != b'=' { out.push((t & 0xff) as u8); }
+            }
+            out
+        };
+        let key = ring::aead::LessSafeKey::new(
+            ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, &b64_dec(&creds.key_b64)).unwrap(),
+        );
+        let mut frame = Vec::with_capacity(8);
+        frame.extend_from_slice(&12i16.to_be_bytes());
+        frame.extend_from_slice(&(-5i16).to_be_bytes());
+        frame.extend_from_slice(&0i16.to_be_bytes());
+        frame.extend_from_slice(&0u16.to_be_bytes());
+        let pkt = crate::udp_mouse::seal_udp_packet(
+            &key,
+            crate::udp_mouse::PKT_MOUSE_MOVE,
+            creds.session_id,
+            crate::udp_mouse::DIR_CLIENT_TO_SERVER,
+            5,
+            &frame,
+        )
+        .unwrap();
+        input.uinput_events.lock().unwrap().clear();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(8)).await;
+            let _ = cli_sock.send(&pkt).await;
+        });
+        process_message(
+            r#"{"type":"mouse","action":"click_left","udp_seq":5}"#,
+            SessionContext {
+                authenticated: true,
+                config: &cfg,
+                peer_ip: "192.168.1.77",
+                conn_id: 11,
+                auth_limiter: &limiter,
+                input: Arc::clone(&input) as Arc<dyn InputController>,
+                paste_lock,
+                paste_semaphore: paste_sem,
+                udp_registry: Some(&registry),
+                udp_session_id: Some(creds.session_id),
+            },
+        )
+        .await;
+        let ordered_evs = input.uinput_events.lock().unwrap().clone();
+        // Relative move from UDP seq=5 must be emitted BEFORE BTN_LEFT down!
+        assert!(ordered_evs.len() >= 3);
+        assert_eq!(ordered_evs[0][0].0, EventType::RELATIVE.0);
+        assert_eq!(ordered_evs[1], vec![(EventType::KEY.0, Key::BTN_LEFT.code(), 1)]);
+        srv_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn status_and_json_touchpad_dispatch_report_native_touchpad() {
+        let input = MockInput::new();
+        let paste_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let paste_sem = Arc::new(tokio::sync::Semaphore::new(
+            crate::protocol::MAX_PENDING_PASTE_TASKS,
+        ));
+        let limiter = AuthRateLimiter::new();
+        let cfg = SilentInputConfig::default();
+
+        let status_out = process_message(
+            r#"{"type":"get_status"}"#,
+            SessionContext {
+                authenticated: true,
+                config: &cfg,
+                peer_ip: "127.0.0.1",
+                conn_id: 21,
+                auth_limiter: &limiter,
+                input: Arc::clone(&input) as Arc<dyn InputController>,
+                paste_lock: Arc::clone(&paste_lock),
+                paste_semaphore: Arc::clone(&paste_sem),
+                udp_registry: None,
+                udp_session_id: None,
+            },
+        )
+        .await;
+        let status_json: Value =
+            serde_json::from_str(status_out.reply.as_deref().unwrap()).unwrap();
+        assert_eq!(status_json["native_touchpad"], true);
+        assert_eq!(status_json["touchpad_max"], 16000);
+
+        {
+            let _guard = MouseHoldGuard::new(Arc::clone(&input) as Arc<dyn InputController>, 21);
+            process_message(
+                r#"{"type":"touchpad","c":[[0,4000,4100],[1,4400,4200]]}"#,
+                SessionContext {
+                    authenticated: true,
+                    config: &cfg,
+                    peer_ip: "127.0.0.1",
+                    conn_id: 21,
+                    auth_limiter: &limiter,
+                    input: Arc::clone(&input) as Arc<dyn InputController>,
+                    paste_lock,
+                    paste_semaphore: paste_sem,
+                    udp_registry: None,
+                    udp_session_id: None,
+                },
+            )
+            .await;
+        }
+
+        let frames = input.touchpad_frames.lock().unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, 21);
+        assert_eq!(
+            frames[0].1,
+            vec![
+                TouchContact {
+                    pointer_id: 0,
+                    x: 4000,
+                    y: 4100
+                },
+                TouchContact {
+                    pointer_id: 1,
+                    x: 4400,
+                    y: 4200
+                },
+            ]
+        );
+        assert_eq!(*input.touchpad_releases.lock().unwrap(), vec![21]);
     }
 }

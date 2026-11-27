@@ -15,13 +15,18 @@ import com.silentinput.app.model.ImeSwitchShortcut
 import com.silentinput.app.model.InputTransport
 import com.silentinput.app.model.MouseAction
 import com.silentinput.app.model.MouseButton
+import com.silentinput.app.model.NativeTouchpadMapper
 import com.silentinput.app.model.PairingQrPayload
 import com.silentinput.app.model.PairingQrParser
 import com.silentinput.app.model.PairingTokenValidator
 import com.silentinput.app.model.QuickEditKeys
 import com.silentinput.app.model.SavedLanHost
 import com.silentinput.app.model.SavedLanHostsStore
+import com.silentinput.app.model.AndroidKeystoreCipher
+import com.silentinput.app.model.SecureCredentialStore
 import com.silentinput.app.model.SendTargetMode
+import com.silentinput.app.model.TouchpadContact
+import com.silentinput.app.model.TrackpadTuningConfig
 import com.silentinput.app.network.NetworkClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -69,8 +74,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_TEXT_INLINE_TRACKPAD = "text_inline_trackpad"
         private const val KEY_TEXT_SHOW_SNIPPETS = "text_show_snippets"
         private const val KEY_NATURAL_SCROLLING = "natural_scrolling"
+        private const val KEY_USE_NATIVE_TOUCHPAD = "use_native_touchpad"
         private const val KEY_IME_SWITCH_SHORTCUT = "ime_switch_shortcut"
         private const val KEY_TRACKPAD_SENSITIVITY = "trackpad_sensitivity"
+        private const val KEY_TRACKPAD_TUNING_JSON = "trackpad_tuning_json"
         private const val KEY_SEND_TARGET_MODE = "send_target_mode"
         private const val KEY_CLEAR_ON_SEND = "clear_on_send"
         private const val KEY_ENTER_ON_SEND = "enter_on_send"
@@ -83,6 +90,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefs: SharedPreferences =
         application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val credentialStore = SecureCredentialStore(AndroidKeystoreCipher())
 
     private val _appLanguage = MutableStateFlow(
         AppLanguage.fromPref(prefs.getString(KEY_APP_LANGUAGE, AppLanguage.SYSTEM.prefValue))
@@ -107,8 +115,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     val lanIp: StateFlow<String> = _lanIp.asStateFlow()
 
+    private val initialRawAuthToken: String = credentialStore.readString(prefs, KEY_AUTH_TOKEN, "")
     private val _savedAuthToken = MutableStateFlow(
-        PairingTokenValidator.sanitizeMigratedToken(prefs.getString(KEY_AUTH_TOKEN, ""))
+        PairingTokenValidator.sanitizeMigratedToken(initialRawAuthToken)
     )
     val savedAuthToken: StateFlow<String> = _savedAuthToken.asStateFlow()
 
@@ -162,6 +171,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isNaturalScrolling = MutableStateFlow(prefs.getBoolean(KEY_NATURAL_SCROLLING, true))
     val isNaturalScrolling: StateFlow<Boolean> = _isNaturalScrolling.asStateFlow()
 
+    private val _useNativeTouchpad = MutableStateFlow(prefs.getBoolean(KEY_USE_NATIVE_TOUCHPAD, true))
+    val useNativeTouchpad: StateFlow<Boolean> = _useNativeTouchpad.asStateFlow()
+
     private val _imeSwitchKey = MutableStateFlow(
         ImeSwitchShortcut.normalize(
             prefs.getString(KEY_IME_SWITCH_SHORTCUT, ImeSwitchShortcut.DEFAULT)
@@ -170,8 +182,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     val imeSwitchKey: StateFlow<String> = _imeSwitchKey.asStateFlow()
 
+    private val _trackpadTuning = MutableStateFlow(
+        TrackpadTuningConfig.fromJson(
+            raw = prefs.getString(KEY_TRACKPAD_TUNING_JSON, null),
+            legacySensitivity = if (prefs.contains(KEY_TRACKPAD_SENSITIVITY)) {
+                prefs.getFloat(KEY_TRACKPAD_SENSITIVITY, 0.6f)
+            } else {
+                null
+            }
+        )
+    )
+    val trackpadTuning: StateFlow<TrackpadTuningConfig> = _trackpadTuning.asStateFlow()
+
     private val _trackpadSensitivity = MutableStateFlow(
-        prefs.getFloat(KEY_TRACKPAD_SENSITIVITY, 0.6f).coerceIn(0.1f, 2.0f)
+        _trackpadTuning.value.toLegacySensitivity()
     )
     val trackpadSensitivity: StateFlow<Float> = _trackpadSensitivity.asStateFlow()
 
@@ -267,6 +291,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
+    val supportsNativeTouchpad: StateFlow<Boolean> = combine(
+        connectionMode,
+        isBtConnected,
+        btClient.supportsNativeTouchpad,
+        isNetReady,
+        networkClient.supportsNativeTouchpad
+    ) { mode, btConn, btSupports, netReady, netSupports ->
+        when {
+            mode == "bluetooth" && btConn -> btSupports
+            mode != "bluetooth" && netReady -> netSupports
+            else -> false
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val isNativeTouchpadActive: StateFlow<Boolean> = combine(
+        useNativeTouchpad,
+        supportsNativeTouchpad
+    ) { useNative, supported ->
+        useNative && supported
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val nativeTouchpadMaxCoord: StateFlow<Int> = combine(
+        connectionMode,
+        isBtConnected,
+        btClient.nativeTouchpadMaxCoord,
+        isNetReady,
+        networkClient.nativeTouchpadMaxCoord
+    ) { mode, btConn, btMax, netReady, netMax ->
+        when {
+            mode == "bluetooth" && btConn -> btMax
+            mode != "bluetooth" && netReady -> netMax
+            else -> NativeTouchpadMapper.LEGACY_MAX_COORD
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, NativeTouchpadMapper.LEGACY_MAX_COORD)
+
     val daemonVersion: StateFlow<String?> = combine(
         connectionMode,
         isBtConnected,
@@ -282,8 +341,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     init {
-        val rawStoredToken = prefs.getString(KEY_AUTH_TOKEN, "").orEmpty()
-        if (rawStoredToken.isNotBlank() && _savedAuthToken.value.isEmpty()) {
+        if (initialRawAuthToken.isNotBlank() && _savedAuthToken.value.isEmpty()) {
             prefs.edit().putString(KEY_AUTH_TOKEN, "").apply()
         }
         networkClient.serverIp = _activeServerIp.value
@@ -488,8 +546,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         if (mode == ConnectionMode.LAN) {
             editor.putString(KEY_LAN_IP, serverIp)
-                .putString(KEY_AUTH_TOKEN, authToken)
                 .putBoolean(KEY_TLS_ENCRYPTION, tlsEnabled)
+            credentialStore.putString(editor, KEY_AUTH_TOKEN, authToken)
             _lanIp.value = serverIp
             _savedAuthToken.value = authToken
             _isTlsEnabled.value = tlsEnabled
@@ -624,7 +682,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun loadAndMigrateSavedLanHosts(): List<SavedLanHost> {
-        val existing = SavedLanHostsStore.fromJson(prefs.getString(KEY_SAVED_LAN_HOSTS, null))
+        val storedHostsJson = credentialStore.readString(prefs, KEY_SAVED_LAN_HOSTS, "")
+        val existing = SavedLanHostsStore.fromJson(storedHostsJson.ifBlank { null })
         if (existing.isNotEmpty()) {
             return existing
         }
@@ -632,11 +691,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             KEY_LAN_IP,
             prefs.getString(KEY_SERVER_IP, "")?.takeIf { it != "127.0.0.1" } ?: ""
         )
-        val legacyToken = prefs.getString(KEY_AUTH_TOKEN, "")
+        val legacyToken = credentialStore.readString(prefs, KEY_AUTH_TOKEN, "")
         val legacyTls = prefs.getBoolean(KEY_TLS_ENCRYPTION, true)
         val migrated = SavedLanHostsStore.migrateLegacyHost(existing, legacyIp, legacyToken, legacyTls)
         if (migrated.isNotEmpty()) {
-            prefs.edit().putString(KEY_SAVED_LAN_HOSTS, SavedLanHostsStore.toJson(migrated)).apply()
+            prefs.edit().apply {
+                credentialStore.putString(this, KEY_SAVED_LAN_HOSTS, SavedLanHostsStore.toJson(migrated))
+            }.apply()
         }
         return migrated
     }
@@ -644,7 +705,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun updateSavedLanHosts(hosts: List<SavedLanHost>) {
         val sorted = SavedLanHostsStore.sorted(hosts)
         _savedLanHosts.value = sorted
-        prefs.edit().putString(KEY_SAVED_LAN_HOSTS, SavedLanHostsStore.toJson(sorted)).apply()
+        prefs.edit().apply {
+            credentialStore.putString(this, KEY_SAVED_LAN_HOSTS, SavedLanHostsStore.toJson(sorted))
+        }.apply()
     }
 
     fun disconnectNetwork() {
@@ -741,8 +804,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         activeTransport()?.sendMouse(0f, 0f, action)
     }
 
-    fun sendMouseScroll(wheel: Float) {
-        activeTransport()?.sendMouse(0f, 0f, MouseAction.SCROLL.wireValue, wheel = wheel)
+    fun sendMouseScroll(wheel: Float, hwheel: Float = 0f) {
+        activeTransport()?.sendMouse(0f, 0f, MouseAction.SCROLL.wireValue, wheel = wheel, hwheel = hwheel)
+    }
+
+    fun sendTouchpadFrame(contacts: List<TouchpadContact>, isTransition: Boolean = false) {
+        activeTransport()?.sendTouchpadFrame(contacts, isTransition)
+    }
+
+    fun releaseTouchpad() {
+        if (isNativeTouchpadActive.value) {
+            sendTouchpadFrame(emptyList(), isTransition = true)
+        }
     }
 
     fun sendTextPaste(text: String) {
@@ -766,14 +839,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateTrackpadSensitivity(value: Float, persist: Boolean = true) {
         val clamped = value.coerceIn(0.1f, 2.0f)
-        _trackpadSensitivity.value = clamped
-        if (persist) {
-            prefs.edit().putFloat(KEY_TRACKPAD_SENSITIVITY, clamped).apply()
-        }
+        val updated = TrackpadTuningConfig.fromLegacySensitivity(clamped)
+            .let { migrated -> _trackpadTuning.value.copy(pointerSpeed = migrated.pointerSpeed).clamped() }
+        updateTrackpadTuning(updated, persist = persist)
     }
 
     fun commitTrackpadSensitivity() {
-        prefs.edit().putFloat(KEY_TRACKPAD_SENSITIVITY, _trackpadSensitivity.value).apply()
+        commitTrackpadTuning()
+    }
+
+    fun updateTrackpadTuning(config: TrackpadTuningConfig, persist: Boolean = true) {
+        val clamped = config.clamped()
+        _trackpadTuning.value = clamped
+        _trackpadSensitivity.value = clamped.toLegacySensitivity()
+        if (persist) {
+            prefs.edit()
+                .putString(KEY_TRACKPAD_TUNING_JSON, clamped.toJson())
+                .putFloat(KEY_TRACKPAD_SENSITIVITY, clamped.toLegacySensitivity())
+                .apply()
+        }
+    }
+
+    fun commitTrackpadTuning() {
+        val clamped = _trackpadTuning.value.clamped()
+        prefs.edit()
+            .putString(KEY_TRACKPAD_TUNING_JSON, clamped.toJson())
+            .putFloat(KEY_TRACKPAD_SENSITIVITY, clamped.toLegacySensitivity())
+            .apply()
+    }
+
+    fun resetTrackpadTuning() {
+        updateTrackpadTuning(TrackpadTuningConfig(), persist = true)
     }
 
     fun setSendTargetMode(mode: String) {
@@ -815,6 +911,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setNaturalScrolling(enabled: Boolean) {
         _isNaturalScrolling.value = enabled
         prefs.edit().putBoolean(KEY_NATURAL_SCROLLING, enabled).apply()
+    }
+
+    fun setUseNativeTouchpad(enabled: Boolean) {
+        _useNativeTouchpad.value = enabled
+        prefs.edit().putBoolean(KEY_USE_NATIVE_TOUCHPAD, enabled).apply()
     }
 
     fun setImeSwitchKey(rawShortcut: String) {

@@ -49,7 +49,7 @@ class UdpMouseCodecTest {
             expectedPktType = UdpMouseCodec.PKT_PROBE,
             packet = probeWire
         )
-        assertEquals(0x5A5A1234, ByteBuffer.wrap(openedProbe).order(ByteOrder.BIG_ENDIAN).int)
+        assertEquals(0x5A5A1234, ByteBuffer.wrap(openedProbe!!).order(ByteOrder.BIG_ENDIAN).int)
 
         // 2. MOUSE_MOVE payload roundtrip (44 bytes total)
         val movePt = UdpMouseCodec.encodeMovePayload(dx = 18, dy = -24, wheel = 1, flags = 0)
@@ -196,5 +196,135 @@ class UdpMouseCodecTest {
         assertEquals(2.toShort(), bb.short)
         assertEquals(0.toShort(), bb.short)
         assertEquals(0.toShort(), bb.short)
+    }
+
+    @Test
+    fun `sealMoveWithFecInto preserves FLAG_HWHEEL across current and FEC history frames`() {
+        val key = UdpMouseCodec.decodeAes256Key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")!!
+        val sessionId = 0x0102030405060708L
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val payloadScratch = ByteArray(UdpMouseCodec.MOVE_FEC_PAYLOAD_LEN)
+        val nonceScratch = ByteArray(UdpMouseCodec.NONCE_LEN)
+        val wireBuf = ByteArray(UdpMouseCodec.MOVE_FEC_WIRE_LEN)
+
+        val curFlags = UdpMouseCodec.FLAG_HI_RES_WHEEL or UdpMouseCodec.FLAG_HWHEEL
+        val prev1Flags = UdpMouseCodec.FLAG_HWHEEL
+        val prev2Flags = UdpMouseCodec.FLAG_HI_RES_WHEEL or UdpMouseCodec.FLAG_HWHEEL
+        val totalLen = UdpMouseCodec.sealMoveWithFecInto(
+            secretKey = key,
+            sessionId = sessionId,
+            dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+            seq = 12L,
+            dx = 0,
+            dy = 0,
+            wheel = -40,
+            flags = curFlags,
+            hasPrev1 = true,
+            prev1Dx = 0,
+            prev1Dy = 0,
+            prev1Wheel = 1,
+            prev1Flags = prev1Flags,
+            hasPrev2 = true,
+            prev2Dx = 0,
+            prev2Dy = 0,
+            prev2Wheel = 80,
+            prev2Flags = prev2Flags,
+            payloadScratch = payloadScratch,
+            nonceScratch = nonceScratch,
+            wireOut = wireBuf,
+            cipher = cipher
+        )
+
+        val opened = UdpMouseCodec.openPacket(
+            secretKey = key,
+            expectedSessionId = sessionId,
+            expectedDir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+            expectedPktType = UdpMouseCodec.PKT_MOUSE_MOVE,
+            packet = wireBuf,
+            length = totalLen,
+            cipher = cipher
+        )!!
+        val bb = ByteBuffer.wrap(opened).order(ByteOrder.BIG_ENDIAN)
+        // Frame 0 (cur)
+        bb.short; bb.short; assertEquals((-40).toShort(), bb.short)
+        assertEquals(
+            (curFlags or UdpMouseCodec.FLAG_FEC_PREV1 or UdpMouseCodec.FLAG_FEC_PREV2).toShort(),
+            bb.short
+        )
+        // Frame 1 (prev1)
+        bb.short; bb.short; assertEquals(1.toShort(), bb.short)
+        assertEquals(prev1Flags.toShort(), bb.short)
+        // Frame 2 (prev2)
+        bb.short; bb.short; assertEquals(80.toShort(), bb.short)
+        assertEquals(prev2Flags.toShort(), bb.short)
+    }
+
+    @Test
+    fun `sealTouchpadInto encodes multi-touch snapshots and empty liftoff accurately`() {
+        val key = UdpMouseCodec.decodeAes256Key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")!!
+        val sessionId = 0x1122334455667788L
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val payloadScratch = ByteArray(UdpMouseCodec.TOUCHPAD_MAX_PAYLOAD_LEN)
+        val nonceScratch = ByteArray(UdpMouseCodec.NONCE_LEN)
+        val wireBuf = ByteArray(UdpMouseCodec.TOUCHPAD_MAX_WIRE_LEN)
+
+        val contacts = listOf(
+            TouchpadContact(pointerId = 3, x = 4000, y = 4100),
+            TouchpadContact(pointerId = 7, x = 5200, y = 4800)
+        )
+        val len = UdpMouseCodec.sealTouchpadInto(
+            secretKey = key,
+            sessionId = sessionId,
+            dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+            seq = 21L,
+            contacts = contacts,
+            payloadScratch = payloadScratch,
+            nonceScratch = nonceScratch,
+            wireOut = wireBuf,
+            cipher = cipher
+        )
+        assertEquals(UdpMouseCodec.HEADER_LEN + 1 + 12 + UdpMouseCodec.GCM_TAG_LEN, len)
+
+        val opened = UdpMouseCodec.openPacket(
+            secretKey = key,
+            expectedSessionId = sessionId,
+            expectedDir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+            expectedPktType = UdpMouseCodec.PKT_TOUCHPAD,
+            packet = wireBuf,
+            length = len,
+            cipher = cipher
+        )!!
+        assertEquals(13, opened.size)
+        val bb = ByteBuffer.wrap(opened).order(ByteOrder.BIG_ENDIAN)
+        assertEquals(2, bb.get().toInt() and 0xFF)
+        assertEquals(3, bb.short.toInt() and 0xFFFF)
+        assertEquals(4000, bb.short.toInt() and 0xFFFF)
+        assertEquals(4100, bb.short.toInt() and 0xFFFF)
+        assertEquals(7, bb.short.toInt() and 0xFFFF)
+        assertEquals(5200, bb.short.toInt() and 0xFFFF)
+        assertEquals(4800, bb.short.toInt() and 0xFFFF)
+
+        val emptyLen = UdpMouseCodec.sealTouchpadInto(
+            secretKey = key,
+            sessionId = sessionId,
+            dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+            seq = 22L,
+            contacts = emptyList(),
+            payloadScratch = payloadScratch,
+            nonceScratch = nonceScratch,
+            wireOut = wireBuf,
+            cipher = cipher
+        )
+        val openedEmpty = UdpMouseCodec.openPacket(
+            secretKey = key,
+            expectedSessionId = sessionId,
+            expectedDir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+            expectedPktType = UdpMouseCodec.PKT_TOUCHPAD,
+            packet = wireBuf,
+            length = emptyLen,
+            cipher = cipher
+        )!!
+        assertEquals(1, openedEmpty.size)
+        assertEquals(0, openedEmpty[0].toInt() and 0xFF)
     }
 }

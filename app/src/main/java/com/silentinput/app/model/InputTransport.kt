@@ -16,11 +16,20 @@ interface InputTransport {
     val isTransportReady: StateFlow<Boolean>
     val supportsUnicodeDirectTyping: StateFlow<Boolean>
     val supportsHiResWheel: StateFlow<Boolean>
+    val supportsNativeTouchpad: StateFlow<Boolean>
+    val nativeTouchpadMaxCoord: StateFlow<Int>
     val daemonVersion: StateFlow<String?>
     val pasteQueueBusyEvent: SharedFlow<String>
 
     fun sendKey(key: String, action: String = "tap"): Boolean
-    fun sendMouse(dx: Float, dy: Float, action: String = "move", wheel: Float = 0f): Boolean
+    fun sendMouse(
+        dx: Float,
+        dy: Float,
+        action: String = "move",
+        wheel: Float = 0f,
+        hwheel: Float = 0f
+    ): Boolean
+    fun sendTouchpadFrame(contacts: List<TouchpadContact>, isTransition: Boolean = false): Boolean = false
     fun sendPaste(text: String, enter: Boolean = false, mode: String = SendTargetMode.TERMINAL.wireValue): Boolean
 
     fun updateLanguage(language: AppLanguage)
@@ -44,6 +53,12 @@ abstract class BaseInputTransport(
 
     protected val _supportsHiResWheel = MutableStateFlow(false)
     override val supportsHiResWheel: StateFlow<Boolean> = _supportsHiResWheel.asStateFlow()
+
+    protected val _supportsNativeTouchpad = MutableStateFlow(false)
+    override val supportsNativeTouchpad: StateFlow<Boolean> = _supportsNativeTouchpad.asStateFlow()
+
+    protected val _nativeTouchpadMaxCoord = MutableStateFlow(NativeTouchpadMapper.LEGACY_MAX_COORD)
+    override val nativeTouchpadMaxCoord: StateFlow<Int> = _nativeTouchpadMaxCoord.asStateFlow()
 
     protected val _daemonVersion = MutableStateFlow<String?>(null)
     override val daemonVersion: StateFlow<String?> = _daemonVersion.asStateFlow()

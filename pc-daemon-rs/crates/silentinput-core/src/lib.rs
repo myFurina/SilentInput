@@ -32,8 +32,9 @@ mod tests {
     };
     use crate::keymap::{
         all_registered_keys, build_key_map, build_wtype_args, build_xdotool_args,
-        clipboard_candidates_for_session, detect_x11_display_in, find_xauthority_in,
-        has_graphical_session_in, lookup_char, normalize_line_endings, resolve_key_combination,
+        clipboard_candidates_for_session, clipboard_read_candidates_for_session,
+        detect_x11_display_in, find_xauthority_in, has_graphical_session_in, lookup_char,
+        normalize_line_endings, resolve_key_combination,
     };
     use crate::logs::{
         parse_short_unix_timestamp_secs, read_log_tail_from_file, should_prefer_log_file,
@@ -55,6 +56,7 @@ mod tests {
         assert!(is_valid_strong_token(&cfg.auth_token));
         assert!(cfg.enable_tls);
         assert!(cfg.allow_usb_unauthenticated);
+        assert!(cfg.restore_clipboard);
         assert_eq!(cfg.access_control_mode, "localhost_only");
         assert_eq!(cfg.token_expire_mode, "1h");
         assert_eq!(cfg.gui_language, "system");
@@ -376,6 +378,19 @@ mod tests {
             vec!["wl-copy", "xclip", "xsel"]
         );
 
+        let read_x11 = clipboard_read_candidates_for_session(false, true);
+        assert_eq!(read_x11.iter().map(|(b, _)| *b).collect::<Vec<_>>(), vec!["xclip", "xsel"]);
+        let read_wl_x = clipboard_read_candidates_for_session(true, true);
+        assert_eq!(
+            read_wl_x.iter().map(|(b, _)| *b).collect::<Vec<_>>(),
+            vec!["wl-paste", "xclip", "xsel"]
+        );
+        let read_headless = clipboard_read_candidates_for_session(false, false);
+        assert_eq!(
+            read_headless.iter().map(|(b, _)| *b).collect::<Vec<_>>(),
+            vec!["wl-paste", "xclip", "xsel"]
+        );
+
         // Live Unix socket triggers graphical detection
         let _sock = UnixListener::bind(rt_dir.join("wayland-0")).unwrap();
         assert!(has_graphical_session_in(&rt_dir, None, None, &x11_dir));
@@ -421,6 +436,7 @@ mod tests {
         let cfg: SilentInputConfig = serde_json::from_str(legacy_json).unwrap();
         assert_eq!(cfg.gui_language, "zh");
         assert_eq!(cfg.gui_theme, "system");
+        assert!(cfg.restore_clipboard);
     }
 
     #[test]

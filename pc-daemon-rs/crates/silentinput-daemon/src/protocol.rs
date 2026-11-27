@@ -8,7 +8,7 @@ use silentinput_core::config::{constant_time_token_eq, unix_timestamp_secs, Sile
 use silentinput_core::keymap::{lookup_char, normalize_line_endings};
 
 use crate::auth_limiter::{AuthRateLimiter, AUTH_LOCKOUT_SECS};
-use crate::input::InputController;
+use crate::input::{InputController, TouchContact, TOUCHPAD_MAX_SLOTS, TOUCHPAD_MAX_X};
 use crate::udp_mouse::UdpSessionRegistry;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -88,6 +88,7 @@ pub struct SessionContext<'a> {
     pub paste_lock: Arc<tokio::sync::Mutex<()>>,
     pub paste_semaphore: Arc<tokio::sync::Semaphore>,
     pub udp_registry: Option<&'a UdpSessionRegistry>,
+    pub udp_session_id: Option<u64>,
 }
 
 pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessOutcome {
@@ -122,6 +123,8 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
             "access_control_mode": ctx.config.access_control_mode,
             "unicode_direct_typing": ctx.input.is_graphical_session(),
             "hi_res_wheel": true,
+            "native_touchpad": ctx.input.has_touchpad_device(),
+            "touchpad_max": TOUCHPAD_MAX_X,
         });
         return ProcessOutcome::plain(ctx.authenticated, false, Some(reply.to_string()));
     }
@@ -134,6 +137,8 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                 "message": "Authenticated",
                 "unicode_direct_typing": ctx.input.is_graphical_session(),
                 "hi_res_wheel": true,
+                "native_touchpad": ctx.input.has_touchpad_device(),
+                "touchpad_max": TOUCHPAD_MAX_X,
             });
             return ProcessOutcome::plain(true, false, Some(reply.to_string()));
         }
@@ -160,10 +165,15 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                 "message": "Authenticated",
                 "unicode_direct_typing": ctx.input.is_graphical_session(),
                 "hi_res_wheel": true,
+                "native_touchpad": ctx.input.has_touchpad_device(),
+                "touchpad_max": TOUCHPAD_MAX_X,
             });
             let mut created_udp_id = None;
             if !is_localhost_ip(ctx.peer_ip) {
-                if let Some(creds) = ctx.udp_registry.and_then(|r| r.create_session(ctx.peer_ip)) {
+                if let Some(creds) = ctx
+                    .udp_registry
+                    .and_then(|r| r.create_session(ctx.peer_ip, ctx.conn_id))
+                {
                     if let Some(obj) = reply.as_object_mut() {
                         obj.insert("udp_port".to_string(), json!(creds.port));
                         obj.insert("udp_session_id".to_string(), json!(creds.session_id_hex));
@@ -247,6 +257,7 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
 
             let input = Arc::clone(&ctx.input);
             let paste_lock = Arc::clone(&ctx.paste_lock);
+            let restore_clipboard = ctx.config.restore_clipboard;
 
             // Spawn off the read loop so long typing does not starve 5s ping/pong heartbeats.
             tokio::spawn(async move {
@@ -277,6 +288,11 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                         "[SilentInput] Injecting {} chars via clipboard (mode: {paste_mode}, enter: {enter_after})",
                         content.chars().count()
                     );
+                    let backup = if restore_clipboard {
+                        input.read_clipboard().await
+                    } else {
+                        None
+                    };
                     if !input.copy_clipboard(&content).await {
                         eprintln!(
                             "[SilentInput] Aborting paste shortcut because clipboard write failed."
@@ -293,6 +309,12 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                         tokio::time::sleep(Duration::from_millis(40)).await;
                         input.emit_key_combination("enter").await;
                     }
+                    if let Some(prev) = backup {
+                        if prev != content {
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            let _ = input.copy_clipboard(&prev).await;
+                        }
+                    }
                 }
             });
         }
@@ -306,6 +328,18 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
         }
         "mouse" if ctx.input.ensure_ready(false) => {
             let action = map.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            if matches!(
+                action,
+                "click_left" | "click_right" | "down_left" | "up_left" | "down_right" | "up_right"
+            ) {
+                let udp_seq = map.get("udp_seq").and_then(|v| v.as_u64()).unwrap_or(0);
+                if udp_seq > 0 {
+                    if let (Some(reg), Some(sid)) = (ctx.udp_registry, ctx.udp_session_id) {
+                        reg.wait_for_applied_seq(sid, udp_seq, Duration::from_millis(25))
+                            .await;
+                    }
+                }
+            }
             match action {
                 "click_left" => {
                     let btn = Key::BTN_LEFT.code();
@@ -370,6 +404,8 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                     let vy = safe_round_int(map.get("dy"));
                     let vw_hi = safe_round_int(map.get("wheel_hi"));
                     let vw = safe_round_int(map.get("wheel"));
+                    let vhw_hi = safe_round_int(map.get("hwheel_hi"));
+                    let vhw = safe_round_int(map.get("hwheel"));
 
                     if vx != 0 {
                         events.push(InputEvent::new(
@@ -411,6 +447,32 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                             vw.saturating_mul(120),
                         ));
                     }
+                    if vhw_hi != 0 {
+                        events.push(InputEvent::new(
+                            EventType::RELATIVE,
+                            RelativeAxisType::REL_HWHEEL_HI_RES.0,
+                            vhw_hi,
+                        ));
+                        let detents = ctx.input.take_hwheel_detents(ctx.conn_id, vhw_hi);
+                        if detents != 0 {
+                            events.push(InputEvent::new(
+                                EventType::RELATIVE,
+                                RelativeAxisType::REL_HWHEEL.0,
+                                detents,
+                            ));
+                        }
+                    } else if vhw != 0 {
+                        events.push(InputEvent::new(
+                            EventType::RELATIVE,
+                            RelativeAxisType::REL_HWHEEL.0,
+                            vhw,
+                        ));
+                        events.push(InputEvent::new(
+                            EventType::RELATIVE,
+                            RelativeAxisType::REL_HWHEEL_HI_RES.0,
+                            vhw.saturating_mul(120),
+                        ));
+                    }
                     if let Some(val) = map.get("btn_left") {
                         let pressed = json_truthy(Some(val));
                         let btn = Key::BTN_LEFT.code();
@@ -444,6 +506,26 @@ pub async fn process_message(msg_str: &str, ctx: SessionContext<'_>) -> ProcessO
                         }
                     }
                 }
+            }
+        }
+        "touchpad" => {
+            if let Some(arr) = map.get("c").and_then(|v| v.as_array()) {
+                let mut contacts = Vec::with_capacity(arr.len().min(TOUCHPAD_MAX_SLOTS));
+                for entry in arr.iter().take(TOUCHPAD_MAX_SLOTS) {
+                    if let Some(tuple) = entry.as_array() {
+                        if tuple.len() >= 3 {
+                            let id = safe_round_int(tuple.first()).clamp(0, u16::MAX as i32) as u16;
+                            let x = safe_round_int(tuple.get(1)).clamp(0, u16::MAX as i32) as u16;
+                            let y = safe_round_int(tuple.get(2)).clamp(0, u16::MAX as i32) as u16;
+                            contacts.push(TouchContact {
+                                pointer_id: id,
+                                x,
+                                y,
+                            });
+                        }
+                    }
+                }
+                ctx.input.apply_touchpad_frame(ctx.conn_id, &contacts);
             }
         }
         _ => {}

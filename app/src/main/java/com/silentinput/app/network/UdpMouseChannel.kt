@@ -1,6 +1,7 @@
 package com.silentinput.app.network
 
 import android.util.Log
+import com.silentinput.app.model.TouchpadContact
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -9,7 +10,6 @@ import java.net.SocketTimeoutException
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.LockSupport
 import javax.crypto.Cipher
@@ -27,21 +27,27 @@ object UdpMouseCodec {
     const val PKT_PROBE: Byte = 0x01
     const val PKT_PROBE_ACK: Byte = 0x02
     const val PKT_MOUSE_MOVE: Byte = 0x03
+    const val PKT_TOUCHPAD: Byte = 0x04
 
     const val HEADER_LEN: Int = 20
     const val MOVE_PAYLOAD_LEN: Int = 8
     const val MOVE_FEC_PAYLOAD_LEN: Int = MOVE_PAYLOAD_LEN * 3
+    const val MAX_TOUCHPAD_CONTACTS: Int = 5
+    const val TOUCHPAD_MAX_PAYLOAD_LEN: Int = 1 + MAX_TOUCHPAD_CONTACTS * 6
     const val GCM_TAG_BITS: Int = 128
     const val GCM_TAG_LEN: Int = 16
     const val NONCE_LEN: Int = 12
     const val MOVE_WIRE_LEN: Int = HEADER_LEN + MOVE_PAYLOAD_LEN + GCM_TAG_LEN
     const val MOVE_FEC_WIRE_LEN: Int = HEADER_LEN + MOVE_FEC_PAYLOAD_LEN + GCM_TAG_LEN
+    const val TOUCHPAD_MAX_WIRE_LEN: Int = HEADER_LEN + TOUCHPAD_MAX_PAYLOAD_LEN + GCM_TAG_LEN
 
     const val DIR_CLIENT_TO_SERVER: Int = 1
     const val DIR_SERVER_TO_CLIENT: Int = 2
     const val FLAG_HI_RES_WHEEL: Int = 0x0001
     const val FLAG_FEC_PREV1: Int = 0x0002
     const val FLAG_FEC_PREV2: Int = 0x0004
+    const val FLAG_HWHEEL: Int = 0x0008
+    private const val FLAG_FRAME_MASK: Int = FLAG_HI_RES_WHEEL or FLAG_HWHEEL
 
     fun parseSessionIdHex(hex: String): Long? {
         val trimmed = hex.trim()
@@ -184,21 +190,57 @@ object UdpMouseCodec {
         wireOut: ByteArray,
         cipher: Cipher
     ): Int {
-        var effectiveFlags = flags and FLAG_HI_RES_WHEEL
+        var effectiveFlags = flags and FLAG_FRAME_MASK
         var payloadLen = MOVE_PAYLOAD_LEN
         if (hasPrev1) {
             effectiveFlags = effectiveFlags or FLAG_FEC_PREV1
-            writeMovePayloadInto(payloadScratch, prev1Dx, prev1Dy, prev1Wheel, prev1Flags and FLAG_HI_RES_WHEEL, offset = MOVE_PAYLOAD_LEN)
+            writeMovePayloadInto(payloadScratch, prev1Dx, prev1Dy, prev1Wheel, prev1Flags and FLAG_FRAME_MASK, offset = MOVE_PAYLOAD_LEN)
             payloadLen = MOVE_PAYLOAD_LEN * 2
             if (hasPrev2) {
                 effectiveFlags = effectiveFlags or FLAG_FEC_PREV2
-                writeMovePayloadInto(payloadScratch, prev2Dx, prev2Dy, prev2Wheel, prev2Flags and FLAG_HI_RES_WHEEL, offset = MOVE_PAYLOAD_LEN * 2)
+                writeMovePayloadInto(payloadScratch, prev2Dx, prev2Dy, prev2Wheel, prev2Flags and FLAG_FRAME_MASK, offset = MOVE_PAYLOAD_LEN * 2)
                 payloadLen = MOVE_FEC_PAYLOAD_LEN
             }
         }
         writeHeaderInto(wireOut, PKT_MOUSE_MOVE, sessionId, seq)
         writeNonceInto(nonceScratch, dir, seq)
         writeMovePayloadInto(payloadScratch, dx, dy, wheel, effectiveFlags, offset = 0)
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_BITS, nonceScratch))
+        cipher.updateAAD(wireOut, 0, HEADER_LEN)
+        val written = cipher.doFinal(payloadScratch, 0, payloadLen, wireOut, HEADER_LEN)
+        return HEADER_LEN + written
+    }
+
+    fun writeTouchpadPayloadInto(out: ByteArray, contacts: List<TouchpadContact>): Int {
+        val count = contacts.size.coerceAtMost(MAX_TOUCHPAD_CONTACTS)
+        out[0] = count.toByte()
+        for (i in 0 until count) {
+            val c = contacts[i]
+            val off = 1 + i * 6
+            putShortBE(out, off, c.pointerId and 0xFFFF)
+            putShortBE(out, off + 2, c.x.coerceIn(0, 0xFFFF))
+            putShortBE(out, off + 4, c.y.coerceIn(0, 0xFFFF))
+        }
+        return 1 + count * 6
+    }
+
+    /**
+     * Zero-allocation AEAD seal for native multi-touch snapshots (`PKT_TOUCHPAD = 0x04`).
+     */
+    fun sealTouchpadInto(
+        secretKey: SecretKeySpec,
+        sessionId: Long,
+        dir: Int,
+        seq: Long,
+        contacts: List<TouchpadContact>,
+        payloadScratch: ByteArray,
+        nonceScratch: ByteArray,
+        wireOut: ByteArray,
+        cipher: Cipher
+    ): Int {
+        val payloadLen = writeTouchpadPayloadInto(payloadScratch, contacts)
+        writeHeaderInto(wireOut, PKT_TOUCHPAD, sessionId, seq)
+        writeNonceInto(nonceScratch, dir, seq)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_BITS, nonceScratch))
         cipher.updateAAD(wireOut, 0, HEADER_LEN)
         val written = cipher.doFinal(payloadScratch, 0, payloadLen, wireOut, HEADER_LEN)
@@ -287,6 +329,12 @@ object UdpMouseCodec {
     }
 }
 
+data class UdpMoveBarrier(
+    val pendingDx: Int,
+    val pendingDy: Int,
+    val lastSentSeq: Long
+)
+
 /**
  * Non-blocking, single-worker UDP transport for high-frequency relative mouse motion.
  * Probes reachability on startup so blocked firewalls fall back transparently to WebSocket.
@@ -296,7 +344,9 @@ class UdpMouseChannel(
     private val port: Int,
     private val sessionId: Long,
     private val secretKey: SecretKeySpec,
+    private val seqCounter: AtomicLong = AtomicLong(0L),
     private val onReadyChanged: (Boolean) -> Unit = {},
+    private val onUnexpectedClose: () -> Unit = {},
     private val keepaliveIntervalMs: Long = 15_000L,
     private val keepaliveTimeoutMs: Long = 2_000L
 ) {
@@ -306,6 +356,8 @@ class UdpMouseChannel(
         private const val PROBE_TIMEOUT_MS = 320
         private const val FEC_MAX_AGE_NS = 100_000_000L
         private const val MAX_MISSED_KEEPALIVES = 2
+        private const val LIFTOFF_REPEAT_DELAY_NS = 15_000_000L
+        private const val MAX_PENDING_TOUCH_TRANSITIONS = 8
     }
 
     @Volatile
@@ -320,17 +372,23 @@ class UdpMouseChannel(
     @Volatile
     private var closed = false
 
+    private val explicitClose = AtomicBoolean(false)
+
     @Volatile
     private var socket: DatagramSocket? = null
 
     @Volatile
     private var workerThread: Thread? = null
 
-    private val nextSeq = AtomicLong(0L)
-    private val pendingDx = AtomicInteger(0)
-    private val pendingDy = AtomicInteger(0)
-    private val pendingWheel = AtomicInteger(0)
-    private val pendingWheelIsHiRes = AtomicBoolean(false)
+    private val pendingLock = Any()
+    private var pendingDx: Int = 0
+    private var pendingDy: Int = 0
+    private var pendingWheel: Int = 0
+    private var pendingHWheel: Int = 0
+    private var pendingWheelIsHiRes: Boolean = false
+    private var latestMoveSeq: Long = 0L
+    private val pendingTouchTransitions = ArrayDeque<List<TouchpadContact>>()
+    private var pendingTouchMove: List<TouchpadContact>? = null
 
     fun start() {
         val thread = synchronized(lifecycleLock) {
@@ -345,30 +403,86 @@ class UdpMouseChannel(
     }
 
     /**
-     * Lock-free delta accumulation safe to call directly on the Android UI thread.
+     * Delta accumulation safe to call directly on the Android UI thread.
      */
     fun enqueueMove(dx: Int, dy: Int) {
         if (closed || !isReady || (dx == 0 && dy == 0)) return
-        if (dx != 0) pendingDx.addAndGet(dx)
-        if (dy != 0) pendingDy.addAndGet(dy)
+        synchronized(pendingLock) {
+            pendingDx += dx
+            pendingDy += dy
+        }
         LockSupport.unpark(workerThread)
     }
 
     /**
-     * Lock-free two-finger scroll accumulation coalesced into the UDP datagram loop.
+     * Two-finger scroll accumulation coalesced into the UDP datagram loop.
      */
-    fun enqueueScroll(wheel: Int, hiRes: Boolean = false) {
-        if (closed || !isReady || wheel == 0) return
-        if (pendingWheelIsHiRes.getAndSet(hiRes) != hiRes) {
-            pendingWheel.set(0)
+    fun enqueueScroll(wheel: Int, hiRes: Boolean = false, hwheel: Int = 0) {
+        if (closed || !isReady || (wheel == 0 && hwheel == 0)) return
+        synchronized(pendingLock) {
+            if (pendingWheelIsHiRes != hiRes) {
+                pendingWheel = 0
+                pendingHWheel = 0
+                pendingWheelIsHiRes = hiRes
+            }
+            pendingWheel += wheel
+            pendingHWheel += hwheel
         }
-        pendingWheel.addAndGet(wheel)
         LockSupport.unpark(workerThread)
     }
 
+    /**
+     * Multi-touch touchpad snapshot transmission: transitions (pointer down/up/liftoff) are
+     * preserved in order while consecutive moves coalesce to the newest coordinate snapshot.
+     */
+    fun enqueueTouchpadFrame(contacts: List<TouchpadContact>, isTransition: Boolean) {
+        if (closed || !isReady) return
+        synchronized(pendingLock) {
+            if (!isTransition) {
+                pendingTouchMove = contacts
+            } else {
+                val staleMove = pendingTouchMove
+                pendingTouchMove = null
+                if (staleMove != null && pendingTouchTransitions.size < MAX_PENDING_TOUCH_TRANSITIONS) {
+                    pendingTouchTransitions.addLast(staleMove)
+                }
+                while (pendingTouchTransitions.size >= MAX_PENDING_TOUCH_TRANSITIONS) {
+                    val dropIdx = pendingTouchTransitions.indexOfFirst { it.isNotEmpty() }
+                    if (dropIdx >= 0) {
+                        pendingTouchTransitions.removeAt(dropIdx)
+                    } else {
+                        pendingTouchTransitions.removeFirst()
+                    }
+                }
+                pendingTouchTransitions.addLast(contacts)
+            }
+        }
+        LockSupport.unpark(workerThread)
+    }
+
+    /**
+     * Atomically drain any unsent relative move delta and return the sequence number of the
+     * latest move datagram sent, allowing subsequent WebSocket clicks to preserve causal order.
+     */
+    fun drainUnsentMoveAndLastSeq(): UdpMoveBarrier {
+        return synchronized(pendingLock) {
+            val dx = pendingDx
+            val dy = pendingDy
+            pendingDx = 0
+            pendingDy = 0
+            UdpMoveBarrier(pendingDx = dx, pendingDy = dy, lastSentSeq = latestMoveSeq)
+        }
+    }
+
     fun close() {
+        explicitClose.set(true)
+        closeInternal(notifyUnexpected = false)
+    }
+
+    private fun closeInternal(notifyUnexpected: Boolean) {
         val sockToClose: DatagramSocket?
         val threadToUnpark: Thread?
+        val shouldNotify: Boolean
         synchronized(lifecycleLock) {
             if (closed) return
             closed = true
@@ -376,12 +490,16 @@ class UdpMouseChannel(
             sockToClose = socket
             socket = null
             threadToUnpark = workerThread
+            shouldNotify = notifyUnexpected && !explicitClose.get()
         }
         onReadyChanged(false)
         try {
             sockToClose?.close()
         } catch (_: Exception) {}
         LockSupport.unpark(threadToUnpark)
+        if (shouldNotify) {
+            onUnexpectedClose()
+        }
     }
 
     private fun runWorker() {
@@ -437,7 +555,7 @@ class UdpMouseChannel(
             for (attempt in 1..PROBE_ATTEMPTS) {
                 if (closed) break
                 try {
-                    val seq = nextSeq.incrementAndGet()
+                    val seq = seqCounter.incrementAndGet()
                     val wire = UdpMouseCodec.sealPacket(
                         secretKey = secretKey,
                         pktType = UdpMouseCodec.PKT_PROBE,
@@ -509,9 +627,9 @@ class UdpMouseChannel(
             Log.i(TAG, "UDP low-latency mouse channel active for $host:$port")
 
             // Phase 2: Dedicated zero-allocation send loop over connected UDP socket with bounded-age 2-frame FEC tail + blackhole probe
-            val payloadScratch = ByteArray(UdpMouseCodec.MOVE_FEC_PAYLOAD_LEN)
+            val payloadScratch = ByteArray(maxOf(UdpMouseCodec.MOVE_FEC_PAYLOAD_LEN, UdpMouseCodec.TOUCHPAD_MAX_PAYLOAD_LEN))
             val nonceScratch = ByteArray(UdpMouseCodec.NONCE_LEN)
-            val wireBuf = ByteArray(UdpMouseCodec.MOVE_FEC_WIRE_LEN)
+            val wireBuf = ByteArray(maxOf(UdpMouseCodec.MOVE_FEC_WIRE_LEN, UdpMouseCodec.TOUCHPAD_MAX_WIRE_LEN))
             val sendPacket = DatagramPacket(wireBuf, wireBuf.size)
 
             val keepaliveIntervalNs = keepaliveIntervalMs.coerceAtLeast(20L) * 1_000_000L
@@ -540,6 +658,7 @@ class UdpMouseChannel(
             var keepaliveSentNs = 0L
             var keepaliveTag = 0
             var missedKeepalives = 0
+            var liftoffRepeatDeadlineNs = 0L
 
             while (!closed) {
                 val nowLoopNs = System.nanoTime()
@@ -597,7 +716,7 @@ class UdpMouseChannel(
                     try {
                         keepaliveTag = keepaliveRandom.nextInt()
                         val kaPayload = UdpMouseCodec.encodeProbePayload(keepaliveTag)
-                        val kaSeq = nextSeq.incrementAndGet()
+                        val kaSeq = seqCounter.incrementAndGet()
                         val kaWire = UdpMouseCodec.sealPacket(
                             secretKey = secretKey,
                             pktType = UdpMouseCodec.PKT_PROBE,
@@ -618,24 +737,128 @@ class UdpMouseChannel(
                     }
                 }
 
-                val dx = pendingDx.getAndSet(0)
-                val dy = pendingDy.getAndSet(0)
-                val wheel = pendingWheel.getAndSet(0)
+                var touchFrame: List<TouchpadContact>? = null
+                synchronized(pendingLock) {
+                    val transition = pendingTouchTransitions.removeFirstOrNull()
+                    if (transition != null) {
+                        touchFrame = transition
+                    } else if (pendingTouchMove != null) {
+                        touchFrame = pendingTouchMove
+                        pendingTouchMove = null
+                    }
+                }
+                val frame = touchFrame
+                if (frame != null) {
+                    lastHadActivity = true
+                    try {
+                        val seq = seqCounter.incrementAndGet()
+                        val totalLen = UdpMouseCodec.sealTouchpadInto(
+                            secretKey = secretKey,
+                            sessionId = sessionId,
+                            dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+                            seq = seq,
+                            contacts = frame,
+                            payloadScratch = payloadScratch,
+                            nonceScratch = nonceScratch,
+                            wireOut = wireBuf,
+                            cipher = cipher
+                        )
+                        sendPacket.setLength(totalLen)
+                        activeSocket.send(sendPacket)
+                        synchronized(pendingLock) {
+                            if (seq > latestMoveSeq) {
+                                latestMoveSeq = seq
+                            }
+                        }
+                        liftoffRepeatDeadlineNs = if (frame.isEmpty()) {
+                            System.nanoTime() + LIFTOFF_REPEAT_DELAY_NS
+                        } else {
+                            0L
+                        }
+                    } catch (e: Exception) {
+                        if (!closed) {
+                            Log.w(TAG, "UDP touchpad send error; falling back to WebSocket: ${e.message}")
+                        }
+                        break
+                    }
+                    continue
+                }
+
+                if (liftoffRepeatDeadlineNs != 0L && nowLoopNs >= liftoffRepeatDeadlineNs) {
+                    liftoffRepeatDeadlineNs = 0L
+                    lastHadActivity = true
+                    try {
+                        val seq = seqCounter.incrementAndGet()
+                        val totalLen = UdpMouseCodec.sealTouchpadInto(
+                            secretKey = secretKey,
+                            sessionId = sessionId,
+                            dir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+                            seq = seq,
+                            contacts = emptyList(),
+                            payloadScratch = payloadScratch,
+                            nonceScratch = nonceScratch,
+                            wireOut = wireBuf,
+                            cipher = cipher
+                        )
+                        sendPacket.setLength(totalLen)
+                        activeSocket.send(sendPacket)
+                        synchronized(pendingLock) {
+                            if (seq > latestMoveSeq) {
+                                latestMoveSeq = seq
+                            }
+                        }
+                    } catch (e: Exception) {
+                        if (!closed) {
+                            Log.w(TAG, "UDP liftoff repeat error; falling back to WebSocket: ${e.message}")
+                        }
+                        break
+                    }
+                    continue
+                }
+
+                var dx = 0
+                var dy = 0
+                var wheel = 0
+                var isHWheel = false
+                var isHiRes = false
+                synchronized(pendingLock) {
+                    dx = pendingDx
+                    dy = pendingDy
+                    pendingDx = 0
+                    pendingDy = 0
+                    isHiRes = pendingWheelIsHiRes
+                    when {
+                        pendingWheel != 0 -> {
+                            wheel = pendingWheel
+                            pendingWheel = 0
+                            isHWheel = false
+                        }
+                        pendingHWheel != 0 -> {
+                            wheel = pendingHWheel
+                            pendingHWheel = 0
+                            isHWheel = true
+                        }
+                    }
+                }
                 if (dx == 0 && dy == 0 && wheel == 0) {
-                    val sleepNs = if (keepaliveInFlight) {
+                    var sleepNs = if (keepaliveInFlight) {
                         minOf(idleParkNs, 15_000_000L)
                     } else {
                         idleParkNs
+                    }
+                    if (liftoffRepeatDeadlineNs != 0L) {
+                        val remNs = (liftoffRepeatDeadlineNs - System.nanoTime()).coerceAtLeast(1_000_000L)
+                        sleepNs = minOf(sleepNs, remNs)
                     }
                     LockSupport.parkNanos(sleepNs)
                     continue
                 }
 
                 lastHadActivity = true
-                val flags = if (wheel != 0 && pendingWheelIsHiRes.get()) {
-                    UdpMouseCodec.FLAG_HI_RES_WHEEL
-                } else {
-                    0
+                var flags = 0
+                if (wheel != 0) {
+                    if (isHiRes) flags = flags or UdpMouseCodec.FLAG_HI_RES_WHEEL
+                    if (isHWheel) flags = flags or UdpMouseCodec.FLAG_HWHEEL
                 }
 
                 try {
@@ -644,7 +867,7 @@ class UdpMouseChannel(
                         hasPrev1 = false
                         hasPrev2 = false
                     }
-                    val seq = nextSeq.incrementAndGet()
+                    val seq = seqCounter.incrementAndGet()
                     val totalLen = UdpMouseCodec.sealMoveWithFecInto(
                         secretKey = secretKey,
                         sessionId = sessionId,
@@ -671,6 +894,13 @@ class UdpMouseChannel(
                     )
                     sendPacket.setLength(totalLen)
                     activeSocket.send(sendPacket)
+                    if (dx != 0 || dy != 0) {
+                        synchronized(pendingLock) {
+                            if (seq > latestMoveSeq) {
+                                latestMoveSeq = seq
+                            }
+                        }
+                    }
                     lastSentNs = nowNs
 
                     if (hasPrev1) {
@@ -696,7 +926,7 @@ class UdpMouseChannel(
             try {
                 localSocket?.close()
             } catch (_: Exception) {}
-            close()
+            closeInternal(notifyUnexpected = true)
         }
     }
 }

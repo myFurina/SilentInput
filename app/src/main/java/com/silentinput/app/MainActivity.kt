@@ -126,6 +126,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
+        viewModel.releaseTouchpad()
         viewModel.setLeftMouseHold(false)
     }
 
@@ -182,9 +183,12 @@ fun MainAppScaffold(
     val isAnyConnected by viewModel.isAnyConnected.collectAsState()
     val supportsUnicodeDirectTyping by viewModel.supportsUnicodeDirectTyping.collectAsState()
     val supportsHiResWheel by viewModel.supportsHiResWheel.collectAsState()
+    val isNativeTouchpadActive by viewModel.isNativeTouchpadActive.collectAsState()
 
     val isHapticEnabled by viewModel.isHapticEnabled.collectAsState()
     val trackpadSensitivity by viewModel.trackpadSensitivity.collectAsState()
+    val trackpadTuning by viewModel.trackpadTuning.collectAsState()
+    val nativeTouchpadMaxCoord by viewModel.nativeTouchpadMaxCoord.collectAsState()
     val isNaturalScrolling by viewModel.isNaturalScrolling.collectAsState()
     val isLeftMouseHeld by viewModel.isLeftMouseHeld.collectAsState()
     val showInlineTrackpadInText by viewModel.showInlineTrackpadInText.collectAsState()
@@ -370,17 +374,23 @@ fun MainAppScaffold(
                         onOpenLandscapeKeyboard = { showLandscapeKeyboard = true }
                     )
                     1 -> TrackpadScreen(
-                        sensitivity = trackpadSensitivity,
-                        onSensitivityChange = { viewModel.updateTrackpadSensitivity(it, persist = false) },
-                        onSensitivityChangeFinished = { viewModel.commitTrackpadSensitivity() },
+                        tuning = trackpadTuning,
+                        onTuningChange = { viewModel.updateTrackpadTuning(it, persist = false) },
+                        onTuningChangeFinished = { viewModel.commitTrackpadTuning() },
+                        onResetTuning = { viewModel.resetTrackpadTuning() },
                         naturalScrolling = isNaturalScrolling,
                         hiResScroll = supportsHiResWheel,
                         isHapticEnabled = isHapticEnabled,
                         isConnected = isAnyConnected,
                         isLeftHeld = isLeftMouseHeld,
+                        nativeTouchpadActive = isNativeTouchpadActive,
+                        touchpadMaxCoord = nativeTouchpadMaxCoord,
                         onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },
                         onMouseClick = { viewModel.sendMouseClick(it) },
-                        onMouseScroll = { viewModel.sendMouseScroll(it) },
+                        onMouseScroll = { w, hw -> viewModel.sendMouseScroll(w, hw) },
+                        onTouchpadFrame = { contacts, isTransition ->
+                            viewModel.sendTouchpadFrame(contacts, isTransition)
+                        },
                         onLeftMouseHoldChange = { viewModel.setLeftMouseHold(it) },
                         onSendKey = { viewModel.sendKey(it) }
                     )
@@ -389,6 +399,7 @@ fun MainAppScaffold(
                         isHapticEnabled = isHapticEnabled,
                         supportsUnicodeDirectTyping = supportsUnicodeDirectTyping,
                         supportsHiResWheel = supportsHiResWheel,
+                        nativeTouchpadActive = isNativeTouchpadActive,
                         inputText = longTextInput,
                         onInputTextChange = { viewModel.updateLongTextInput(it) },
                         targetMode = sendTargetMode,
@@ -402,6 +413,8 @@ fun MainAppScaffold(
                         showSnippets = showSnippetsInText,
                         showInlineTrackpad = showInlineTrackpadInText,
                         trackpadSensitivity = trackpadSensitivity,
+                        trackpadTuning = trackpadTuning,
+                        touchpadMaxCoord = nativeTouchpadMaxCoord,
                         naturalScrolling = isNaturalScrolling,
                         imeSwitchKey = imeSwitchKey,
                         onImeSwitchKeyChange = { viewModel.setImeSwitchKey(it) },
@@ -409,7 +422,11 @@ fun MainAppScaffold(
                         onSendKey = { viewModel.sendKey(it) },
                         onMouseMove = { dx, dy -> viewModel.sendMouseMove(dx, dy) },
                         onMouseClick = { viewModel.sendMouseClick(it) },
-                        onMouseScroll = { viewModel.sendMouseScroll(it) },
+                        onMouseScroll = { w, hw -> viewModel.sendMouseScroll(w, hw) },
+                        onTouchpadFrame = { contacts, isTransition ->
+                            viewModel.sendTouchpadFrame(contacts, isTransition)
+                        },
+                        onLeftMouseHoldChange = { viewModel.setLeftMouseHold(it) },
                         onOpenSettings = { openSettings(expandMore = true) }
                     )
                 }

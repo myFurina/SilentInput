@@ -11,12 +11,16 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.InetAddress
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import javax.crypto.Cipher
 
 class NetworkClientMockWebServerTest {
 
@@ -182,6 +186,122 @@ class NetworkClientMockWebServerTest {
             assertFalse(client.isTransportReady.value)
             assertFalse(client.isReconnecting.value)
         } finally {
+            serverSocket.get()?.close(1000, null)
+            client.destroy()
+            runCatching { server.shutdown() }
+        }
+    }
+
+    @Test
+    fun `udp reprobe upgrades late-opening udp path and click barrier includes udp_seq`() {
+        val udpSock = DatagramSocket(0, InetAddress.getByName("0.0.0.0"))
+        val udpPort = udpSock.localPort
+        udpSock.soTimeout = 300
+        val udpResponding = AtomicBoolean(false)
+        val running = AtomicBoolean(true)
+        val udpKeyB64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        val udpKey = UdpMouseCodec.decodeAes256Key(udpKeyB64)!!
+        val sessionIdHex = "0123456789abcdef"
+        val sessionId = UdpMouseCodec.parseSessionIdHex(sessionIdHex)!!
+        var srvAckSeq = 0L
+
+        val udpThread = Thread {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val buf = ByteArray(256)
+            val pkt = DatagramPacket(buf, buf.size)
+            while (running.get()) {
+                try {
+                    pkt.setData(buf, 0, buf.size)
+                    udpSock.receive(pkt)
+                    if (!udpResponding.get()) continue
+                    val data = buf.copyOf(pkt.length)
+                    if (data.getOrNull(3) == UdpMouseCodec.PKT_PROBE) {
+                        val pt = UdpMouseCodec.openPacket(
+                            secretKey = udpKey,
+                            expectedSessionId = sessionId,
+                            expectedDir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+                            expectedPktType = UdpMouseCodec.PKT_PROBE,
+                            packet = data,
+                            cipher = cipher
+                        )
+                        if (pt != null) {
+                            srvAckSeq++
+                            val ack = UdpMouseCodec.sealPacket(
+                                secretKey = udpKey,
+                                pktType = UdpMouseCodec.PKT_PROBE_ACK,
+                                sessionId = sessionId,
+                                dir = UdpMouseCodec.DIR_SERVER_TO_CLIENT,
+                                seq = srvAckSeq,
+                                plaintext = pt,
+                                cipher = cipher
+                            )
+                            udpSock.send(DatagramPacket(ack, ack.size, pkt.address, pkt.port))
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }.apply { isDaemon = true; start() }
+
+        val server = MockWebServer()
+        val receivedMessages: BlockingQueue<String> = LinkedBlockingQueue()
+        val serverSocket = AtomicReference<WebSocket?>(null)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    serverSocket.set(webSocket)
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    receivedMessages.offer(text)
+                    if (text.contains("\"type\":\"auth\"")) {
+                        webSocket.send(
+                            """{"type":"auth_result","status":"ok","unicode_direct_typing":true,"udp_port":$udpPort,"udp_session_id":"$sessionIdHex","udp_key":"$udpKeyB64"}"""
+                        )
+                    }
+                }
+
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(1000, null)
+                }
+            })
+        )
+        server.start(InetAddress.getByName("0.0.0.0"), 0)
+
+        val client = NetworkClient(context = null, udpReprobeIntervalMs = 150L)
+        try {
+            client.serverIp = "${nonLoopbackTargetHost()}:${server.port}"
+            client.authToken = "secret-123"
+            client.isTlsEnabled = false
+            client.connect()
+
+            assertTrue(awaitCondition { client.isTransportReady.value })
+            // Initial probe fails because udpResponding == false -> remains on TCP fallback briefly
+            Thread.sleep(200)
+            assertFalse(client.isUdpMouseActive.value)
+
+            // Enable UDP replies -> background reprobe upgrades channel to UDP automatically
+            udpResponding.set(true)
+            assertTrue(awaitCondition(timeoutMs = 5000L) { client.isUdpMouseActive.value })
+
+            // Send a move followed by click_left -> click payload carries udp_seq >= 1
+            assertTrue(client.sendMouse(10f, -4f, action = "move"))
+            Thread.sleep(40)
+            assertTrue(client.sendMouse(0f, 0f, action = "click_left"))
+
+            var clickJson: String? = null
+            val deadline = System.currentTimeMillis() + 2000L
+            while (System.currentTimeMillis() < deadline) {
+                val msg = receivedMessages.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                if (msg.contains("\"click_left\"")) {
+                    clickJson = msg
+                    break
+                }
+            }
+            assertTrue("Expected click_left with udp_seq, got $clickJson", clickJson?.contains("\"udp_seq\":") == true)
+        } finally {
+            running.set(false)
+            udpSock.close()
+            udpThread.join(500)
             serverSocket.get()?.close(1000, null)
             client.destroy()
             runCatching { server.shutdown() }

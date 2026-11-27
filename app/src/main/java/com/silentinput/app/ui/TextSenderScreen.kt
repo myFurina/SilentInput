@@ -59,7 +59,10 @@ import androidx.compose.ui.unit.sp
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.silentinput.app.model.ImeSwitchShortcut
+import com.silentinput.app.model.NativeTouchpadMapper
 import com.silentinput.app.model.QuickEditKeys
+import com.silentinput.app.model.TouchpadContact
+import com.silentinput.app.model.TrackpadTuningConfig
 import com.silentinput.app.ui.theme.SilentMotion
 import com.silentinput.app.ui.theme.pressScale
 
@@ -70,6 +73,7 @@ fun TextSenderScreen(
     isHapticEnabled: Boolean = false,
     supportsUnicodeDirectTyping: Boolean = true,
     supportsHiResWheel: Boolean = false,
+    nativeTouchpadActive: Boolean = false,
     inputText: String,
     onInputTextChange: (String) -> Unit,
     targetMode: String,
@@ -83,6 +87,8 @@ fun TextSenderScreen(
     showSnippets: Boolean = true,
     showInlineTrackpad: Boolean = true,
     trackpadSensitivity: Float = 0.6f,
+    trackpadTuning: TrackpadTuningConfig = TrackpadTuningConfig.fromLegacySensitivity(trackpadSensitivity),
+    touchpadMaxCoord: Int = NativeTouchpadMapper.LEGACY_MAX_COORD,
     naturalScrolling: Boolean = true,
     imeSwitchKey: String = ImeSwitchShortcut.DEFAULT,
     onImeSwitchKeyChange: (String) -> Unit = {},
@@ -90,7 +96,9 @@ fun TextSenderScreen(
     onSendKey: (String) -> Unit,
     onMouseMove: (dx: Float, dy: Float) -> Unit,
     onMouseClick: (button: String) -> Unit,
-    onMouseScroll: (wheel: Float) -> Unit,
+    onMouseScroll: (wheel: Float, hwheel: Float) -> Unit,
+    onTouchpadFrame: (List<TouchpadContact>, Boolean) -> Unit = { _, _ -> },
+    onLeftMouseHoldChange: (Boolean) -> Unit = {},
     onOpenSettings: () -> Unit = {}
 ) {
     val view = LocalView.current
@@ -629,15 +637,25 @@ fun TextSenderScreen(
             ) {
                 TrackpadSurface(
                     sensitivity = trackpadSensitivity,
+                    tuning = trackpadTuning,
                     naturalScrolling = naturalScrolling,
                     hiResScroll = supportsHiResWheel,
                     isHapticEnabled = isHapticEnabled,
+                    nativeTouchpadActive = nativeTouchpadActive,
+                    touchpadMaxCoord = touchpadMaxCoord,
                     onMouseMove = onMouseMove,
                     onMouseClick = onMouseClick,
                     onMouseScroll = onMouseScroll,
+                    onTouchpadFrame = onTouchpadFrame,
+                    onLeftMouseHoldChange = onLeftMouseHoldChange,
+                    onSendKey = onSendKey,
                     modifier = Modifier.fillMaxSize(),
                     minimalStyle = true,
-                    hintText = strings.txtInlineTrackpadHint
+                    hintText = if (nativeTouchpadActive) {
+                        strings.txtInlineNativeTrackpadHint
+                    } else {
+                        strings.txtInlineTrackpadHint
+                    }
                 )
             }
         }

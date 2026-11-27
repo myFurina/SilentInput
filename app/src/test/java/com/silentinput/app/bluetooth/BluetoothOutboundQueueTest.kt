@@ -1,6 +1,7 @@
 package com.silentinput.app.bluetooth
 
 import com.silentinput.app.model.ProtocolPayloads
+import com.silentinput.app.model.TouchpadContact
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -53,19 +54,47 @@ class BluetoothOutboundQueueTest {
         val clickLeft = ProtocolPayloads.buildMouseJson(0f, 0f, action = "click_left")
 
         queue.enqueueMove(3f, 1f)
-        queue.enqueueScroll(40f, hiRes = true)
-        queue.enqueueScroll(35f, hiRes = true)
+        queue.enqueueScroll(40f, hiRes = true, hwheel = -10f)
+        queue.enqueueScroll(35f, hiRes = true, hwheel = -15f)
         queue.enqueueControl(clickLeft)
-        queue.enqueueScroll(-2f, hiRes = false)
-        queue.enqueueScroll(-1f, hiRes = false)
+        queue.enqueueScroll(-2f, hiRes = false, hwheel = 1f)
+        queue.enqueueScroll(-1f, hiRes = false, hwheel = 2f)
 
         val batch = queue.drainBatch(16)
         assertEquals(
             listOf(
                 ProtocolPayloads.buildMouseJson(3f, 1f, action = "move"),
-                ProtocolPayloads.buildMouseJson(0f, 0f, action = "scroll", wheel = 75f, hiResWheel = true),
+                ProtocolPayloads.buildMouseJson(0f, 0f, action = "scroll", wheel = 75f, hiResWheel = true, hwheel = -25f),
                 clickLeft,
-                ProtocolPayloads.buildMouseJson(0f, 0f, action = "scroll", wheel = -3f, hiResWheel = false)
+                ProtocolPayloads.buildMouseJson(0f, 0f, action = "scroll", wheel = -3f, hiResWheel = false, hwheel = 3f)
+            ),
+            batch
+        )
+        assertNull(queue.pollNext())
+    }
+
+    @Test
+    fun `touchpad frames coalesce non-transition moves and preserve transition and control order`() {
+        val queue = BluetoothOutboundQueue()
+        val fDown = listOf(TouchpadContact(0, 4000, 4000))
+        val fMove1 = listOf(TouchpadContact(0, 4100, 4050))
+        val fMove2 = listOf(TouchpadContact(0, 4250, 4120))
+        val fLiftoff = emptyList<TouchpadContact>()
+        val keyEnter = ProtocolPayloads.buildKeyJson("enter")
+
+        queue.enqueueTouchpad(fDown, isTransition = true)
+        queue.enqueueTouchpad(fMove1, isTransition = false)
+        queue.enqueueTouchpad(fMove2, isTransition = false)
+        queue.enqueueTouchpad(fLiftoff, isTransition = true)
+        queue.enqueueControl(keyEnter)
+
+        val batch = queue.drainBatch(16)
+        assertEquals(
+            listOf(
+                ProtocolPayloads.buildTouchpadJson(fDown),
+                ProtocolPayloads.buildTouchpadJson(fMove2),
+                ProtocolPayloads.buildTouchpadJson(fLiftoff),
+                keyEnter
             ),
             batch
         )

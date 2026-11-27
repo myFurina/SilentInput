@@ -2582,7 +2582,7 @@ dependencies = [
 
 [[package]]
 name = "silentinput-cli"
-version = "1.0.22"
+version = "1.0.23"
 dependencies = [
  "clap",
  "qrcode",
@@ -2591,7 +2591,7 @@ dependencies = [
 
 [[package]]
 name = "silentinput-core"
-version = "1.0.22"
+version = "1.0.23"
 dependencies = [
  "evdev",
  "ipnet",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "silentinput-daemon"
-version = "1.0.22"
+version = "1.0.23"
 dependencies = [
  "evdev",
  "futures-util",
@@ -2625,7 +2625,7 @@ dependencies = [
 
 [[package]]
 name = "silentinput-gui"
-version = "1.0.22"
+version = "1.0.23"
 dependencies = [
  "iced",
  "silentinput-core",

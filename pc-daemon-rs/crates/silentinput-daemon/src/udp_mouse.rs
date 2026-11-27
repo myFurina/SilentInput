@@ -9,17 +9,19 @@ use ring::rand::{SecureRandom, SystemRandom};
 use silentinput_core::acl::normalize_ip_str;
 use tokio::net::UdpSocket;
 
-use crate::input::{push_wheel_events, InputController};
+use crate::input::{InputController, TimedWheelAcc, TouchContact, TOUCHPAD_MAX_SLOTS};
 
 pub const UDP_MAGIC: [u8; 2] = *b"SI";
 pub const UDP_VERSION: u8 = 0x01;
 pub const PKT_PROBE: u8 = 0x01;
 pub const PKT_PROBE_ACK: u8 = 0x02;
 pub const PKT_MOUSE_MOVE: u8 = 0x03;
+pub const PKT_TOUCHPAD: u8 = 0x04;
 
 pub const FLAG_HI_RES_WHEEL: u16 = 0x0001;
 pub const FLAG_FEC_PREV1: u16 = 0x0002;
 pub const FLAG_FEC_PREV2: u16 = 0x0004;
+pub const FLAG_HWHEEL: u16 = 0x0008;
 
 pub const HEADER_LEN: usize = 20;
 pub const GCM_TAG_LEN: usize = 16;
@@ -76,6 +78,18 @@ impl UdpMoveSmoother {
         self.last_emit = Some(now);
         Some((step_x, step_y))
     }
+
+    fn drain_all(&mut self) -> Option<(i32, i32)> {
+        if !self.has_pending() {
+            return None;
+        }
+        let dx = self.pending_dx;
+        let dy = self.pending_dy;
+        self.pending_dx = 0;
+        self.pending_dy = 0;
+        self.last_emit = Some(tokio::time::Instant::now());
+        Some((dx, dy))
+    }
 }
 
 pub const DIR_CLIENT_TO_SERVER: u32 = 1;
@@ -126,11 +140,23 @@ impl ReplayWindow {
 
 pub struct UdpSession {
     pub peer_ip: String,
+    pub conn_id: u64,
     key: LessSafeKey,
     replay: Mutex<ReplayWindow>,
-    wheel_hi_acc: Mutex<i32>,
+    wheel_hi_acc: Mutex<TimedWheelAcc>,
+    hwheel_hi_acc: Mutex<TimedWheelAcc>,
     server_seq: AtomicU64,
     probe_logged: AtomicBool,
+    applied_seq: AtomicU64,
+    last_touch_seq: AtomicU64,
+    seq_notify: tokio::sync::Notify,
+}
+
+impl UdpSession {
+    pub fn mark_applied(&self, seq: u64) {
+        self.applied_seq.fetch_max(seq, Ordering::AcqRel);
+        self.seq_notify.notify_waiters();
+    }
 }
 
 pub struct UdpSessionRegistry {
@@ -138,6 +164,7 @@ pub struct UdpSessionRegistry {
     enabled: bool,
     rng: SystemRandom,
     sessions: RwLock<HashMap<u64, Arc<UdpSession>>>,
+    flush_notify: Arc<tokio::sync::Notify>,
 }
 
 impl UdpSessionRegistry {
@@ -147,6 +174,7 @@ impl UdpSessionRegistry {
             enabled,
             rng: SystemRandom::new(),
             sessions: RwLock::new(HashMap::new()),
+            flush_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -158,7 +186,7 @@ impl UdpSessionRegistry {
         self.enabled && self.udp_port > 0
     }
 
-    pub fn create_session(&self, peer_ip: &str) -> Option<UdpSessionCredentials> {
+    pub fn create_session(&self, peer_ip: &str, conn_id: u64) -> Option<UdpSessionCredentials> {
         if !self.is_enabled() {
             return None;
         }
@@ -194,11 +222,16 @@ impl UdpSessionRegistry {
         let unbound = UnboundKey::new(&AES_256_GCM, &raw_key).ok()?;
         let session = Arc::new(UdpSession {
             peer_ip: norm_ip,
+            conn_id,
             key: LessSafeKey::new(unbound),
             replay: Mutex::new(ReplayWindow::default()),
-            wheel_hi_acc: Mutex::new(0),
+            wheel_hi_acc: Mutex::new(TimedWheelAcc::default()),
+            hwheel_hi_acc: Mutex::new(TimedWheelAcc::default()),
             server_seq: AtomicU64::new(0),
             probe_logged: AtomicBool::new(false),
+            applied_seq: AtomicU64::new(0),
+            last_touch_seq: AtomicU64::new(0),
+            seq_notify: tokio::sync::Notify::new(),
         });
 
         {
@@ -233,6 +266,42 @@ impl UdpSessionRegistry {
             .unwrap_or_else(|e| e.into_inner())
             .get(&session_id)
             .cloned()
+    }
+
+    pub async fn wait_for_applied_seq(
+        &self,
+        session_id: u64,
+        target_seq: u64,
+        max_wait: std::time::Duration,
+    ) {
+        if target_seq == 0 {
+            return;
+        }
+        let Some(session) = self.get_session(session_id) else {
+            return;
+        };
+        self.flush_notify.notify_waiters();
+        if session.applied_seq.load(Ordering::Acquire) >= target_seq {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + max_wait;
+        loop {
+            let notified = session.seq_notify.notified();
+            if session.applied_seq.load(Ordering::Acquire) >= target_seq {
+                return;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                return;
+            }
+            if session.applied_seq.load(Ordering::Acquire) >= target_seq {
+                return;
+            }
+        }
     }
 }
 
@@ -282,13 +351,20 @@ struct DecodedUdpMove {
     dy: i32,
     wheel: i32,
     is_hi_res: bool,
+    is_hwheel: bool,
 }
 
 enum UdpPacketAction {
     ProbeAck(Vec<u8>),
     MoveFrames {
         session: Arc<UdpSession>,
+        seq: u64,
         frames: Vec<DecodedUdpMove>,
+    },
+    TouchpadFrame {
+        session: Arc<UdpSession>,
+        seq: u64,
+        contacts: Vec<TouchContact>,
     },
 }
 
@@ -303,6 +379,7 @@ fn parse_move_frame(bytes: &[u8]) -> (DecodedUdpMove, u16) {
             dy,
             wheel,
             is_hi_res: (flags & FLAG_HI_RES_WHEEL) != 0,
+            is_hwheel: (flags & FLAG_HWHEEL) != 0,
         },
         flags,
     )
@@ -334,16 +411,20 @@ fn emit_wheel_frames(input: &dyn InputController, session: &UdpSession, frames: 
     if !frames.iter().any(|f| f.wheel != 0) || !input.ensure_ready(false) {
         return;
     }
+    let now = std::time::Instant::now();
     let mut events = Vec::with_capacity(frames.len() * 2);
     {
-        let mut acc = session.wheel_hi_acc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut vacc = session.wheel_hi_acc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut hacc = session.hwheel_hi_acc.lock().unwrap_or_else(|e| e.into_inner());
         for f in frames {
             if f.wheel != 0 {
-                if f.is_hi_res {
-                    push_wheel_events(&mut acc, f.wheel, 0, &mut events);
+                let acc = if f.is_hwheel { &mut hacc } else { &mut vacc };
+                let (raw_hi, raw_detent) = if f.is_hi_res {
+                    (f.wheel, 0)
                 } else {
-                    push_wheel_events(&mut acc, 0, f.wheel, &mut events);
-                }
+                    (0, f.wheel)
+                };
+                acc.push_wheel_events_at(raw_hi, raw_detent, f.is_hwheel, now, &mut events);
             }
         }
     }
@@ -365,7 +446,7 @@ fn decode_udp_packet_action(
     }
 
     let pkt_type = packet[3];
-    if pkt_type != PKT_PROBE && pkt_type != PKT_MOUSE_MOVE {
+    if pkt_type != PKT_PROBE && pkt_type != PKT_MOUSE_MOVE && pkt_type != PKT_TOUCHPAD {
         return None;
     }
 
@@ -444,7 +525,40 @@ fn decode_udp_packet_action(
             }
             frames.push(cur_frame);
             drop(replay);
-            Some(UdpPacketAction::MoveFrames { session, frames })
+            Some(UdpPacketAction::MoveFrames {
+                session,
+                seq,
+                frames,
+            })
+        }
+        PKT_TOUCHPAD => {
+            if pt.is_empty() {
+                return None;
+            }
+            let count = pt[0] as usize;
+            if count > TOUCHPAD_MAX_SLOTS || pt.len() < 1 + count * 6 {
+                return None;
+            }
+            drop(replay);
+            // Enforce strict monotonic ordering for absolute multi-touch snapshots so delayed
+            // UDP datagrams never teleport fingers backwards.
+            let prev = session.last_touch_seq.fetch_max(seq, Ordering::AcqRel);
+            if seq <= prev {
+                return None;
+            }
+            let mut contacts = Vec::with_capacity(count);
+            for i in 0..count {
+                let off = 1 + i * 6;
+                let pointer_id = u16::from_be_bytes([pt[off], pt[off + 1]]);
+                let x = u16::from_be_bytes([pt[off + 2], pt[off + 3]]);
+                let y = u16::from_be_bytes([pt[off + 4], pt[off + 5]]);
+                contacts.push(TouchContact { pointer_id, x, y });
+            }
+            Some(UdpPacketAction::TouchpadFrame {
+                session,
+                seq,
+                contacts,
+            })
         }
         _ => None,
     }
@@ -459,7 +573,11 @@ pub fn handle_udp_packet(
 ) -> Option<Vec<u8>> {
     match decode_udp_packet_action(packet, peer_addr, registry)? {
         UdpPacketAction::ProbeAck(reply) => Some(reply),
-        UdpPacketAction::MoveFrames { session, frames } => {
+        UdpPacketAction::MoveFrames {
+            session,
+            seq,
+            frames,
+        } => {
             if input.ensure_ready(false) {
                 let mut sum_dx = 0i32;
                 let mut sum_dy = 0i32;
@@ -488,14 +606,24 @@ pub fn handle_udp_packet(
                         ));
                     }
                     if has_wheel {
-                        let mut acc = session.wheel_hi_acc.lock().unwrap_or_else(|e| e.into_inner());
+                        let now = std::time::Instant::now();
+                        let mut vacc = session.wheel_hi_acc.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut hacc = session.hwheel_hi_acc.lock().unwrap_or_else(|e| e.into_inner());
                         for f in &frames {
                             if f.wheel != 0 {
-                                if f.is_hi_res {
-                                    push_wheel_events(&mut acc, f.wheel, 0, &mut events);
+                                let acc = if f.is_hwheel { &mut hacc } else { &mut vacc };
+                                let (raw_hi, raw_detent) = if f.is_hi_res {
+                                    (f.wheel, 0)
                                 } else {
-                                    push_wheel_events(&mut acc, 0, f.wheel, &mut events);
-                                }
+                                    (0, f.wheel)
+                                };
+                                acc.push_wheel_events_at(
+                                    raw_hi,
+                                    raw_detent,
+                                    f.is_hwheel,
+                                    now,
+                                    &mut events,
+                                );
                             }
                         }
                     }
@@ -504,8 +632,24 @@ pub fn handle_udp_packet(
                     }
                 }
             }
+            session.mark_applied(seq);
             None
         }
+        UdpPacketAction::TouchpadFrame {
+            session,
+            seq,
+            contacts,
+        } => {
+            input.apply_touchpad_frame(session.conn_id, &contacts);
+            session.mark_applied(seq);
+            None
+        }
+    }
+}
+
+fn flush_pending_seqs(pending: &mut Vec<(Arc<UdpSession>, u64)>) {
+    for (sess, seq) in pending.drain(..) {
+        sess.mark_applied(seq);
     }
 }
 
@@ -516,6 +660,7 @@ pub async fn run_udp_mouse_server(
 ) {
     let mut buf = [0u8; 256];
     let mut smoother = UdpMoveSmoother::default();
+    let mut pending_smoother_seqs: Vec<(Arc<UdpSession>, u64)> = Vec::new();
 
     loop {
         let flush_deadline = smoother.next_deadline();
@@ -535,7 +680,15 @@ pub async fn run_udp_mouse_server(
                             Some(UdpPacketAction::ProbeAck(reply)) => {
                                 let _ = socket.send_to(&reply, peer_addr).await;
                             }
-                            Some(UdpPacketAction::MoveFrames { session, frames }) => {
+                            Some(UdpPacketAction::TouchpadFrame {
+                                session,
+                                seq,
+                                contacts,
+                            }) => {
+                                input.apply_touchpad_frame(session.conn_id, &contacts);
+                                session.mark_applied(seq);
+                            }
+                            Some(UdpPacketAction::MoveFrames { session, seq, frames }) => {
                                 emit_wheel_frames(&*input, &session, &frames);
                                 let mut frame_dx = 0i32;
                                 let mut frame_dy = 0i32;
@@ -543,7 +696,13 @@ pub async fn run_udp_mouse_server(
                                     frame_dx = frame_dx.saturating_add(f.dx);
                                     frame_dy = frame_dy.saturating_add(f.dy);
                                 }
-                                if frame_dx != 0 || frame_dy != 0 {
+                                if frame_dx == 0 && frame_dy == 0 {
+                                    if !smoother.has_pending() {
+                                        session.mark_applied(seq);
+                                    } else {
+                                        pending_smoother_seqs.push((session, seq));
+                                    }
+                                } else {
                                     let is_burst = frames.len() > 1
                                         || smoother.has_pending()
                                         || frame_dx.abs().max(frame_dy.abs())
@@ -551,12 +710,19 @@ pub async fn run_udp_mouse_server(
                                     if !is_burst {
                                         // Pass normal single frames directly to kernel uinput with zero pacing jitter.
                                         emit_rel_move(&*input, frame_dx, frame_dy);
+                                        session.mark_applied(seq);
                                     } else {
                                         smoother.push(frame_dx, frame_dy);
                                         if let Some((sx, sy)) =
                                             smoother.take_step(tokio::time::Instant::now())
                                         {
                                             emit_rel_move(&*input, sx, sy);
+                                        }
+                                        if !smoother.has_pending() {
+                                            flush_pending_seqs(&mut pending_smoother_seqs);
+                                            session.mark_applied(seq);
+                                        } else {
+                                            pending_smoother_seqs.push((session, seq));
                                         }
                                     }
                                 }
@@ -576,6 +742,15 @@ pub async fn run_udp_mouse_server(
                 if let Some((sx, sy)) = smoother.take_step(step_time) {
                     emit_rel_move(&*input, sx, sy);
                 }
+                if !smoother.has_pending() {
+                    flush_pending_seqs(&mut pending_smoother_seqs);
+                }
+            }
+            _ = registry.flush_notify.notified() => {
+                if let Some((dx, dy)) = smoother.drain_all() {
+                    emit_rel_move(&*input, dx, dy);
+                }
+                flush_pending_seqs(&mut pending_smoother_seqs);
             }
         }
     }
@@ -597,6 +772,7 @@ mod tests {
     struct TestUdpInput {
         ready: AtomicBool,
         events: Mutex<Vec<Vec<(u16, u16, i32)>>>,
+        touchpad_frames: Mutex<Vec<(u64, Vec<TouchContact>)>>,
     }
 
     impl InputController for TestUdpInput {
@@ -604,6 +780,16 @@ mod tests {
             self.ready.load(Ordering::Acquire)
         }
         fn has_uinput_device(&self) -> bool {
+            true
+        }
+        fn has_touchpad_device(&self) -> bool {
+            true
+        }
+        fn apply_touchpad_frame(&self, conn_id: u64, contacts: &[TouchContact]) -> bool {
+            self.touchpad_frames
+                .lock()
+                .unwrap()
+                .push((conn_id, contacts.to_vec()));
             true
         }
         fn is_graphical_session(&self) -> bool {
@@ -690,7 +876,7 @@ mod tests {
             ready: AtomicBool::new(true),
             ..Default::default()
         });
-        let creds = registry.create_session("::ffff:192.168.1.50").unwrap();
+        let creds = registry.create_session("::ffff:192.168.1.50", 1).unwrap();
         assert_eq!(creds.port, 53318);
         assert_eq!(registry.session_count(), 1);
 
@@ -787,7 +973,7 @@ mod tests {
             ready: AtomicBool::new(true),
             ..Default::default()
         });
-        let creds = registry.create_session("192.168.1.50").unwrap();
+        let creds = registry.create_session("192.168.1.50", 2).unwrap();
         let key_bytes = decode_base64_for_test(&creds.key_b64);
         let client_key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key_bytes).unwrap());
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 44445);
@@ -845,7 +1031,7 @@ mod tests {
             ready: AtomicBool::new(true),
             ..Default::default()
         });
-        let creds = registry.create_session("192.168.1.50").unwrap();
+        let creds = registry.create_session("192.168.1.50", 2).unwrap();
         let key_bytes = decode_base64_for_test(&creds.key_b64);
         let client_key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key_bytes).unwrap());
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 44446);
@@ -969,7 +1155,7 @@ mod tests {
             ready: AtomicBool::new(true),
             ..Default::default()
         });
-        let creds = registry.create_session("127.0.0.1").unwrap();
+        let creds = registry.create_session("127.0.0.1", 3).unwrap();
         let key_bytes = decode_base64_for_test(&creds.key_b64);
         let client_key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key_bytes).unwrap());
 
@@ -1098,5 +1284,241 @@ mod tests {
         assert_eq!(total_dy, -4); // -9 + 3 + 2
 
         srv_handle.abort();
+    }
+
+    #[test]
+    fn udp_hwheel_hi_res_and_legacy_detents_emit_rel_hwheel() {
+        let registry = UdpSessionRegistry::new(53318, true);
+        let input = Arc::new(TestUdpInput {
+            ready: AtomicBool::new(true),
+            ..Default::default()
+        });
+        let creds = registry.create_session("192.168.1.50", 2).unwrap();
+        let key_bytes = decode_base64_for_test(&creds.key_b64);
+        let client_key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key_bytes).unwrap());
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 44447);
+
+        let make_pkt = |seq: u64, wheel: i16, flags: u16| {
+            let mut p = Vec::with_capacity(8);
+            p.extend_from_slice(&0i16.to_be_bytes());
+            p.extend_from_slice(&0i16.to_be_bytes());
+            p.extend_from_slice(&wheel.to_be_bytes());
+            p.extend_from_slice(&flags.to_be_bytes());
+            seal_udp_packet(
+                &client_key,
+                PKT_MOUSE_MOVE,
+                creds.session_id,
+                DIR_CLIENT_TO_SERVER,
+                seq,
+                &p,
+            )
+            .unwrap()
+        };
+
+        // 1. Hi-res hwheel 80 + 60 -> 140 => emits REL_HWHEEL_HI_RES + REL_HWHEEL=1
+        assert!(handle_udp_packet(
+            &make_pkt(1, 80, FLAG_HI_RES_WHEEL | FLAG_HWHEEL),
+            peer,
+            &registry,
+            &*input
+        )
+        .is_none());
+        assert!(handle_udp_packet(
+            &make_pkt(2, 60, FLAG_HI_RES_WHEEL | FLAG_HWHEEL),
+            peer,
+            &registry,
+            &*input
+        )
+        .is_none());
+        // 2. Legacy horizontal detent -1 -> REL_HWHEEL=-1 + REL_HWHEEL_HI_RES=-120
+        assert!(handle_udp_packet(&make_pkt(3, -1, FLAG_HWHEEL), peer, &registry, &*input).is_none());
+
+        let evs = input.events.lock().unwrap();
+        assert_eq!(evs.len(), 3);
+        assert_eq!(
+            evs[0],
+            vec![(EventType::RELATIVE.0, RelativeAxisType::REL_HWHEEL_HI_RES.0, 80)]
+        );
+        assert_eq!(
+            evs[1],
+            vec![
+                (EventType::RELATIVE.0, RelativeAxisType::REL_HWHEEL_HI_RES.0, 60),
+                (EventType::RELATIVE.0, RelativeAxisType::REL_HWHEEL.0, 1),
+            ]
+        );
+        assert_eq!(
+            evs[2],
+            vec![
+                (EventType::RELATIVE.0, RelativeAxisType::REL_HWHEEL.0, -1),
+                (EventType::RELATIVE.0, RelativeAxisType::REL_HWHEEL_HI_RES.0, -120),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_applied_seq_flushes_smoother_waits_for_delayed_pkt_and_bounds_lost_pkt() {
+        let registry = UdpSessionRegistry::new(53318, true);
+        let input = Arc::new(TestUdpInput {
+            ready: AtomicBool::new(true),
+            ..Default::default()
+        });
+        let creds = registry.create_session("127.0.0.1", 3).unwrap();
+        let key_bytes = decode_base64_for_test(&creds.key_b64);
+        let client_key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key_bytes).unwrap());
+
+        let srv_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let srv_addr = srv_sock.local_addr().unwrap();
+        let srv_handle = tokio::spawn(run_udp_mouse_server(
+            srv_sock,
+            Arc::clone(&registry),
+            Arc::clone(&input) as Arc<dyn InputController>,
+        ));
+
+        let client_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client_sock.connect(srv_addr).await.unwrap();
+
+        let make_move_pkt = |seq: u64, dx: i16, dy: i16| {
+            let mut p = Vec::with_capacity(8);
+            p.extend_from_slice(&dx.to_be_bytes());
+            p.extend_from_slice(&dy.to_be_bytes());
+            p.extend_from_slice(&0i16.to_be_bytes());
+            p.extend_from_slice(&0u16.to_be_bytes());
+            seal_udp_packet(
+                &client_key,
+                PKT_MOUSE_MOVE,
+                creds.session_id,
+                DIR_CLIENT_TO_SERVER,
+                seq,
+                &p,
+            )
+            .unwrap()
+        };
+
+        // 1. Burst packet (dx=80 > 40) engages smoother; wait_for_applied_seq(1) flushes immediately
+        client_sock.send(&make_move_pkt(1, 80, 0)).await.unwrap();
+        registry
+            .wait_for_applied_seq(creds.session_id, 1, std::time::Duration::from_millis(200))
+            .await;
+        let total_dx_after_1: i32 = input
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .filter(|(t, c, _)| *t == EventType::RELATIVE.0 && *c == RelativeAxisType::REL_X.0)
+            .map(|(_, _, v)| *v)
+            .sum();
+        assert_eq!(total_dx_after_1, 80);
+
+        // 2. Delayed seq=2 arrives 8ms later -> barrier waits cleanly and sees full delta before returning
+        let sock_delayed = client_sock;
+        let pkt2 = make_move_pkt(2, 15, -4);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+            let _ = sock_delayed.send(&pkt2).await;
+        });
+        registry
+            .wait_for_applied_seq(creds.session_id, 2, std::time::Duration::from_millis(200))
+            .await;
+        let total_dx_after_2: i32 = input
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .filter(|(t, c, _)| *t == EventType::RELATIVE.0 && *c == RelativeAxisType::REL_X.0)
+            .map(|(_, _, v)| *v)
+            .sum();
+        assert_eq!(total_dx_after_2, 95);
+
+        // 3. Permanently lost seq=99 returns cleanly at max_wait bound
+        let t_start = tokio::time::Instant::now();
+        registry
+            .wait_for_applied_seq(creds.session_id, 99, std::time::Duration::from_millis(20))
+            .await;
+        assert!(t_start.elapsed() >= std::time::Duration::from_millis(18));
+
+        srv_handle.abort();
+    }
+
+    #[test]
+    fn timed_wheel_acc_resets_stale_remainder_after_idle_gap() {
+        let mut acc = TimedWheelAcc::default();
+        let t0 = std::time::Instant::now();
+        assert_eq!(acc.add_and_take_detents(90, t0), 0);
+        // Within 250ms: +40 accumulates cleanly with +90 -> +130 -> 1 detent (rem +10)
+        assert_eq!(
+            acc.add_and_take_detents(40, t0 + std::time::Duration::from_millis(100)),
+            1
+        );
+        // Suppose another +90 remains before user stops swiping
+        assert_eq!(
+            acc.add_and_take_detents(80, t0 + std::time::Duration::from_millis(120)),
+            0
+        );
+        // After > 250ms idle pause, reverse -120 must NOT be eaten by stale +90
+        let t_later = t0 + std::time::Duration::from_millis(450);
+        assert_eq!(acc.add_and_take_detents(-120, t_later), -1);
+    }
+
+    #[test]
+    fn udp_touchpad_snapshot_roundtrip_and_strict_monotonic_order() {
+        let registry = UdpSessionRegistry::new(53318, true);
+        let input = Arc::new(TestUdpInput {
+            ready: AtomicBool::new(true),
+            ..Default::default()
+        });
+        let creds = registry.create_session("192.168.1.50", 42).unwrap();
+        let key_bytes = decode_base64_for_test(&creds.key_b64);
+        let client_key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key_bytes).unwrap());
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 44449);
+
+        let seal_touch = |seq: u64, contacts: &[(u16, u16, u16)]| -> Vec<u8> {
+            let mut pt = Vec::with_capacity(1 + contacts.len() * 6);
+            pt.push(contacts.len() as u8);
+            for &(id, x, y) in contacts {
+                pt.extend_from_slice(&id.to_be_bytes());
+                pt.extend_from_slice(&x.to_be_bytes());
+                pt.extend_from_slice(&y.to_be_bytes());
+            }
+            seal_udp_packet(
+                &client_key,
+                PKT_TOUCHPAD,
+                creds.session_id,
+                DIR_CLIENT_TO_SERVER,
+                seq,
+                &pt,
+            )
+            .unwrap()
+        };
+
+        let pkt_old = seal_touch(4, &[(1, 3000, 3000)]);
+        let pkt_new = seal_touch(5, &[(1, 3200, 3100), (2, 4200, 4100)]);
+        let pkt_liftoff = seal_touch(6, &[]);
+
+        // Apply seq=5 first, then delayed seq=4 -> seq=4 must be dropped
+        assert!(handle_udp_packet(&pkt_new, peer, &registry, &*input).is_none());
+        assert!(handle_udp_packet(&pkt_old, peer, &registry, &*input).is_none());
+        assert!(handle_udp_packet(&pkt_liftoff, peer, &registry, &*input).is_none());
+
+        let frames = input.touchpad_frames.lock().unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].0, 42);
+        assert_eq!(
+            frames[0].1,
+            vec![
+                TouchContact {
+                    pointer_id: 1,
+                    x: 3200,
+                    y: 3100
+                },
+                TouchContact {
+                    pointer_id: 2,
+                    x: 4200,
+                    y: 4100
+                }
+            ]
+        );
+        assert_eq!(frames[1], (42, Vec::new()));
     }
 }

@@ -68,6 +68,8 @@ pub struct SilentInputConfig {
     pub enable_tls: bool,
     #[serde(default = "default_true")]
     pub allow_usb_unauthenticated: bool,
+    #[serde(default = "default_true")]
+    pub restore_clipboard: bool,
     #[serde(default = "default_access_control_mode")]
     pub access_control_mode: String,
     #[serde(default = "default_whitelist")]
@@ -91,6 +93,7 @@ impl Default for SilentInputConfig {
             token_expire_mode: default_token_expire_mode(),
             enable_tls: true,
             allow_usb_unauthenticated: true,
+            restore_clipboard: true,
             access_control_mode: default_access_control_mode(),
             whitelist: default_whitelist(),
             blacklist: Vec::new(),

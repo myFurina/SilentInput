@@ -41,6 +41,7 @@ internal fun MoreSettingsSectionContent(
     val appLanguage by viewModel.appLanguage.collectAsState()
     val showInlineTrackpadInText by viewModel.showInlineTrackpadInText.collectAsState()
     val showSnippetsInText by viewModel.showSnippetsInText.collectAsState()
+    val useNativeTouchpad by viewModel.useNativeTouchpad.collectAsState()
     val isNaturalScrolling by viewModel.isNaturalScrolling.collectAsState()
     val imeSwitchKey by viewModel.imeSwitchKey.collectAsState()
     val snippets by viewModel.snippets.collectAsState()
@@ -80,6 +81,15 @@ internal fun MoreSettingsSectionContent(
             subtitle = strings.inlineTrackpadSubtitle,
             checked = showInlineTrackpadInText,
             onCheckedChange = { viewModel.setShowInlineTrackpadInText(it) }
+        )
+
+        SectionDivider()
+
+        ToggleSettingRow(
+            title = strings.nativeTouchpadTitle,
+            subtitle = strings.nativeTouchpadSubtitle,
+            checked = useNativeTouchpad,
+            onCheckedChange = { viewModel.setUseNativeTouchpad(it) }
         )
 
         SectionDivider()

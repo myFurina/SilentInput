@@ -9,12 +9,16 @@ sealed class ServerMessage {
         val udpPort: Int? = null,
         val udpSessionId: String? = null,
         val udpKey: String? = null,
-        val hiResWheel: Boolean? = null
+        val hiResWheel: Boolean? = null,
+        val nativeTouchpad: Boolean? = null,
+        val touchpadMax: Int? = null
     ) : ServerMessage()
     data class Status(
         val unicodeDirectTyping: Boolean?,
         val version: String? = null,
-        val hiResWheel: Boolean? = null
+        val hiResWheel: Boolean? = null,
+        val nativeTouchpad: Boolean? = null,
+        val touchpadMax: Int? = null
     ) : ServerMessage()
     data class PasteResult(
         val status: String,
@@ -50,17 +54,45 @@ object ProtocolPayloads {
         dy: Float,
         action: String = "move",
         wheel: Float = 0f,
-        hiResWheel: Boolean = false
+        hiResWheel: Boolean = false,
+        hwheel: Float = 0f,
+        udpSeq: Long = 0L
     ): String {
         val safeDx = sanitizeFinite(dx)
         val safeDy = sanitizeFinite(dy)
         val safeWheel = sanitizeFinite(wheel)
+        val safeHwheel = sanitizeFinite(hwheel)
         val wheelField = when {
             safeWheel == 0f -> ""
             hiResWheel -> ",\"wheel_hi\":${safeWheel.toInt()}"
             else -> ",\"wheel\":$safeWheel"
         }
-        return """{"type":"mouse","dx":$safeDx,"dy":$safeDy,"action":${quoteJson(action)}$wheelField}"""
+        val hwheelField = when {
+            safeHwheel == 0f -> ""
+            hiResWheel -> ",\"hwheel_hi\":${safeHwheel.toInt()}"
+            else -> ",\"hwheel\":$safeHwheel"
+        }
+        val udpSeqField = if (udpSeq > 0L) ",\"udp_seq\":$udpSeq" else ""
+        return """{"type":"mouse","dx":$safeDx,"dy":$safeDy,"action":${quoteJson(action)}$wheelField$hwheelField$udpSeqField}"""
+    }
+
+    fun buildTouchpadJson(contacts: List<TouchpadContact>): String {
+        val sb = StringBuilder(24 + contacts.size * 14)
+        sb.append("""{"type":"touchpad","c":[""")
+        val limit = contacts.size.coerceAtMost(NativeTouchpadMapper.MAX_CONTACTS)
+        for (i in 0 until limit) {
+            if (i > 0) sb.append(',')
+            val c = contacts[i]
+            sb.append('[')
+                .append(c.pointerId and 0xFFFF)
+                .append(',')
+                .append(c.x.coerceIn(0, 0xFFFF))
+                .append(',')
+                .append(c.y.coerceIn(0, 0xFFFF))
+                .append(']')
+        }
+        sb.append("]}")
+        return sb.toString()
     }
 
     fun buildPasteJson(text: String, enter: Boolean = false, mode: String = "terminal"): String {
@@ -109,6 +141,8 @@ object ProtocolPayloads {
                 val udpSessionId = obj["udp_session_id"] as? String
                 val udpKey = obj["udp_key"] as? String
                 val hiResWheel = obj["hi_res_wheel"] as? Boolean
+                val nativeTouchpad = obj["native_touchpad"] as? Boolean
+                val touchpadMax = (obj["touchpad_max"] as? Number)?.toInt()
                 ServerMessage.AuthResult(
                     status = status,
                     message = message,
@@ -116,14 +150,18 @@ object ProtocolPayloads {
                     udpPort = udpPort,
                     udpSessionId = udpSessionId,
                     udpKey = udpKey,
-                    hiResWheel = hiResWheel
+                    hiResWheel = hiResWheel,
+                    nativeTouchpad = nativeTouchpad,
+                    touchpadMax = touchpadMax
                 )
             }
             "status" -> {
                 val unicode = obj["unicode_direct_typing"] as? Boolean
                 val version = obj["version"] as? String
                 val hiResWheel = obj["hi_res_wheel"] as? Boolean
-                ServerMessage.Status(unicode, version, hiResWheel)
+                val nativeTouchpad = obj["native_touchpad"] as? Boolean
+                val touchpadMax = (obj["touchpad_max"] as? Number)?.toInt()
+                ServerMessage.Status(unicode, version, hiResWheel, nativeTouchpad, touchpadMax)
             }
             "paste_result" -> {
                 val status = (obj["status"] as? String).orEmpty()

@@ -13,3 +13,4 @@ __pycache__/
 pc-daemon/venv/
 /tmp/
 app/build/
+.kotlin/

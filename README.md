@@ -2,31 +2,43 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-A remote input companion for **Linux (Wayland / GNOME)** that turns your Android phone into a silent wireless/wired keyboard, clipboard text injector, and touchpad for your PC.
+Remote input tool for **Linux (Wayland / X11 / headless TTY)** consisting of a **Rust** PC daemon with an **Iced** desktop GUI (no Python or GTK runtime dependencies) and an **Android (Jetpack Compose)** client for keyboard input, pointer/touchpad control, and text transmission.
 
 > [!NOTE]
-> SilentInput is completely free and open-source under the **GNU GPL-3.0** license. The only official distribution channel is this repository's [Releases](https://github.com/myFurina/SilentInput/releases) page. Beware of paid resellers or modified third-party builds.
+> SilentInput is open-source software licensed under **GNU GPL-3.0**. Official builds are published only on this repository's [Releases](https://github.com/myFurina/SilentInput/releases) page.
 
 ## Features
 
-- **Three Connection Modes**:
-  - **USB (`adb reverse`)**: Local passwordless connection forwarded via `adb reverse tcp:53318 tcp:53318` (tracked automatically over ADB TCP protocol; if using a non-default `ANDROID_ADB_SERVER_PORT` under `systemd --user`, configure it persistently in `~/.config/environment.d/adb.conf` or via `systemctl --user edit silentinput.service` with `Environment=...`, as shell `export` and `systemctl --user set-environment` do not persist across reboots).
-  - **LAN (`WebSocket / WSS` + `UDP`)**: Default port `53318/tcp` (control, auth, typing) + optional `53318/udp` (AES-256-GCM encrypted binary mouse stream for ultra-low latency, auto-falls back to `TCP_NODELAY` WebSocket if blocked by firewall), with pairing token authentication, silent first-use TLS certificate fingerprint pinning (TOFU), and toggleable TLS encryption.
-  - **Bluetooth (`RFCOMM`)**: Direct in-app connection after pairing once in system Bluetooth settings — no Bluetooth tethering required.
-- **Keyboard Tab**: Common shortcut keys, lockable modifiers (`Ctrl` / `Alt` / `Shift` / `Win`), arrow keys, and a collapsible compact full keyboard (letters, numbers, `F1–F12`, and navigation keys).
-- **Touchpad Tab**: Single-finger cursor movement, two-finger scrolling, and left/right clicks injected on the PC via kernel `uinput`.
-- **Text Tab**: Sends text through `wl-copy` to the system clipboard followed by a paste shortcut (switchable between terminal `Ctrl+Shift+V` and standard `Ctrl+V`), preventing host IMEs from swallowing or mangling characters; includes custom quick phrases and an optional collapsible bottom touchpad strip.
+- **Connection Modes**:
+  - **USB (`adb reverse`)**: Local connection forwarded via `adb reverse tcp:53318 tcp:53318` with automatic ADB device tracking. If using a non-default `ANDROID_ADB_SERVER_PORT` under `systemd --user`, set it persistently in `~/.config/environment.d/adb.conf` or via `systemctl --user edit silentinput.service` (`Environment=...`), since shell `export` and `systemctl --user set-environment` do not persist across reboots.
+  - **LAN (`WebSocket / WSS` + `UDP`)**: Port `53318/tcp` for control, authentication, and text transmission, paired with an optional `53318/udp` AES-256-GCM encrypted binary channel for pointer/wheel/touchpad frames (with 2-frame FEC recovery and automatic fallback to `TCP_NODELAY` WebSocket if UDP is blocked). Supports QR code pairing (`silentinput qr` or the desktop GUI), saved host entries, Android Keystore token storage, TOFU certificate fingerprint pinning, and toggleable TLS encryption.
+  - **Bluetooth (`RFCOMM`)**: Connects directly in the app after system Bluetooth pairing, without requiring Bluetooth tethering.
+
+- **Touchpad & Movement Tuning**:
+  - **Virtual Multi-Touch Touchpad (`uinput` MT Protocol B)**: Emulates a `400mm × 400mm` virtual touchpad for two-finger scrolling, pinch-to-zoom, and native three-finger gestures, with automatic fallback to relative mouse mode (`REL_WHEEL_HI_RES`, double-tap drag, three-finger shortcuts, and vertical scroll momentum).
+  - **Parameter Tuning Panel**: Includes 4 presets (**Precise**, **Balanced**, **Fast**, **Raw**) and 18 adjustable parameters organized into 3 tabs:
+    - **Basic**: Pointer Speed, Scroll Speed, Acceleration, One-Euro Smoothing, Touchdown Deadzone, Multi-Touch Merge Window.
+    - **Curve**: Vertical Ratio (Y/X), Low-Speed Precision, Acceleration Threshold, Acceleration Curve, Speed Cap, Pointer Coasting Inertia.
+    - **Adjust**: Manual Grip Rotation (`±30°`), Angle Snapping, Edge Palm Guard (with border preview when the panel is open), Velocity Prediction (`0–16ms`), Scroll Fling Brake, Tap Wobble Tolerance.
+    - Includes toggles for **Anti-Whip** (multi-finger liftoff lock) and **Axis Lock** (scroll axis lock).
+  - **360° Auto-Tilt Rotation** *(optional toggle)*: Uses the gravity sensor (`TYPE_GRAVITY`, or accelerometer fallback) to rotate the trackpad coordinate plane (`-180°` to `+180°`), applying the same rotation to single-finger movement, two-finger scroll/pinch, and three-finger swipes. Displays the live angle, rotates the internal background grid and direction marker, holds the current orientation when placed flat on a surface, and unregisters the sensor listener when backgrounded.
+
+- **Keyboard Tab**: Common shortcuts, configurable IME switch key, lockable modifier keys (`Ctrl` / `Alt` / `Shift` / `Win`), arrow keys, collapsible mini keyboard (`A–Z`, `0–9`, `F1–F12`, navigation), and a landscape full-keyboard layout.
+
+- **Text Tab**: Supports three input methods — **Terminal** (`Ctrl+Shift+V`), **App** (`Ctrl+V` with clipboard backup/restore), and **Direct Typing** (keycode injection for Wayland / X11 / headless TTY) — to avoid host IME interference on multi-character text, along with configurable quick-edit buttons, saved phrases, and an optional inline touchpad.
+
+- **Localization & Display Options**: Supports **English** and **Simplified Chinese** (system default uses Chinese when the OS language is `zh` and falls back to English for other locales), Dark Mode, and Silent Mode (disables haptic feedback).
 
 ## Android App Installation
 
-1. Open the [Releases](https://github.com/myFurina/SilentInput/releases) page.
-2. Download the latest **`app-release.apk`** and install it (signed with a fixed release key so future versions upgrade cleanly in place).
+1. Open [Releases](https://github.com/myFurina/SilentInput/releases).
+2. Download and install **`app-release.apk`** (signed with a consistent release key for in-place upgrades).
 
-## Linux PC Companion Installation
+## Linux PC Daemon Installation
 
-### Option 1: Native Linux Packages (Recommended)
+### Option 1: Distribution Packages (`amd64` / `arm64`)
 
-Download the matching package for your distro from [Releases](https://github.com/myFurina/SilentInput/releases):
+No Python or GTK runtime dependencies required. Download the package matching your distribution from [Releases](https://github.com/myFurina/SilentInput/releases):
 
 * **Debian / Ubuntu**:
   ```bash
@@ -47,37 +59,40 @@ Download the matching package for your distro from [Releases](https://github.com
   # Uninstall: sudo pacman -R silentinput
   ```
 
-### Option 2: Smart Installer Script (Supports Immutable Distros such as Bluefin / Silverblue)
+### Option 2: Install Script (Supports Immutable Distributions such as Bluefin / Silverblue)
 
-No git clone required — the installer detects your distro automatically (uses `.deb`/`.rpm` or system package managers where available, and automatically provisions an isolated Python venv with `evdev` on `ostree` / immutable desktops without requiring a reboot):
+Detects the current distribution and CPU architecture: installs `.deb` or `.rpm` packages on Debian/Ubuntu/Fedora, extracts the prebuilt `silentinput-linux-*.tar.gz` binary archive on `ostree`-based immutable systems or Arch/openSUSE (without requiring Cargo or a reboot), and checks/installs `wl-clipboard`, `xclip`, `adb`, and `uinput` udev rules:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/myFurina/SilentInput/main/pc-daemon/install.sh | bash
 ```
 
-Or run locally from a cloned repository:
+Or run from a local repository clone:
 
 ```bash
 cd pc-daemon
 bash install.sh
 ```
 
-### Common CLI Commands
+### CLI Commands
 
 ```bash
-silentinput status      # Show daemon status, IP, port, and pairing token
-silentinput bluetooth   # Show local Bluetooth adapter & paired devices
-silentinput start       # Start the companion daemon
-silentinput stop        # Stop the companion daemon
-silentinput restart     # Restart the companion daemon
-silentinput token       # View pairing token (pass --reset to rotate)
-silentinput tls on|off  # Toggle WSS TLS encryption
-silentinput logs        # Stream daemon logs
-silentinput gui         # Open the GTK4 / Libadwaita control center
-silentinput uninstall   # Uninstall (or show package-manager remove hint)
+silentinput status              # Show daemon status, IPs, ports, and pairing token
+silentinput qr                  # Print LAN QR pairing code in terminal
+silentinput bluetooth           # Show local Bluetooth adapter and paired devices
+silentinput start               # Start the daemon
+silentinput stop                # Stop the daemon
+silentinput restart             # Restart the daemon
+silentinput token               # Show pairing token (--reset to regenerate, --qr for QR)
+silentinput tls on|off          # Enable or disable WSS TLS encryption
+silentinput autostart on|off    # Enable or disable systemd --user autostart
+silentinput logs                # Stream daemon logs
+silentinput gui                 # Open the desktop GUI window
+silentinput reset               # Reset config to defaults and restart daemon
+silentinput uninstall           # Uninstall (or print package-manager removal command)
 ```
 
-To also remove pairing tokens, TLS certificates, and configuration files:
+To remove configuration files, tokens, and TLS certificates:
 
 ```bash
 rm -rf ~/.config/silentinput
@@ -85,4 +100,4 @@ rm -rf ~/.config/silentinput
 
 ## License
 
-Released under the [GNU General Public License v3.0](LICENSE).
+Licensed under [GNU General Public License v3.0](LICENSE).

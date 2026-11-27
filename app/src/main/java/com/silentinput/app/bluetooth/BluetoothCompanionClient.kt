@@ -20,6 +20,7 @@ import com.silentinput.app.model.BaseInputTransport
 import com.silentinput.app.model.InputTransport
 import com.silentinput.app.model.ProtocolPayloads
 import com.silentinput.app.model.ServerMessage
+import com.silentinput.app.model.TouchpadContact
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
@@ -325,6 +326,8 @@ class BluetoothCompanionClient(
                         _isConnecting.value = false
                         _supportsUnicodeDirectTyping.value = true
                         _supportsHiResWheel.value = false
+                        _supportsNativeTouchpad.value = false
+                        _nativeTouchpadMaxCoord.value = com.silentinput.app.model.NativeTouchpadMapper.LEGACY_MAX_COORD
                         val connectedLabel = safeDeviceName(device)
                         _connectedDeviceName.value = connectedLabel
                         _connectedDeviceAddress.value = device.address
@@ -420,6 +423,12 @@ class BluetoothCompanionClient(
                         msg.hiResWheel?.let {
                             _supportsHiResWheel.value = it
                         }
+                        msg.nativeTouchpad?.let {
+                            _supportsNativeTouchpad.value = it
+                        }
+                        msg.touchpadMax?.takeIf { it in 4000..65535 }?.let {
+                            _nativeTouchpadMaxCoord.value = it
+                        }
                     } else {
                         val serverMsg = msg.message.takeIf { it.isNotBlank() }
                         disconnectLocked(resetStatus = false)
@@ -435,6 +444,12 @@ class BluetoothCompanionClient(
                     }
                     msg.hiResWheel?.let {
                         _supportsHiResWheel.value = it
+                    }
+                    msg.nativeTouchpad?.let {
+                        _supportsNativeTouchpad.value = it
+                    }
+                    msg.touchpadMax?.takeIf { it in 4000..65535 }?.let {
+                        _nativeTouchpadMaxCoord.value = it
                     }
                     msg.version?.let {
                         _daemonVersion.value = it
@@ -539,6 +554,8 @@ class BluetoothCompanionClient(
             _latencyMs.value = null
             _supportsUnicodeDirectTyping.value = true
             _supportsHiResWheel.value = false
+            _supportsNativeTouchpad.value = false
+            _nativeTouchpadMaxCoord.value = com.silentinput.app.model.NativeTouchpadMapper.LEGACY_MAX_COORD
             _daemonVersion.value = null
             if (wasConnectedOrConnecting) {
                 setStatusMessage { it.btStatusConnectionLost }
@@ -563,6 +580,8 @@ class BluetoothCompanionClient(
         _latencyMs.value = null
         _supportsUnicodeDirectTyping.value = true
         _supportsHiResWheel.value = false
+        _supportsNativeTouchpad.value = false
+        _nativeTouchpadMaxCoord.value = com.silentinput.app.model.NativeTouchpadMapper.LEGACY_MAX_COORD
         _daemonVersion.value = null
         if (resetStatus) {
             setStatusMessage { it.btStatusDisconnected }
@@ -629,17 +648,17 @@ class BluetoothCompanionClient(
         return sendRaw(ProtocolPayloads.buildKeyJson(key, action = action))
     }
 
-    override fun sendMouse(dx: Float, dy: Float, action: String, wheel: Float): Boolean {
+    override fun sendMouse(dx: Float, dy: Float, action: String, wheel: Float, hwheel: Float): Boolean {
         synchronized(stateLock) {
             val signal = wakeSignal
             if (!_isConnected.value || signal == null) return false
-            if (action == "move" && wheel == 0f) {
+            if (action == "move" && wheel == 0f && hwheel == 0f) {
                 outboundQueue.enqueueMove(dx, dy)
                 signal.trySend(Unit)
                 return true
             }
-            if (action == "scroll" && wheel != 0f) {
-                outboundQueue.enqueueScroll(wheel, hiRes = _supportsHiResWheel.value)
+            if (action == "scroll" && (wheel != 0f || hwheel != 0f)) {
+                outboundQueue.enqueueScroll(wheel, hiRes = _supportsHiResWheel.value, hwheel = hwheel)
                 signal.trySend(Unit)
                 return true
             }
@@ -649,7 +668,8 @@ class BluetoothCompanionClient(
                     dy,
                     action = action,
                     wheel = wheel,
-                    hiResWheel = action == "scroll" && _supportsHiResWheel.value
+                    hiResWheel = action == "scroll" && _supportsHiResWheel.value,
+                    hwheel = hwheel
                 )
             )
             signal.trySend(Unit)
@@ -659,5 +679,15 @@ class BluetoothCompanionClient(
 
     override fun sendPaste(text: String, enter: Boolean, mode: String): Boolean {
         return sendRaw(ProtocolPayloads.buildPasteJson(text, enter = enter, mode = mode))
+    }
+
+    override fun sendTouchpadFrame(contacts: List<TouchpadContact>, isTransition: Boolean): Boolean {
+        synchronized(stateLock) {
+            val signal = wakeSignal
+            if (!_isConnected.value || signal == null) return false
+            outboundQueue.enqueueTouchpad(contacts, isTransition)
+            signal.trySend(Unit)
+            return true
+        }
     }
 }

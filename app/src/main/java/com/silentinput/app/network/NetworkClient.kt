@@ -1,6 +1,8 @@
 package com.silentinput.app.network
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.SystemClock
@@ -12,6 +14,7 @@ import com.silentinput.app.model.InputTransport
 import com.silentinput.app.model.MouseAction
 import com.silentinput.app.model.ProtocolPayloads
 import com.silentinput.app.model.ServerMessage
+import com.silentinput.app.model.TouchpadContact
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -27,15 +30,19 @@ import java.security.SecureRandom
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import javax.net.SocketFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import javax.crypto.spec.SecretKeySpec
 import kotlin.math.roundToInt
 
 class NetworkClient(
     context: Context? = null,
-    initialLanguage: AppLanguage = AppLanguage.ZH
+    initialLanguage: AppLanguage = AppLanguage.ZH,
+    private val udpReprobeIntervalMs: Long = DEFAULT_UDP_REPROBE_INTERVAL_MS,
+    private val wifiLockIdleTimeoutMs: Long = DEFAULT_WIFI_LOCK_IDLE_TIMEOUT_MS
 ) : BaseInputTransport(initialLanguage) {
 
     data class ParsedEndpoint(val host: String, val port: Int) {
@@ -49,6 +56,15 @@ class NetworkClient(
         }
     }
 
+    private class UdpSessionSpec(
+        val webSocket: WebSocket,
+        val host: String,
+        val port: Int,
+        val sessionId: Long,
+        val secretKey: SecretKeySpec,
+        val seqCounter: AtomicLong = AtomicLong(0L)
+    )
+
     companion object {
         private const val TAG = "NetworkClient"
         const val DEFAULT_PORT = 53318
@@ -58,6 +74,9 @@ class NetworkClient(
         private const val PING_TIMEOUT_MS = 5000L
         private const val WS_MOVE_COALESCE_INTERVAL_MS = 8L
         private const val MAX_RECONNECT_ATTEMPTS = 8
+        private const val DEFAULT_UDP_REPROBE_INTERVAL_MS = 60_000L
+        private const val DEFAULT_WIFI_LOCK_IDLE_TIMEOUT_MS = 15_000L
+        private const val FOREGROUND_UDP_REPROBE_MIN_GAP_NS = 5_000_000_000L
 
         fun isLoopbackHost(rawHost: String): Boolean {
             val host = rawHost.trim().removePrefix("[").removeSuffix("]")
@@ -119,7 +138,12 @@ class NetworkClient(
 
     private val tofuPrefs = context?.applicationContext?.getSharedPreferences(TOFU_PREFS_NAME, Context.MODE_PRIVATE)
     private val wifiManager = context?.applicationContext?.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+    private val connectivityManager =
+        context?.applicationContext?.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
     private var wifiLock: WifiManager.WifiLock? = null
+    private var wifiLockIdleJob: Job? = null
+    @Volatile
+    private var lastMouseActivityNs: Long = 0L
     private var activeHostIsLan = false
 
     private val wsMoveLock = Any()
@@ -127,9 +151,15 @@ class NetworkClient(
     private var pendingWsMoveDy = 0f
     private var hasPendingWsMove = false
     private var wsMoveFlushJob: Job? = null
+    private var pendingWsTouchpad: List<TouchpadContact>? = null
+    private var wsTouchFlushJob: Job? = null
 
     @Volatile
     private var udpMouseChannel: UdpMouseChannel? = null
+    private var activeUdpSpec: UdpSessionSpec? = null
+    private var udpReprobeJob: Job? = null
+    @Volatile
+    private var lastUdpProbeStartedNs: Long = 0L
 
     private val _isUdpMouseActive = MutableStateFlow(false)
     val isUdpMouseActive = _isUdpMouseActive.asStateFlow()
@@ -440,6 +470,8 @@ class NetworkClient(
                     _isEncrypted.value = useTls
                     _supportsUnicodeDirectTyping.value = true
                     _supportsHiResWheel.value = false
+                    _supportsNativeTouchpad.value = false
+                    _nativeTouchpadMaxCoord.value = com.silentinput.app.model.NativeTouchpadMapper.LEGACY_MAX_COORD
 
                     if (isUsb) {
                         _isAuthenticated.value = true
@@ -492,29 +524,28 @@ class NetworkClient(
                                     _supportsUnicodeDirectTyping.value = it
                                 }
                                 _supportsHiResWheel.value = msg.hiResWheel == true
+                                _supportsNativeTouchpad.value = msg.nativeTouchpad == true
+                                msg.touchpadMax?.takeIf { it in 4000..65535 }?.let {
+                                    _nativeTouchpadMaxCoord.value = it
+                                }
                                 setConnectionError(null)
-                                acquireWifiLockLocked()
+                                activeUdpSpec = null
+                                udpReprobeJob?.cancel()
+                                udpReprobeJob = null
                                 closeUdpChannelLocked()
                                 if (!isLoopbackHost(endpoint.host) && msg.udpPort != null && msg.udpSessionId != null && msg.udpKey != null) {
                                     val sid = UdpMouseCodec.parseSessionIdHex(msg.udpSessionId)
                                     val key = UdpMouseCodec.decodeAes256Key(msg.udpKey)
                                     if (sid != null && key != null && msg.udpPort in 1..65535) {
-                                        lateinit var ch: UdpMouseChannel
-                                        ch = UdpMouseChannel(
+                                        val spec = UdpSessionSpec(
+                                            webSocket = webSocket,
                                             host = endpoint.host,
                                             port = msg.udpPort,
                                             sessionId = sid,
-                                            secretKey = key,
-                                            onReadyChanged = { ready ->
-                                                synchronized(stateLock) {
-                                                    if (this@NetworkClient.webSocket === webSocket && udpMouseChannel === ch) {
-                                                        _isUdpMouseActive.value = ready
-                                                    }
-                                                }
-                                            }
+                                            secretKey = key
                                         )
-                                        udpMouseChannel = ch
-                                        udpToStart = ch
+                                        activeUdpSpec = spec
+                                        udpToStart = startUdpChannelLocked(spec)
                                     }
                                 }
                             }
@@ -544,6 +575,12 @@ class NetworkClient(
                             }
                             msg.hiResWheel?.let {
                                 _supportsHiResWheel.value = it
+                            }
+                            msg.nativeTouchpad?.let {
+                                _supportsNativeTouchpad.value = it
+                            }
+                            msg.touchpadMax?.takeIf { it in 4000..65535 }?.let {
+                                _nativeTouchpadMaxCoord.value = it
                             }
                             msg.version?.let {
                                 _daemonVersion.value = it
@@ -636,9 +673,118 @@ class NetworkClient(
         ch?.close()
     }
 
+    private fun startUdpChannelLocked(spec: UdpSessionSpec): UdpMouseChannel {
+        udpReprobeJob?.cancel()
+        udpReprobeJob = null
+        closeUdpChannelLocked()
+        lastUdpProbeStartedNs = System.nanoTime()
+        lateinit var ch: UdpMouseChannel
+        ch = UdpMouseChannel(
+            host = spec.host,
+            port = spec.port,
+            sessionId = spec.sessionId,
+            secretKey = spec.secretKey,
+            seqCounter = spec.seqCounter,
+            onReadyChanged = { ready ->
+                synchronized(stateLock) {
+                    if (this@NetworkClient.webSocket === spec.webSocket && udpMouseChannel === ch) {
+                        _isUdpMouseActive.value = ready
+                    }
+                }
+            },
+            onUnexpectedClose = {
+                synchronized(stateLock) {
+                    if (this@NetworkClient.webSocket === spec.webSocket &&
+                        activeUdpSpec === spec &&
+                        udpMouseChannel === ch
+                    ) {
+                        udpMouseChannel = null
+                        _isUdpMouseActive.value = false
+                        scheduleUdpReprobeLocked(spec)
+                    }
+                }
+            }
+        )
+        udpMouseChannel = ch
+        return ch
+    }
+
+    private fun scheduleUdpReprobeLocked(spec: UdpSessionSpec) {
+        if (isInBackground ||
+            this@NetworkClient.webSocket !== spec.webSocket ||
+            activeUdpSpec !== spec ||
+            !_isAuthenticated.value
+        ) {
+            return
+        }
+        udpReprobeJob?.cancel()
+        val delayMs = udpReprobeIntervalMs.coerceAtLeast(50L)
+        udpReprobeJob = scope.launch {
+            delay(delayMs)
+            val chToStart = synchronized(stateLock) {
+                if (this@NetworkClient.webSocket === spec.webSocket &&
+                    activeUdpSpec === spec &&
+                    _isAuthenticated.value &&
+                    !isInBackground &&
+                    udpMouseChannel?.isReady != true
+                ) {
+                    startUdpChannelLocked(spec)
+                } else {
+                    null
+                }
+            }
+            chToStart?.start()
+        }
+    }
+
+    private fun isOnWifiNetwork(): Boolean {
+        val cm = connectivityManager ?: return true
+        return try {
+            val active = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(active) ?: return false
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    private fun noteTrackpadActivity() {
+        if (!activeHostIsLan || isInBackground) return
+        lastMouseActivityNs = System.nanoTime()
+        synchronized(stateLock) {
+            if (!activeHostIsLan || isInBackground || !_isAuthenticated.value) return
+            if (!isOnWifiNetwork()) {
+                releaseWifiLockLocked()
+                return
+            }
+            acquireWifiLockLocked()
+            if (wifiLockIdleJob?.isActive != true) {
+                val timeoutNs = wifiLockIdleTimeoutMs.coerceAtLeast(100L) * 1_000_000L
+                wifiLockIdleJob = scope.launch {
+                    while (isActive) {
+                        val elapsedNs = System.nanoTime() - lastMouseActivityNs
+                        val remainingMs = ((timeoutNs - elapsedNs) / 1_000_000L).coerceAtLeast(0L)
+                        if (remainingMs == 0L) {
+                            synchronized(stateLock) {
+                                if ((System.nanoTime() - lastMouseActivityNs) >= timeoutNs) {
+                                    releaseWifiLockLocked()
+                                    if (wifiLockIdleJob === coroutineContext[Job]) {
+                                        wifiLockIdleJob = null
+                                    }
+                                }
+                            }
+                            break
+                        }
+                        delay(remainingMs.coerceAtLeast(50L))
+                    }
+                }
+            }
+        }
+    }
+
     private fun acquireWifiLockLocked() {
         val wm = wifiManager ?: return
-        if (isInBackground || !activeHostIsLan) return
+        if (isInBackground || !activeHostIsLan || !isOnWifiNetwork()) return
         try {
             if (wifiLock == null) {
                 val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -662,6 +808,8 @@ class NetworkClient(
     }
 
     private fun releaseWifiLockLocked() {
+        wifiLockIdleJob?.cancel()
+        wifiLockIdleJob = null
         try {
             val lock = wifiLock
             if (lock != null && lock.isHeld) {
@@ -678,12 +826,18 @@ class NetworkClient(
             pendingWsMoveDx = 0f
             pendingWsMoveDy = 0f
             hasPendingWsMove = false
+            wsTouchFlushJob?.cancel()
+            wsTouchFlushJob = null
+            pendingWsTouchpad = null
         }
     }
 
     private fun handleDisconnectedLocked() {
         clearPendingWsMoves()
         releaseWifiLockLocked()
+        udpReprobeJob?.cancel()
+        udpReprobeJob = null
+        activeUdpSpec = null
         closeUdpChannelLocked()
         activeHostIsLan = false
         webSocket = null
@@ -695,6 +849,8 @@ class NetworkClient(
         _isEncrypted.value = false
         _supportsUnicodeDirectTyping.value = true
         _supportsHiResWheel.value = false
+        _supportsNativeTouchpad.value = false
+        _nativeTouchpadMaxCoord.value = com.silentinput.app.model.NativeTouchpadMapper.LEGACY_MAX_COORD
         _daemonVersion.value = null
         stopPingLoopLocked()
 
@@ -759,6 +915,8 @@ class NetworkClient(
             reconnectJob?.cancel()
             reconnectJob = null
             _isReconnecting.value = false
+            udpReprobeJob?.cancel()
+            udpReprobeJob = null
             stopPingLoopLocked()
             releaseWifiLockLocked()
         }
@@ -782,12 +940,19 @@ class NetworkClient(
      * Resume foreground heartbeat if still connected, or immediately reconnect if suspended/dropped.
      */
     override fun exitBackground() {
+        var udpToStart: UdpMouseChannel? = null
         synchronized(stateLock) {
             isInBackground = false
             val ws = webSocket
             if (_isConnected.value && ws != null) {
-                if (_isAuthenticated.value) {
-                    acquireWifiLockLocked()
+                val spec = activeUdpSpec
+                if (_isAuthenticated.value &&
+                    spec != null &&
+                    spec.webSocket === ws &&
+                    udpMouseChannel?.isReady != true &&
+                    (System.nanoTime() - lastUdpProbeStartedNs) >= FOREGROUND_UDP_REPROBE_MIN_GAP_NS
+                ) {
+                    udpToStart = startUdpChannelLocked(spec)
                 }
                 startPingLoopLocked(ws)
             } else if (shouldBeConnected && !_isConnecting.value) {
@@ -799,6 +964,7 @@ class NetworkClient(
                 doConnectLocked()
             }
         }
+        udpToStart?.start()
     }
 
     fun shouldSuppressAutoReconnectOnResume(): Boolean {
@@ -880,36 +1046,133 @@ class NetworkClient(
         return sendJson(ProtocolPayloads.buildKeyJson(key, action = action))
     }
 
-    override fun sendMouse(dx: Float, dy: Float, action: String, wheel: Float): Boolean {
-        val hiRes = _supportsHiResWheel.value
-        if (action == MouseAction.MOVE.wireValue || action == MouseAction.SCROLL.wireValue) {
-            val udp = udpMouseChannel
-            if (udp != null && udp.isReady) {
-                if (action == MouseAction.MOVE.wireValue) {
-                    val ix = if (dx.isFinite()) dx.roundToInt() else 0
-                    val iy = if (dy.isFinite()) dy.roundToInt() else 0
-                    if (ix != 0 || iy != 0) {
-                        udp.enqueueMove(ix, iy)
-                    }
-                } else {
-                    val iw = if (wheel.isFinite()) wheel.roundToInt() else 0
-                    if (iw != 0) {
-                        udp.enqueueScroll(iw, hiRes = hiRes)
+    override fun sendTouchpadFrame(contacts: List<TouchpadContact>, isTransition: Boolean): Boolean {
+        noteTrackpadActivity()
+        val udp = udpMouseChannel
+        if (udp != null && udp.isReady) {
+            udp.enqueueTouchpadFrame(contacts, isTransition)
+            return true
+        }
+        val ws = webSocket ?: return false
+        if (isTransition || !activeHostIsLan) {
+            var sendFailed = false
+            synchronized(wsMoveLock) {
+                val stale = pendingWsTouchpad
+                pendingWsTouchpad = null
+                if (stale != null && stale != contacts && !ws.send(ProtocolPayloads.buildTouchpadJson(stale))) {
+                    sendFailed = true
+                }
+                if (!sendFailed && !ws.send(ProtocolPayloads.buildTouchpadJson(contacts))) {
+                    sendFailed = true
+                }
+            }
+            if (sendFailed) {
+                handleWsSendFailure(ws)
+                return false
+            }
+            return true
+        }
+        var sendFailed = false
+        synchronized(wsMoveLock) {
+            if (pendingWsTouchpad == null && ws.queueSize() == 0L) {
+                sendFailed = !ws.send(ProtocolPayloads.buildTouchpadJson(contacts))
+            } else {
+                pendingWsTouchpad = contacts
+                if (wsTouchFlushJob?.isActive != true) {
+                    wsTouchFlushJob = scope.launch {
+                        while (isActive && webSocket === ws) {
+                            delay(WS_MOVE_COALESCE_INTERVAL_MS)
+                            if (!flushPendingWsTouchpad(ws)) break
+                            val morePending = synchronized(wsMoveLock) { pendingWsTouchpad != null }
+                            if (!morePending) break
+                        }
+                        synchronized(wsMoveLock) {
+                            if (wsTouchFlushJob === coroutineContext[Job]) {
+                                wsTouchFlushJob = null
+                            }
+                        }
                     }
                 }
-                return true
             }
         }
-        if (action == MouseAction.MOVE.wireValue && wheel == 0f) {
+        if (sendFailed) {
+            handleWsSendFailure(ws)
+            return false
+        }
+        return true
+    }
+
+    private fun flushPendingWsTouchpad(expectedWs: WebSocket): Boolean {
+        var sendFailed = false
+        synchronized(wsMoveLock) {
+            val pending = pendingWsTouchpad ?: return true
+            pendingWsTouchpad = null
+            sendFailed = !expectedWs.send(ProtocolPayloads.buildTouchpadJson(pending))
+        }
+        if (sendFailed) {
+            handleWsSendFailure(expectedWs)
+            return false
+        }
+        return true
+    }
+
+    override fun sendMouse(dx: Float, dy: Float, action: String, wheel: Float, hwheel: Float): Boolean {
+        val hiRes = _supportsHiResWheel.value
+        val isMotionOrScroll = action == MouseAction.MOVE.wireValue || action == MouseAction.SCROLL.wireValue
+        if (isMotionOrScroll) {
+            noteTrackpadActivity()
+        }
+        val udp = udpMouseChannel
+        if (isMotionOrScroll && udp != null && udp.isReady) {
+            if (action == MouseAction.MOVE.wireValue) {
+                val ix = if (dx.isFinite()) dx.roundToInt() else 0
+                val iy = if (dy.isFinite()) dy.roundToInt() else 0
+                if (ix != 0 || iy != 0) {
+                    udp.enqueueMove(ix, iy)
+                }
+            } else {
+                val iw = if (wheel.isFinite()) wheel.roundToInt() else 0
+                val ihw = if (hwheel.isFinite()) hwheel.roundToInt() else 0
+                if (iw != 0 || ihw != 0) {
+                    udp.enqueueScroll(iw, hiRes = hiRes, hwheel = ihw)
+                }
+            }
+            return true
+        }
+        if (action == MouseAction.MOVE.wireValue && wheel == 0f && hwheel == 0f) {
             return enqueueOrSendWsMove(dx, dy)
+        }
+        val isButtonAction = action == MouseAction.CLICK_LEFT.wireValue ||
+            action == MouseAction.CLICK_RIGHT.wireValue ||
+            action == MouseAction.DOWN_LEFT.wireValue ||
+            action == MouseAction.UP_LEFT.wireValue ||
+            action == "down_right" ||
+            action == "up_right"
+        if (isButtonAction && udp != null && udp.isReady) {
+            val barrier = udp.drainUnsentMoveAndLastSeq()
+            val preMove = if (barrier.pendingDx != 0 || barrier.pendingDy != 0) {
+                barrier.pendingDx.toFloat() to barrier.pendingDy.toFloat()
+            } else {
+                null
+            }
+            return sendJson(
+                ProtocolPayloads.buildMouseJson(
+                    dx = dx,
+                    dy = dy,
+                    action = action,
+                    udpSeq = barrier.lastSentSeq
+                ),
+                preMove = preMove
+            )
         }
         return sendJson(
             ProtocolPayloads.buildMouseJson(
-                dx,
-                dy,
+                dx = dx,
+                dy = dy,
                 action = action,
                 wheel = wheel,
-                hiResWheel = action == MouseAction.SCROLL.wireValue && hiRes
+                hiResWheel = action == MouseAction.SCROLL.wireValue && hiRes,
+                hwheel = hwheel
             )
         )
     }
@@ -982,26 +1245,40 @@ class NetworkClient(
         return true
     }
 
-    private fun sendJson(payload: String): Boolean {
+    private fun sendJson(payload: String, preMove: Pair<Float, Float>? = null): Boolean {
         val ws = webSocket ?: return false
         var sendFailed = false
         synchronized(wsMoveLock) {
+            var moveDx = 0f
+            var moveDy = 0f
+            var hasMoveToFlush = false
             if (hasPendingWsMove) {
-                val dx = pendingWsMoveDx
-                val dy = pendingWsMoveDy
+                moveDx += pendingWsMoveDx
+                moveDy += pendingWsMoveDy
                 pendingWsMoveDx = 0f
                 pendingWsMoveDy = 0f
                 hasPendingWsMove = false
-                if (dx != 0f || dy != 0f) {
-                    val movePayload = ProtocolPayloads.buildMouseJson(
-                        dx,
-                        dy,
-                        action = MouseAction.MOVE.wireValue
-                    )
-                    if (!ws.send(movePayload)) {
-                        sendFailed = true
-                    }
+                hasMoveToFlush = true
+            }
+            if (preMove != null) {
+                moveDx += preMove.first
+                moveDy += preMove.second
+                hasMoveToFlush = true
+            }
+            if (hasMoveToFlush && (moveDx != 0f || moveDy != 0f)) {
+                val movePayload = ProtocolPayloads.buildMouseJson(
+                    moveDx,
+                    moveDy,
+                    action = MouseAction.MOVE.wireValue
+                )
+                if (!ws.send(movePayload)) {
+                    sendFailed = true
                 }
+            }
+            val pendingTouch = pendingWsTouchpad
+            pendingWsTouchpad = null
+            if (!sendFailed && pendingTouch != null && !ws.send(ProtocolPayloads.buildTouchpadJson(pendingTouch))) {
+                sendFailed = true
             }
             if (!sendFailed && !ws.send(payload)) {
                 sendFailed = true
@@ -1029,6 +1306,9 @@ class NetworkClient(
         clearPendingWsMoves()
         releaseWifiLockLocked()
         stopPingLoopLocked()
+        udpReprobeJob?.cancel()
+        udpReprobeJob = null
+        activeUdpSpec = null
         closeUdpChannelLocked()
         activeHostIsLan = false
         val wasConnected = _isConnected.value
@@ -1041,6 +1321,8 @@ class NetworkClient(
         _isEncrypted.value = false
         _supportsUnicodeDirectTyping.value = true
         _supportsHiResWheel.value = false
+        _supportsNativeTouchpad.value = false
+        _nativeTouchpadMaxCoord.value = com.silentinput.app.model.NativeTouchpadMapper.LEGACY_MAX_COORD
         _daemonVersion.value = null
         try {
             if (wasConnected) {

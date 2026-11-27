@@ -105,6 +105,7 @@ enum Message {
     OpenQrPairing,
     ExpireModeSelected(PickOption),
     ToggleUsbNoAuth(bool),
+    ToggleRestoreClipboard(bool),
     ToggleTls(bool),
     CopyIp(String),
     AclModeSelected(PickOption),
@@ -518,6 +519,12 @@ impl ControlCenterState {
             Message::ToggleUsbNoAuth(enable) => {
                 self.config_generation += 1;
                 self.config.allow_usb_unauthenticated = enable;
+                let _ = save_config_at(&self.paths, &self.config);
+                Task::none()
+            }
+            Message::ToggleRestoreClipboard(enable) => {
+                self.config_generation += 1;
+                self.config.restore_clipboard = enable;
                 let _ = save_config_at(&self.paths, &self.config);
                 Task::none()
             }
@@ -1295,6 +1302,13 @@ impl ControlCenterState {
                             .size(22),
                     ]
                     .align_y(Alignment::Center),
+                    setting_row(
+                        t(zh, "粘贴后还原剪贴板", "Restore Clipboard After Paste"),
+                        toggler(self.config.restore_clipboard)
+                            .on_toggle(Message::ToggleRestoreClipboard)
+                            .style(style::toggler_style)
+                            .size(22),
+                    ),
                     setting_row(
                         t(zh, "TLS 传输加密 (WSS)", "TLS Encryption (WSS)"),
                         toggler(self.config.enable_tls)

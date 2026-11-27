@@ -49,6 +49,18 @@ class ProtocolPayloadsTest {
             """{"type":"mouse","dx":0.0,"dy":0.0,"action":"scroll","wheel":-1.0}""",
             ProtocolPayloads.buildMouseJson(Float.NaN, Float.POSITIVE_INFINITY, action = "scroll", wheel = -1.0f)
         )
+        assertEquals(
+            """{"type":"mouse","dx":0.0,"dy":0.0,"action":"scroll","wheel_hi":60,"hwheel_hi":-120}""",
+            ProtocolPayloads.buildMouseJson(0f, 0f, action = "scroll", wheel = 60f, hiResWheel = true, hwheel = -120f)
+        )
+        assertEquals(
+            """{"type":"mouse","dx":0.0,"dy":0.0,"action":"scroll","hwheel":2.0}""",
+            ProtocolPayloads.buildMouseJson(0f, 0f, action = "scroll", wheel = 0f, hiResWheel = false, hwheel = 2f)
+        )
+        assertEquals(
+            """{"type":"mouse","dx":0.0,"dy":0.0,"action":"click_left","udp_seq":42}""",
+            ProtocolPayloads.buildMouseJson(0f, 0f, action = "click_left", udpSeq = 42L)
+        )
     }
 
     @Test
@@ -114,8 +126,21 @@ class ProtocolPayloadsTest {
             ProtocolPayloads.parseServerMessage("""{"type": "status", "unicode_direct_typing": true, "extra": [1, 2]}""")
         )
         assertEquals(
-            ServerMessage.Status(true, "1.0.20"),
-            ProtocolPayloads.parseServerMessage("""{"type":"status","unicode_direct_typing":true,"version":"1.0.20"}""")
+            ServerMessage.Status(true, "1.0.20", hiResWheel = true, nativeTouchpad = true, touchpadMax = 16000),
+            ProtocolPayloads.parseServerMessage("""{"type":"status","unicode_direct_typing":true,"version":"1.0.20","hi_res_wheel":true,"native_touchpad":true,"touchpad_max":16000}""")
+        )
+        assertEquals(
+            """{"type":"touchpad","c":[[0,4000,14100],[2,14500,4300]]}""",
+            ProtocolPayloads.buildTouchpadJson(
+                listOf(
+                    TouchpadContact(0, 4000, 14100),
+                    TouchpadContact(2, 14500, 4300)
+                )
+            )
+        )
+        assertEquals(
+            """{"type":"touchpad","c":[]}""",
+            ProtocolPayloads.buildTouchpadJson(emptyList())
         )
         assertEquals(
             ServerMessage.PasteResult("busy", "Input queue full, please slow down."),

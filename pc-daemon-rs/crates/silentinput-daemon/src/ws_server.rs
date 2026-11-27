@@ -409,6 +409,7 @@ pub async fn handle_ws_stream<S>(
                         paste_lock: Arc::clone(&deps.paste_lock),
                         paste_semaphore: Arc::clone(&deps.paste_semaphore),
                         udp_registry: Some(&deps.udp_registry),
+                        udp_session_id: udp_guard.session_id,
                     },
                 )
                 .await;

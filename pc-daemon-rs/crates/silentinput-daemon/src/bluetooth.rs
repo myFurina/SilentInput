@@ -229,6 +229,7 @@ pub async fn handle_bt_stream<S>(
                         paste_lock: Arc::clone(&deps.paste_lock),
                         paste_semaphore: Arc::clone(&deps.paste_semaphore),
                         udp_registry: None,
+                        udp_session_id: None,
                     },
                 )
                 .await;

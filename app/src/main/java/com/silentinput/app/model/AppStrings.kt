@@ -19,6 +19,249 @@ enum class ResolvedLanguage {
     EN
 }
 
+data class TuningParamCopy(
+    val short: String,
+    val title: String,
+    val hint: String
+)
+
+data class TrackpadTuningStrings(
+    val proTuneBtn: String,
+    val presetPrecise: String,
+    val presetBalanced: String,
+    val presetFast: String,
+    val presetRaw: String,
+    val antiLiftWhip: String,
+    val scrollAxisLock: String,
+    val autoGravityRotation: String,
+    val catBasic: String,
+    val catCurve: String,
+    val catCorrection: String,
+    val resetDesc: String,
+    val closeDesc: String,
+    val params: Map<TuningParam, TuningParamCopy>
+) {
+    fun paramCopy(param: TuningParam): TuningParamCopy = params.getValue(param)
+
+    companion object {
+        val ZH = TrackpadTuningStrings(
+            proTuneBtn = "手感",
+            presetPrecise = "精准",
+            presetBalanced = "均衡",
+            presetFast = "疾速",
+            presetRaw = "直出",
+            antiLiftWhip = "防甩尾",
+            scrollAxisLock = "滚轮锁轴",
+            autoGravityRotation = "重力纠偏",
+            catBasic = "基础",
+            catCurve = "曲线",
+            catCorrection = "校正",
+            resetDesc = "恢复默认参数",
+            closeDesc = "收起调参面板",
+            params = mapOf(
+                TuningParam.POINTER_SPEED to TuningParamCopy(
+                    short = "速度",
+                    title = "指针速度",
+                    hint = "基础移动倍率 · 越大单位滑动位移越长"
+                ),
+                TuningParam.SCROLL_SPEED to TuningParamCopy(
+                    short = "滚动",
+                    title = "滚动速度",
+                    hint = "独立调节双指滚动快慢 · 不影响指针精度"
+                ),
+                TuningParam.POINTER_ACCEL to TuningParamCopy(
+                    short = "加速",
+                    title = "快滑加速",
+                    hint = "0 为纯粹线性 · 越高快甩跨屏越明显"
+                ),
+                TuningParam.SMOOTHING to TuningParamCopy(
+                    short = "平滑",
+                    title = "防抖平滑",
+                    hint = "自适应滤波消除手抖 · 越大越稳但略增跟手延迟"
+                ),
+                TuningParam.DEADZONE to TuningParamCopy(
+                    short = "死区",
+                    title = "起始死区",
+                    hint = "抑制落指瞬间微颤 · 0mm 为零延迟响应"
+                ),
+                TuningParam.MULTI_TOUCH_COALESCE to TuningParamCopy(
+                    short = "多指",
+                    title = "落指合并",
+                    hint = "双指/三指起手同步窗口 · 越大越防误判单指"
+                ),
+                TuningParam.Y_AXIS_RATIO to TuningParamCopy(
+                    short = "纵横比",
+                    title = "纵向比例",
+                    hint = "Y 轴相对 X 轴倍率 · 手机控宽屏建议调低至 0.7x~0.9x"
+                ),
+                TuningParam.LOW_SPEED_PRECISION to TuningParamCopy(
+                    short = "微操",
+                    title = "低速精度",
+                    hint = "慢移时自动减速稳准 · 正常和快滑不受影响"
+                ),
+                TuningParam.ACCEL_THRESHOLD to TuningParamCopy(
+                    short = "阈值",
+                    title = "加速阈值",
+                    hint = "超过该手速才开启加速 · 越大越接近日常 1:1 线性"
+                ),
+                TuningParam.ACCEL_CURVE to TuningParamCopy(
+                    short = "曲线",
+                    title = "加速幂次",
+                    hint = "小于 1 柔和起跳 · 大于 1 前稳后冲"
+                ),
+                TuningParam.SPEED_CAP to TuningParamCopy(
+                    short = "封顶",
+                    title = "最高倍率",
+                    hint = "限制快甩时的最大加速倍数 · 防止光标飞丢"
+                ),
+                TuningParam.POINTER_INERTIA to TuningParamCopy(
+                    short = "惯性",
+                    title = "指针滑行",
+                    hint = "快甩松手后带阻尼滑行 · 跨屏更省手指"
+                ),
+                TuningParam.ROTATION_DEG to TuningParamCopy(
+                    short = "角度",
+                    title = "握持旋转",
+                    hint = "手动补偿握持偏角 · 整块触控板同步旋转"
+                ),
+                TuningParam.ANGLE_SNAPPING to TuningParamCopy(
+                    short = "拉直",
+                    title = "直线吸附",
+                    hint = "接近横/竖时轻微吸附拉直 · 方便选字与拖滑块"
+                ),
+                TuningParam.EDGE_PALM_MM to TuningParamCopy(
+                    short = "防误触",
+                    title = "边缘保护",
+                    hint = "忽略左右与底边误触宽度 · 展开面板时显示保护区"
+                ),
+                TuningParam.PREDICTION_MS to TuningParamCopy(
+                    short = "预测",
+                    title = "前瞻预测",
+                    hint = "按速度补偿无线传输延迟 · 过高可能轻微过冲"
+                ),
+                TuningParam.SCROLL_FLING_FRICTION to TuningParamCopy(
+                    short = "阻尼",
+                    title = "滚轮阻尼",
+                    hint = "控制双指滚屏惯性衰减 · 越大停得越干脆"
+                ),
+                TuningParam.TAP_TOLERANCE_MM to TuningParamCopy(
+                    short = "轻点",
+                    title = "轻点容差",
+                    hint = "鼠标模式下点击允许的指尖微动毫米数"
+                )
+            )
+        )
+
+        val EN = TrackpadTuningStrings(
+            proTuneBtn = "Tune",
+            presetPrecise = "Precise",
+            presetBalanced = "Balanced",
+            presetFast = "Fast",
+            presetRaw = "Raw",
+            antiLiftWhip = "Anti-Whip",
+            scrollAxisLock = "Axis Lock",
+            autoGravityRotation = "Auto Tilt",
+            catBasic = "Basic",
+            catCurve = "Curve",
+            catCorrection = "Adjust",
+            resetDesc = "Reset tuning to defaults",
+            closeDesc = "Close tuning deck",
+            params = mapOf(
+                TuningParam.POINTER_SPEED to TuningParamCopy(
+                    short = "Speed",
+                    title = "Pointer Speed",
+                    hint = "Base cursor speed multiplier"
+                ),
+                TuningParam.SCROLL_SPEED to TuningParamCopy(
+                    short = "Scroll",
+                    title = "Scroll Speed",
+                    hint = "Two-finger scroll speed multiplier"
+                ),
+                TuningParam.POINTER_ACCEL to TuningParamCopy(
+                    short = "Accel",
+                    title = "Acceleration",
+                    hint = "0 = linear · higher boosts fast flicks"
+                ),
+                TuningParam.SMOOTHING to TuningParamCopy(
+                    short = "Smooth",
+                    title = "Smoothing",
+                    hint = "Adaptive filter to reduce hand tremor"
+                ),
+                TuningParam.DEADZONE to TuningParamCopy(
+                    short = "Deadzone",
+                    title = "Deadzone",
+                    hint = "Ignores tiny wobble on initial touch"
+                ),
+                TuningParam.MULTI_TOUCH_COALESCE to TuningParamCopy(
+                    short = "Merge",
+                    title = "Multi-Touch Merge",
+                    hint = "Syncs staggered 2-finger landing"
+                ),
+                TuningParam.Y_AXIS_RATIO to TuningParamCopy(
+                    short = "Y Ratio",
+                    title = "Vertical Ratio",
+                    hint = "Y speed vs X · ~0.8x for wide screens"
+                ),
+                TuningParam.LOW_SPEED_PRECISION to TuningParamCopy(
+                    short = "Micro",
+                    title = "Micro Precision",
+                    hint = "Slows tiny aim without affecting swipes"
+                ),
+                TuningParam.ACCEL_THRESHOLD to TuningParamCopy(
+                    short = "Thresh",
+                    title = "Accel Threshold",
+                    hint = "Min finger speed before accel kicks in"
+                ),
+                TuningParam.ACCEL_CURVE to TuningParamCopy(
+                    short = "Curve",
+                    title = "Accel Curve",
+                    hint = "< 1 smooth rise · > 1 strong flick kick"
+                ),
+                TuningParam.SPEED_CAP to TuningParamCopy(
+                    short = "Cap",
+                    title = "Speed Cap",
+                    hint = "Max multiplier limit for fast flicks"
+                ),
+                TuningParam.POINTER_INERTIA to TuningParamCopy(
+                    short = "Coast",
+                    title = "Pointer Coast",
+                    hint = "Adds smooth glide after fast flicks"
+                ),
+                TuningParam.ROTATION_DEG to TuningParamCopy(
+                    short = "Angle",
+                    title = "Grip Rotation",
+                    hint = "Manual tilt angle for whole trackpad"
+                ),
+                TuningParam.ANGLE_SNAPPING to TuningParamCopy(
+                    short = "Snap",
+                    title = "Angle Snap",
+                    hint = "Softly straightens horizontal/vertical"
+                ),
+                TuningParam.EDGE_PALM_MM to TuningParamCopy(
+                    short = "Palm",
+                    title = "Edge Guard",
+                    hint = "Blocks palm touches on side/bottom edges"
+                ),
+                TuningParam.PREDICTION_MS to TuningParamCopy(
+                    short = "Predict",
+                    title = "Prediction",
+                    hint = "Velocity lead to offset wireless lag"
+                ),
+                TuningParam.SCROLL_FLING_FRICTION to TuningParamCopy(
+                    short = "Brake",
+                    title = "Scroll Brake",
+                    hint = "Higher stops scroll momentum faster"
+                ),
+                TuningParam.TAP_TOLERANCE_MM to TuningParamCopy(
+                    short = "Tap",
+                    title = "Tap Tolerance",
+                    hint = "Allowed finger wobble for clicks"
+                )
+            )
+        )
+    }
+}
+
 data class QuickEditStrings(
     val title: String,
     val subtitle: String,
@@ -273,6 +516,8 @@ data class AppStrings(
     val darkModeSubtitle: String,
     val inlineTrackpadTitle: String,
     val inlineTrackpadSubtitle: String,
+    val nativeTouchpadTitle: String,
+    val nativeTouchpadSubtitle: String,
     val naturalScrollingTitle: String,
     val naturalScrollingSubtitle: String,
     val imeSwitchTitle: String,
@@ -339,11 +584,13 @@ data class AppStrings(
     val tpScreenshotBtn: String,
     val tpHoldingHint: String,
     val tpDefaultHint: String,
+    val tpNativeHint: String,
     val tpSurfaceStandaloneDefaultHint: String,
     val tpReleaseLeftBtn: String,
     val tpLeftBtn: String,
     val tpRightBtn: String,
     val tpSensitivityLabel: (formatted: String) -> String,
+    val tpTuning: TrackpadTuningStrings,
 
     // Text Sender Screen
     val txtTitle: String,
@@ -365,6 +612,7 @@ data class AppStrings(
     val txtCursorBackspace: String,
     val txtCursorEnter: String,
     val txtInlineTrackpadHint: String,
+    val txtInlineNativeTrackpadHint: String,
     val txtTextTooLongError: (limit: Int) -> String,
     val txtQueueBusyToast: String,
     val quickEdit: QuickEditStrings
@@ -521,6 +769,8 @@ data class AppStrings(
             darkModeSubtitle = "",
             inlineTrackpadTitle = "文本页内嵌触控板",
             inlineTrackpadSubtitle = "",
+            nativeTouchpadTitle = "原生触摸板模式",
+            nativeTouchpadSubtitle = "使用内核多指触摸板驱动（需新版电脑端，支持三指/捏合手势）",
             naturalScrollingTitle = "自然滚动",
             naturalScrollingSubtitle = "双指滑动与内容同向",
             imeSwitchTitle = "输入法切换键",
@@ -583,12 +833,14 @@ data class AppStrings(
             tpDragSelectBtn = "框选拖拽",
             tpScreenshotBtn = "截屏",
             tpHoldingHint = "按住左键拖拽中 · 轻点松开",
-            tpDefaultHint = "单指移动 · 双指滚动 · 轻点左键 · 长按右键",
-            tpSurfaceStandaloneDefaultHint = "单指移动 · 双指滚动 · 轻点左键",
+            tpDefaultHint = "单指移动 · 轻点左键 · 双击拖拽\n双指滚轮/右键 · 三指滑切工作区/概览",
+            tpNativeHint = "原生触摸板 · 1:1 跟手多指滚动 / 三指切工作区 / 捏合缩放",
+            tpSurfaceStandaloneDefaultHint = "单指移动 · 双击拖拽 · 双指滚轮/右键 · 三指切工作区",
             tpReleaseLeftBtn = "松开左键",
             tpLeftBtn = "左键",
             tpRightBtn = "右键",
             tpSensitivityLabel = { formatted -> "灵敏度: $formatted" },
+            tpTuning = TrackpadTuningStrings.ZH,
 
             txtTitle = "文本输入",
             txtPlaceholder = "在此输入文本...",
@@ -609,6 +861,7 @@ data class AppStrings(
             txtCursorBackspace = "退格",
             txtCursorEnter = "⏎",
             txtInlineTrackpadHint = "单指移动 · 双指滚动 · 轻点左键",
+            txtInlineNativeTrackpadHint = "原生触摸板 · 1:1 多指手势 · 轻点左键",
             txtTextTooLongError = { limit -> "文本过长 (已超出 $limit 字上限)" },
             txtQueueBusyToast = "电脑输入队列已满，请稍后再试",
             quickEdit = QuickEditStrings.ZH
@@ -765,6 +1018,8 @@ data class AppStrings(
             darkModeSubtitle = "",
             inlineTrackpadTitle = "Inline Trackpad in Text Tab",
             inlineTrackpadSubtitle = "",
+            nativeTouchpadTitle = "Native Touchpad Mode",
+            nativeTouchpadSubtitle = "Kernel multi-touch touchpad driver (3-finger gestures & pinch zoom)",
             naturalScrollingTitle = "Natural Scrolling",
             naturalScrollingSubtitle = "Content follows two-finger swipe direction",
             imeSwitchTitle = "IME Switch Shortcut",
@@ -827,12 +1082,14 @@ data class AppStrings(
             tpDragSelectBtn = "Drag Select",
             tpScreenshotBtn = "PrtSc",
             tpHoldingHint = "Holding left button · Tap to release",
-            tpDefaultHint = "1-finger move · 2-finger scroll · Tap left · Hold right",
-            tpSurfaceStandaloneDefaultHint = "1-finger move · 2-finger scroll · Tap left",
+            tpDefaultHint = "1-finger move/tap · Double-tap drag\n2-finger scroll/right · 3-finger swipe workspace/overview",
+            tpNativeHint = "Native Touchpad · 1:1 gestures / 3-finger workspace / pinch zoom",
+            tpSurfaceStandaloneDefaultHint = "1-finger move · Double-tap drag · 2-finger scroll/right · 3-finger workspace",
             tpReleaseLeftBtn = "Release Left",
             tpLeftBtn = "Left Click",
             tpRightBtn = "Right Click",
             tpSensitivityLabel = { formatted -> "Sensitivity: $formatted" },
+            tpTuning = TrackpadTuningStrings.EN,
 
             txtTitle = "Text Input",
             txtPlaceholder = "Enter text here...",
@@ -853,6 +1110,7 @@ data class AppStrings(
             txtCursorBackspace = "Bksp",
             txtCursorEnter = "⏎",
             txtInlineTrackpadHint = "1-finger move · 2-finger scroll · Tap left-click",
+            txtInlineNativeTrackpadHint = "Native Touchpad · 1:1 multi-touch gestures",
             txtTextTooLongError = { limit -> "Text too long (exceeds $limit characters limit)" },
             txtQueueBusyToast = "PC input queue is busy, please slow down",
             quickEdit = QuickEditStrings.EN

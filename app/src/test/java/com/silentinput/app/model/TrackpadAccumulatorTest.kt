@@ -153,22 +153,53 @@ class TrackpadAccumulatorTest {
     }
 
     @Test
-    fun `gesture processor distinguishes clean tap and long press`() {
+    fun `gesture processor distinguishes single tap double click and tap and drag`() {
         val processor = TrackpadGestureProcessor(TrackpadAccumulator())
-        processor.onPrimaryDown(pointerId = 1, x = 50f, y = 50f, timeMs = 2000L)
+        // 1. Clean single tap -> PENDING_LEFT_CLICK -> timeout emits LEFT_CLICK
+        assertFalse(processor.onPrimaryDown(pointerId = 1, x = 50f, y = 50f, timeMs = 2000L, density = 3.0f))
+        assertEquals(
+            TrackpadGestureProcessor.TapAction.PENDING_LEFT_CLICK,
+            processor.onAllUp(timeMs = 2100L)
+        )
         assertEquals(
             TrackpadGestureProcessor.TapAction.LEFT_CLICK,
-            processor.onAllUp(timeMs = 2120L)
+            processor.onPendingTapTimeout()
         )
 
-        processor.onPrimaryDown(pointerId = 2, x = 50f, y = 50f, timeMs = 3000L)
+        // 2. Fast double tap -> DOUBLE_LEFT_CLICK
+        processor.onPrimaryDown(pointerId = 2, x = 50f, y = 50f, timeMs = 3000L, density = 3.0f)
         assertEquals(
-            TrackpadGestureProcessor.TapAction.RIGHT_CLICK,
-            processor.onLongPressTimeout()
+            TrackpadGestureProcessor.TapAction.PENDING_LEFT_CLICK,
+            processor.onAllUp(timeMs = 3060L)
         )
+        assertFalse(processor.onPrimaryDown(pointerId = 3, x = 54f, y = 52f, timeMs = 3140L, density = 3.0f))
         assertEquals(
-            TrackpadGestureProcessor.TapAction.NONE,
-            processor.onAllUp(timeMs = 3500L)
+            TrackpadGestureProcessor.TapAction.DOUBLE_LEFT_CLICK,
+            processor.onAllUp(timeMs = 3210L)
+        )
+
+        // 3. Double tap and hold + move -> Tap-and-Drag starts left hold and releases on lift
+        processor.onPrimaryDown(pointerId = 4, x = 100f, y = 100f, timeMs = 4000L, density = 3.0f)
+        assertEquals(
+            TrackpadGestureProcessor.TapAction.PENDING_LEFT_CLICK,
+            processor.onAllUp(timeMs = 4070L)
+        )
+        assertFalse(processor.onPrimaryDown(pointerId = 5, x = 102f, y = 100f, timeMs = 4150L, density = 3.0f))
+        val dragOut = processor.onMoveSample(
+            pointerIds = intArrayOf(5),
+            xs = floatArrayOf(120f),
+            ys = floatArrayOf(100f),
+            count = 1,
+            sampleTimeMs = 4166L,
+            density = 3.0f,
+            sensitivity = 1.0f,
+            naturalScrolling = true
+        )
+        assertTrue(dragOut.tapDragStarted)
+        assertTrue(processor.isTapDragging)
+        assertEquals(
+            TrackpadGestureProcessor.TapAction.TAP_DRAG_END,
+            processor.onAllUp(timeMs = 4300L)
         )
     }
 
@@ -242,5 +273,228 @@ class TrackpadAccumulatorTest {
             dx240 += acc240.addAcceleratedMoveDelta(dx = 3f, dy = 0f, dtMs = 4f, density = 3.0f, sensitivity = 1.0f).first
         }
         assertTrue("Expected similar 60Hz ($dx60) vs 240Hz ($dx240) output", kotlin.math.abs(dx60 - dx240) <= 1)
+    }
+
+    @Test
+    fun `gesture processor triggers right click on clean two finger tap without scroll`() {
+        val processor = TrackpadGestureProcessor(TrackpadAccumulator())
+        processor.onPrimaryDown(pointerId = 0, x = 100f, y = 100f, timeMs = 1000L)
+        processor.onPointerDown(pointerId = 1, x = 160f, y = 105f)
+        // Micro-jitter < 3dp stays below scroll slop
+        val out = processor.onMoveSample(
+            pointerIds = intArrayOf(0, 1),
+            xs = floatArrayOf(102f, 162f),
+            ys = floatArrayOf(102f, 107f),
+            count = 2,
+            sampleTimeMs = 1020L,
+            density = 3.0f,
+            sensitivity = 1.0f,
+            naturalScrolling = true
+        )
+        assertEquals(0, out.wheelDelta)
+        assertEquals(0, out.hwheelDelta)
+
+        processor.onPointerUp(pointerId = 1, x = 162f, y = 107f)
+        assertEquals(
+            TrackpadGestureProcessor.TapAction.RIGHT_CLICK,
+            processor.onAllUp(timeMs = 1120L)
+        )
+    }
+
+    @Test
+    fun `two finger scroll emits horizontal wheel respects natural sign and avoids right click`() {
+        val processor = TrackpadGestureProcessor(TrackpadAccumulator())
+        val ids = intArrayOf(0, 1)
+        val xs = floatArrayOf(100f, 160f)
+        val ys = floatArrayOf(200f, 200f)
+
+        processor.onPrimaryDown(pointerId = 0, x = xs[0], y = ys[0], timeMs = 1000L)
+        processor.onPointerDown(pointerId = 1, x = xs[1], y = ys[1])
+
+        // Swipe right 30px (10dp at 3.0x): natural scrolling emits -120 hi-res hwheel
+        xs[0] = 130f
+        xs[1] = 190f
+        val outNatural = processor.onMoveSample(
+            pointerIds = ids,
+            xs = xs,
+            ys = ys,
+            count = 2,
+            sampleTimeMs = 1016L,
+            density = 3.0f,
+            sensitivity = 1.0f,
+            naturalScrolling = true,
+            hiResScroll = true
+        )
+        assertEquals(0, outNatural.wheelDelta)
+        assertEquals(-120, outNatural.hwheelDelta)
+        assertEquals(TrackpadGestureProcessor.TapAction.NONE, processor.onAllUp(timeMs = 1060L))
+
+        val acc = TrackpadAccumulator()
+        // Traditional horizontal mode: swiping right (+30px at 3.0 density) -> +120
+        assertEquals(
+            120,
+            acc.addHiResHScrollDelta(avgDx = 30f, density = 3.0f, sensitivity = 1.0f, naturalScrolling = false)
+        )
+        // Legacy detent horizontal scroll
+        assertEquals(
+            -1,
+            acc.addHScrollDelta(avgDx = 28f, sensitivity = 1.0f, naturalScrolling = true, density = 3.0f)
+        )
+    }
+
+    @Test
+    fun `scroll fling engine decays smoothly and stops below threshold`() {
+        val processor = TrackpadGestureProcessor(TrackpadAccumulator())
+        processor.onPrimaryDown(pointerId = 0, x = 100f, y = 400f, timeMs = 1000L)
+        processor.onPointerDown(pointerId = 1, x = 160f, y = 400f)
+        processor.onMoveSample(
+            pointerIds = intArrayOf(0, 1),
+            xs = floatArrayOf(100f, 160f),
+            ys = floatArrayOf(340f, 340f),
+            count = 2,
+            sampleTimeMs = 1016L,
+            density = 3.0f,
+            sensitivity = 1.0f,
+            naturalScrolling = true,
+            hiResScroll = true
+        )
+        assertEquals(TrackpadGestureProcessor.TapAction.NONE, processor.onAllUp(timeMs = 1030L))
+        val vel = processor.consumeFlingVelocity()
+        assertTrue("Expected vertical-only fling velocity after fast vertical swipe", vel != null && vel.vxPxPerMs == 0f && vel.vyPxPerMs < 0f)
+
+        val engine = ScrollFlingEngine()
+        val flingAcc = TrackpadAccumulator()
+        engine.start(vel!!)
+        assertTrue(engine.isActive)
+        var totalV = 0
+        var ticks = 0
+        while (engine.isActive && ticks < 200) {
+            val (wv, _) = engine.step(
+                dtMs = 16f,
+                density = 3.0f,
+                sensitivity = 1.0f,
+                naturalScrolling = true,
+                hiResScroll = true,
+                accumulator = flingAcc
+            )
+            totalV += wv
+            ticks++
+        }
+        assertFalse(engine.isActive)
+        assertTrue("Expected negative momentum wheel output, got $totalV", totalV < 0)
+    }
+
+    @Test
+    fun `horizontal axis lock suppresses vertical wobble and emits no horizontal fling`() {
+        val processor = TrackpadGestureProcessor(TrackpadAccumulator())
+        val ids = intArrayOf(0, 1)
+        val xs = floatArrayOf(100f, 160f)
+        val ys = floatArrayOf(200f, 200f)
+
+        processor.onPrimaryDown(pointerId = 0, x = xs[0], y = ys[0], timeMs = 1000L)
+        processor.onPointerDown(pointerId = 1, x = xs[1], y = ys[1])
+
+        // Dominant horizontal start (dx=+30, dy=+6) locks gesture horizontally
+        xs[0] = 130f; xs[1] = 190f
+        ys[0] = 206f; ys[1] = 206f
+        val first = processor.onMoveSample(
+            pointerIds = ids,
+            xs = xs,
+            ys = ys,
+            count = 2,
+            sampleTimeMs = 1012L,
+            density = 3.0f,
+            sensitivity = 1.0f,
+            naturalScrolling = true,
+            hiResScroll = true
+        )
+        assertEquals(0, first.wheelDelta)
+        assertEquals(-120, first.hwheelDelta)
+
+        // Subsequent diagonal drift (dx=+30, dy=+25) stays locked to horizontal!
+        xs[0] = 160f; xs[1] = 220f
+        ys[0] = 231f; ys[1] = 231f
+        val second = processor.onMoveSample(
+            pointerIds = ids,
+            xs = xs,
+            ys = ys,
+            count = 2,
+            sampleTimeMs = 1024L,
+            density = 3.0f,
+            sensitivity = 1.0f,
+            naturalScrolling = true,
+            hiResScroll = true
+        )
+        assertEquals(0, second.wheelDelta)
+        assertEquals(-120, second.hwheelDelta)
+
+        // Lifting fast after horizontal swipe produces NO fling so paged views do not skip pages
+        assertEquals(TrackpadGestureProcessor.TapAction.NONE, processor.onAllUp(timeMs = 1030L))
+        assertEquals(null, processor.consumeFlingVelocity())
+    }
+
+    @Test
+    fun `three finger swipe emits workspace or overview gesture once without scroll or click`() {
+        val cases = listOf(
+            (90f to 0f) to TrackpadGestureProcessor.ThreeFingerGesture.SWIPE_RIGHT,
+            (-90f to 0f) to TrackpadGestureProcessor.ThreeFingerGesture.SWIPE_LEFT,
+            (0f to -90f) to TrackpadGestureProcessor.ThreeFingerGesture.SWIPE_UP,
+            (0f to 90f) to TrackpadGestureProcessor.ThreeFingerGesture.SWIPE_DOWN
+        )
+        for ((delta, expected) in cases) {
+            val processor = TrackpadGestureProcessor(TrackpadAccumulator())
+            val ids = intArrayOf(0, 1, 2)
+            val xs = floatArrayOf(100f, 150f, 200f)
+            val ys = floatArrayOf(200f, 200f, 200f)
+            processor.onPrimaryDown(pointerId = 0, x = xs[0], y = ys[0], timeMs = 1000L)
+            processor.onPointerDown(pointerId = 1, x = xs[1], y = ys[1])
+            processor.onPointerDown(pointerId = 2, x = xs[2], y = ys[2])
+
+            for (i in 0..2) {
+                xs[i] += delta.first
+                ys[i] += delta.second
+            }
+            val firstOut = processor.onMoveSample(
+                pointerIds = ids,
+                xs = xs,
+                ys = ys,
+                count = 3,
+                sampleTimeMs = 1020L,
+                density = 3.0f,
+                sensitivity = 1.0f,
+                naturalScrolling = true
+            )
+            assertEquals(expected, firstOut.threeFingerGesture)
+            assertEquals(0, firstOut.wheelDelta)
+            assertEquals(0, firstOut.hwheelDelta)
+
+            // Continued movement in the same gesture must NOT re-trigger
+            for (i in 0..2) {
+                xs[i] += delta.first
+                ys[i] += delta.second
+            }
+            val secondOut = processor.onMoveSample(
+                pointerIds = ids,
+                xs = xs,
+                ys = ys,
+                count = 3,
+                sampleTimeMs = 1040L,
+                density = 3.0f,
+                sensitivity = 1.0f,
+                naturalScrolling = true
+            )
+            assertEquals(null, secondOut.threeFingerGesture)
+            assertEquals(TrackpadGestureProcessor.TapAction.NONE, processor.onAllUp(timeMs = 1080L))
+        }
+    }
+
+    @Test
+    fun `resolvePhysicalDensityFactor uses physical dpi and falls back safely`() {
+        // 480 dpi -> 3.0x regardless of OS display zoom fallback
+        assertEquals(3.0f, resolvePhysicalDensityFactor(xdpi = 480f, ydpi = 480f, fallbackDensity = 2.55f), 0.001f)
+        // Bogus/emulator 0 dpi falls back cleanly
+        assertEquals(2.75f, resolvePhysicalDensityFactor(xdpi = 0f, ydpi = -1f, fallbackDensity = 2.75f), 0.001f)
+        // Single valid axis still works
+        assertEquals(2.5f, resolvePhysicalDensityFactor(xdpi = 400f, ydpi = 10f, fallbackDensity = 3.0f), 0.001f)
     }
 }

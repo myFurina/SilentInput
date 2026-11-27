@@ -1,6 +1,7 @@
 package com.silentinput.app.bluetooth
 
 import com.silentinput.app.model.ProtocolPayloads
+import com.silentinput.app.model.TouchpadContact
 import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
@@ -15,13 +16,16 @@ class BluetoothOutboundQueue {
     private var pendingMoveDy = 0f
     private var hasPendingMove = false
     private var pendingScrollWheel = 0f
+    private var pendingScrollHWheel = 0f
     private var pendingScrollHiRes = false
     private var hasPendingScroll = false
+    private var pendingTouchpad: List<TouchpadContact>? = null
 
     fun enqueueControl(payload: String) {
         synchronized(moveLock) {
             flushPendingMoveLocked()
             flushPendingScrollLocked()
+            flushPendingTouchpadLocked()
             queue.offer(payload)
         }
     }
@@ -29,21 +33,37 @@ class BluetoothOutboundQueue {
     fun enqueueMove(dx: Float, dy: Float) {
         synchronized(moveLock) {
             flushPendingScrollLocked()
+            flushPendingTouchpadLocked()
             pendingMoveDx += dx
             pendingMoveDy += dy
             hasPendingMove = true
         }
     }
 
-    fun enqueueScroll(wheel: Float, hiRes: Boolean) {
+    fun enqueueScroll(wheel: Float, hiRes: Boolean, hwheel: Float = 0f) {
         synchronized(moveLock) {
             flushPendingMoveLocked()
+            flushPendingTouchpadLocked()
             if (hasPendingScroll && pendingScrollHiRes != hiRes) {
                 flushPendingScrollLocked()
             }
             pendingScrollWheel += wheel
+            pendingScrollHWheel += hwheel
             pendingScrollHiRes = hiRes
             hasPendingScroll = true
+        }
+    }
+
+    fun enqueueTouchpad(contacts: List<TouchpadContact>, isTransition: Boolean) {
+        synchronized(moveLock) {
+            flushPendingMoveLocked()
+            flushPendingScrollLocked()
+            if (isTransition) {
+                flushPendingTouchpadLocked()
+                queue.offer(ProtocolPayloads.buildTouchpadJson(contacts))
+            } else {
+                pendingTouchpad = contacts
+            }
         }
     }
 
@@ -78,8 +98,10 @@ class BluetoothOutboundQueue {
             pendingMoveDy = 0f
             hasPendingMove = false
             pendingScrollWheel = 0f
+            pendingScrollHWheel = 0f
             pendingScrollHiRes = false
             hasPendingScroll = false
+            pendingTouchpad = null
         }
     }
 
@@ -98,12 +120,18 @@ class BluetoothOutboundQueue {
                 dy = 0f,
                 action = "scroll",
                 wheel = pendingScrollWheel,
-                hiResWheel = pendingScrollHiRes
+                hiResWheel = pendingScrollHiRes,
+                hwheel = pendingScrollHWheel
             )
             pendingScrollWheel = 0f
+            pendingScrollHWheel = 0f
             pendingScrollHiRes = false
             hasPendingScroll = false
             return payload
+        }
+        pendingTouchpad?.let { contacts ->
+            pendingTouchpad = null
+            return ProtocolPayloads.buildTouchpadJson(contacts)
         }
         return null
     }
@@ -125,12 +153,21 @@ class BluetoothOutboundQueue {
                     dy = 0f,
                     action = "scroll",
                     wheel = pendingScrollWheel,
-                    hiResWheel = pendingScrollHiRes
+                    hiResWheel = pendingScrollHiRes,
+                    hwheel = pendingScrollHWheel
                 )
             )
             pendingScrollWheel = 0f
+            pendingScrollHWheel = 0f
             pendingScrollHiRes = false
             hasPendingScroll = false
+        }
+    }
+
+    private fun flushPendingTouchpadLocked() {
+        pendingTouchpad?.let { contacts ->
+            queue.offer(ProtocolPayloads.buildTouchpadJson(contacts))
+            pendingTouchpad = null
         }
     }
 }

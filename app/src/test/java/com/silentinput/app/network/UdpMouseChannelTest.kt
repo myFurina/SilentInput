@@ -1,5 +1,6 @@
 package com.silentinput.app.network
 
+import com.silentinput.app.model.TouchpadContact
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -14,6 +15,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.Cipher
 
 class UdpMouseChannelTest {
@@ -150,5 +152,205 @@ class UdpMouseChannelTest {
 
         assertTrue(readyFalseLatch.await(2, TimeUnit.SECONDS))
         assertFalse(channel.isReady)
+    }
+
+    @Test
+    fun `udp mouse channel sends FLAG_HWHEEL exposes move barrier and preserves seq across restarts`() {
+        val key = UdpMouseCodec.decodeAes256Key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")!!
+        val sessionId = 0x2233445566778899L
+        val serverSock = DatagramSocket(0, InetAddress.getByName("127.0.0.1"))
+        serverSock.soTimeout = 500
+        val receivedPayloads = CopyOnWriteArrayList<ByteArray>()
+        val seenSeqs = CopyOnWriteArrayList<Long>()
+        val running = AtomicBoolean(true)
+        var serverAckSeq = 0L
+
+        val srvThread = Thread {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val buf = ByteArray(256)
+            val pkt = DatagramPacket(buf, buf.size)
+            while (running.get()) {
+                try {
+                    pkt.setData(buf, 0, buf.size)
+                    serverSock.receive(pkt)
+                    val data = buf.copyOf(pkt.length)
+                    val seq = ByteBuffer.wrap(data, 12, 8).order(ByteOrder.BIG_ENDIAN).long
+                    seenSeqs.add(seq)
+                    when (data.getOrNull(3)) {
+                        UdpMouseCodec.PKT_PROBE -> {
+                            val pt = UdpMouseCodec.openPacket(
+                                secretKey = key,
+                                expectedSessionId = sessionId,
+                                expectedDir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+                                expectedPktType = UdpMouseCodec.PKT_PROBE,
+                                packet = data,
+                                cipher = cipher
+                            )
+                            if (pt != null) {
+                                serverAckSeq++
+                                val ack = UdpMouseCodec.sealPacket(
+                                    secretKey = key,
+                                    pktType = UdpMouseCodec.PKT_PROBE_ACK,
+                                    sessionId = sessionId,
+                                    dir = UdpMouseCodec.DIR_SERVER_TO_CLIENT,
+                                    seq = serverAckSeq,
+                                    plaintext = pt,
+                                    cipher = cipher
+                                )
+                                serverSock.send(DatagramPacket(ack, ack.size, pkt.address, pkt.port))
+                            }
+                        }
+                        UdpMouseCodec.PKT_MOUSE_MOVE -> {
+                            val pt = UdpMouseCodec.openPacket(
+                                secretKey = key,
+                                expectedSessionId = sessionId,
+                                expectedDir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+                                expectedPktType = UdpMouseCodec.PKT_MOUSE_MOVE,
+                                packet = data,
+                                cipher = cipher
+                            )
+                            if (pt != null) {
+                                receivedPayloads.add(pt)
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }.apply { isDaemon = true; start() }
+
+        val sharedSeq = AtomicLong(0L)
+        val ch1 = UdpMouseChannel(
+            host = "127.0.0.1",
+            port = serverSock.localPort,
+            sessionId = sessionId,
+            secretKey = key,
+            seqCounter = sharedSeq
+        )
+        var ch2: UdpMouseChannel? = null
+        try {
+            ch1.start()
+            assertTrue(awaitCondition { ch1.isReady })
+
+            ch1.enqueueMove(5, -2)
+            assertTrue(awaitCondition { receivedPayloads.size >= 1 })
+            ch1.enqueueScroll(wheel = 0, hiRes = true, hwheel = -90)
+            assertTrue(awaitCondition { receivedPayloads.size >= 2 })
+
+            val hwheelBb = ByteBuffer.wrap(receivedPayloads[1], 4, 4).order(ByteOrder.BIG_ENDIAN)
+            assertEquals((-90).toShort(), hwheelBb.short)
+            val flags = hwheelBb.short.toInt() and 0xFFFF
+            assertTrue((flags and UdpMouseCodec.FLAG_HWHEEL) != 0)
+            assertTrue((flags and UdpMouseCodec.FLAG_HI_RES_WHEEL) != 0)
+
+            val barrier = ch1.drainUnsentMoveAndLastSeq()
+            assertTrue(barrier.lastSentSeq >= 2L)
+            ch1.close()
+
+            // Restart a second channel with the same shared seqCounter: sequence must strictly advance
+            val maxSeqBefore = seenSeqs.maxOrNull() ?: 0L
+            ch2 = UdpMouseChannel(
+                host = "127.0.0.1",
+                port = serverSock.localPort,
+                sessionId = sessionId,
+                secretKey = key,
+                seqCounter = sharedSeq
+            )
+            ch2.start()
+            assertTrue(awaitCondition { ch2.isReady })
+            assertTrue((seenSeqs.lastOrNull() ?: 0L) > maxSeqBefore)
+        } finally {
+            running.set(false)
+            ch1.close()
+            ch2?.close()
+            serverSock.close()
+            srvThread.join(500)
+        }
+    }
+
+    @Test
+    fun `udp mouse channel preserves touchpad transitions and sends liftoff safety repeat`() {
+        val key = UdpMouseCodec.decodeAes256Key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")!!
+        val sessionId = 0x3344556677889900L
+        val serverSock = DatagramSocket(0, InetAddress.getByName("127.0.0.1"))
+        serverSock.soTimeout = 500
+        val receivedTouchPayloads = CopyOnWriteArrayList<ByteArray>()
+        val running = AtomicBoolean(true)
+        var serverAckSeq = 0L
+
+        val srvThread = Thread {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val buf = ByteArray(256)
+            val pkt = DatagramPacket(buf, buf.size)
+            while (running.get()) {
+                try {
+                    pkt.setData(buf, 0, buf.size)
+                    serverSock.receive(pkt)
+                    val data = buf.copyOf(pkt.length)
+                    when (data.getOrNull(3)) {
+                        UdpMouseCodec.PKT_PROBE -> {
+                            val pt = UdpMouseCodec.openPacket(
+                                secretKey = key,
+                                expectedSessionId = sessionId,
+                                expectedDir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+                                expectedPktType = UdpMouseCodec.PKT_PROBE,
+                                packet = data,
+                                cipher = cipher
+                            )
+                            if (pt != null) {
+                                serverAckSeq++
+                                val ack = UdpMouseCodec.sealPacket(
+                                    secretKey = key,
+                                    pktType = UdpMouseCodec.PKT_PROBE_ACK,
+                                    sessionId = sessionId,
+                                    dir = UdpMouseCodec.DIR_SERVER_TO_CLIENT,
+                                    seq = serverAckSeq,
+                                    plaintext = pt,
+                                    cipher = cipher
+                                )
+                                serverSock.send(DatagramPacket(ack, ack.size, pkt.address, pkt.port))
+                            }
+                        }
+                        UdpMouseCodec.PKT_TOUCHPAD -> {
+                            val pt = UdpMouseCodec.openPacket(
+                                secretKey = key,
+                                expectedSessionId = sessionId,
+                                expectedDir = UdpMouseCodec.DIR_CLIENT_TO_SERVER,
+                                expectedPktType = UdpMouseCodec.PKT_TOUCHPAD,
+                                packet = data,
+                                cipher = cipher
+                            )
+                            if (pt != null) {
+                                receivedTouchPayloads.add(pt)
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }.apply { isDaemon = true; start() }
+
+        val channel = UdpMouseChannel(
+            host = "127.0.0.1",
+            port = serverSock.localPort,
+            sessionId = sessionId,
+            secretKey = key
+        )
+        try {
+            channel.start()
+            assertTrue(awaitCondition { channel.isReady })
+
+            // Rapid tap: down + empty liftoff queued in immediate succession must preserve both + 15ms safety repeat
+            channel.enqueueTouchpadFrame(listOf(TouchpadContact(0, 4000, 4000)), isTransition = true)
+            channel.enqueueTouchpadFrame(emptyList(), isTransition = true)
+
+            assertTrue(awaitCondition { receivedTouchPayloads.size >= 3 })
+            assertEquals(1, receivedTouchPayloads[0][0].toInt() and 0xFF)
+            assertEquals(0, receivedTouchPayloads[1][0].toInt() and 0xFF)
+            assertEquals(0, receivedTouchPayloads[2][0].toInt() and 0xFF)
+        } finally {
+            running.set(false)
+            channel.close()
+            serverSock.close()
+            srvThread.join(500)
+        }
     }
 }

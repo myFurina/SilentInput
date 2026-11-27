@@ -583,6 +583,21 @@ pub fn clipboard_candidates_for_session(
     out
 }
 
+pub fn clipboard_read_candidates_for_session(
+    has_wayland: bool,
+    has_x11: bool,
+) -> Vec<(&'static str, Vec<&'static str>)> {
+    let mut out: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+    if has_wayland || !has_x11 {
+        out.push(("wl-paste", vec!["--no-newline", "--type", "text"]));
+    }
+    if has_x11 || !has_wayland {
+        out.push(("xclip", vec!["-out", "-selection", "clipboard"]));
+        out.push(("xsel", vec!["--clipboard", "--output"]));
+    }
+    out
+}
+
 pub fn detect_session_capabilities() -> (bool, bool) {
     let uid = unsafe { libc::geteuid() };
     let runtime_dir = env::var("XDG_RUNTIME_DIR")
